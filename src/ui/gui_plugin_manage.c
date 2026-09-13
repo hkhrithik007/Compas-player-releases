@@ -102,7 +102,7 @@ lv_obj_t * gui_plugin_manage_build_screen(void) {
     }
 
     lv_obj_t * scr = build_pill_list_screen("Manage Plugins", generic_back_cb, items, count,
-                                             gui_theme_accent_style(), 6);
+                                             gui_theme_accent_style(), 6, 100);
     lv_obj_add_event_cb(scr, plugin_manage_screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
     finalize_screen_navigation(scr);
     return scr;
@@ -116,7 +116,7 @@ void gui_plugin_manage_init(void) {
 
 void gui_plugin_manage_teardown(void) {
     if (plugin_manage_screen) {
-        lv_obj_del(plugin_manage_screen);
+        lv_obj_delete(plugin_manage_screen);
         plugin_manage_screen = NULL;
     }
 }

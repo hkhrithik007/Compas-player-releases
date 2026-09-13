@@ -8,13 +8,9 @@
  * is preserved, with a new 15-second choice added at the beginning. */
 extern const int SCREEN_TIMEOUT_STEPS[];
 #define SCREEN_TIMEOUT_STEP_COUNT 7
-#define SCREEN_TIMEOUT_MIN_SECONDS 15
-#define SCREEN_TIMEOUT_MAX_SECONDS 1800
 
 extern const int SCREEN_DIM_DELAY_STEPS[];
 #define SCREEN_DIM_DELAY_STEP_COUNT 7
-#define SCREEN_DIM_DELAY_MIN_SECONDS 5
-#define SCREEN_DIM_DELAY_MAX_SECONDS 300
 
 /* Idle-shutdown choices, in minutes -- same discrete-steps reasoning as
  * SCREEN_TIMEOUT_STEPS above. This is a full poweroff (see idle_shutdown.h),
@@ -69,6 +65,12 @@ typedef struct {
      * and powers the device off; plugging power back in powers it back on and
      * resumes automatically. Off by default. */
     bool car_mode_enabled;
+
+    /* In-line remote: Enables the use of Volume +/- buttons on the headphones,
+     * along with single tapping the play/pause button to play/pause,
+     * double tapping to skip to the next track, or triple tapping to go back
+     * to the previous track. On by default. */
+    bool inline_remote_enabled;
 
     /* Lyrics: show lyrics screen when tapping on cover image. On by default. */
     bool lyrics_enabled;

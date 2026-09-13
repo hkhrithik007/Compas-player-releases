@@ -31,7 +31,6 @@
 #include "audio.h"
 #include "audio_output.h"
 #include "file_browser.h"
-#include "text_reader.h"
 #include "hw_buttons.h"
 #include "metadata.h"
 #include "metadata_db.h"
@@ -54,7 +53,6 @@
 #include "bt_media_player.h"
 #endif
 #include "headphone_status.h"
-#include "usb_audio_output.h"
 #include "plugin_manager.h"
 #include "gui_plugin_manage.h"
 #include "led_control.h"
@@ -940,6 +938,7 @@ static void update_timer_cb(lv_timer_t * timer) {
     charge_limiter_poll(current_settings.charge_limiter_enabled, false);
     safe_charging_poll(current_settings.safe_charging_enabled, false);
     led_control_poll(current_settings.led_indicator_enabled);
+    headphone_status_refresh_earpods_adc();
 
     if (current_settings.remote_control_enabled) {
         /* No separate now-playing metadata cache exists in this app beyond
@@ -1078,7 +1077,6 @@ void gui_show_boot_splash(void) {
 }
 
 
-/* build_files_screen moved to gui_library.c */
 
 
 
@@ -1086,7 +1084,6 @@ const char * basename_of(const char * path) {
     const char * slash = strrchr(path, '/');
     return slash ? slash + 1 : path;
 }
-/* group_song_entries moved to gui_library.c */
 
 
 const char * gui_plugin_get_play_mode(void) {
@@ -1323,7 +1320,7 @@ static lv_obj_t * build_stream_media_screen(void) {
  * wrappers instead of calling it directly. */
 void gui_stream_media_teardown(void) {
     if (stream_media_screen) {
-        lv_obj_del(stream_media_screen);
+        lv_obj_delete(stream_media_screen);
         stream_media_screen = NULL;
     }
 }
@@ -1338,7 +1335,7 @@ void gui_stream_media_refresh(void) {
     if (!fresh) return;
     stream_media_screen = fresh;
     gui_navigation_replace_static_screen(2, old, fresh);
-    if (old) lv_obj_del(old);
+    if (old) lv_obj_delete(old);
 }
 
 /* One-shot deferred trigger for a fresh-SD-card/first-run auto rescan --
@@ -1364,6 +1361,7 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
     settings_load(&current_settings);
     db_log_set_enabled(current_settings.db_logging_enabled);
     usb_dac_bridge_set_debug_log_enabled(current_settings.db_logging_enabled);
+    headphone_status_refresh_earpods_adc();
     app_clock_init(current_settings.clock_automatic, current_settings.clock_manual_epoch,
                    current_settings.clock_system_reference);
 #ifndef HOST_BUILD
@@ -1526,6 +1524,9 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
      * against. */
 
     gui_library_init();
+    /* Warms the first ALBUM_THUMBNAIL_CACHE_SIZE album thumbnails into RAM
+     * (and the rest onto disk) before the user ever opens Albums. */
+    gui_library_start_boot_thumbnail_warmup();
     gui_network_init();
     gui_settings_init();
     gui_plugin_manage_init();

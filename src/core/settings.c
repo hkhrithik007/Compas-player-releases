@@ -13,6 +13,10 @@ player_settings_t current_settings;
 #include <string.h>
 #include <unistd.h>
 
+#ifndef HOST_BUILD
+#include <sys/reboot.h>
+#endif
+
 #ifdef HOST_BUILD
   #define SETTINGS_FILE_PATH "./open_hiby_player_settings.txt"
   #define SETTINGS_DIR_PATH "."
@@ -32,55 +36,14 @@ const int IDLE_SHUTDOWN_STEPS[IDLE_SHUTDOWN_STEP_COUNT] = { 10, 15, 30, 60, 120 
 const int SLEEP_TIMER_STEPS[SLEEP_TIMER_STEP_COUNT] = { 5, 10, 15, 20, 30, 45, 60, 90, 120, 180 };
 
 /* Snap hand-edited and legacy values onto the same presets used by the UI. */
-static int nearest_screen_timeout_step(int seconds) {
-    int best = SCREEN_TIMEOUT_STEPS[0];
-    int best_diff = abs(seconds - best);
-    for (int i = 1; i < SCREEN_TIMEOUT_STEP_COUNT; i++) {
-        int diff = abs(seconds - SCREEN_TIMEOUT_STEPS[i]);
+static int nearest_step(int value, const int * steps, int count) {
+    int best = steps[0];
+    int best_diff = abs(value - best);
+    for (int i = 1; i < count; i++) {
+        int diff = abs(value - steps[i]);
         if (diff < best_diff) {
             best_diff = diff;
-            best = SCREEN_TIMEOUT_STEPS[i];
-        }
-    }
-    return best;
-}
-
-static int nearest_screen_dim_delay_step(int seconds) {
-    int best = SCREEN_DIM_DELAY_STEPS[0];
-    int best_diff = abs(seconds - best);
-    for (int i = 1; i < SCREEN_DIM_DELAY_STEP_COUNT; i++) {
-        int diff = abs(seconds - SCREEN_DIM_DELAY_STEPS[i]);
-        if (diff < best_diff) {
-            best_diff = diff;
-            best = SCREEN_DIM_DELAY_STEPS[i];
-        }
-    }
-    return best;
-}
-
-/* Same snapping reasoning as nearest_screen_timeout_step() above. */
-static int nearest_idle_shutdown_step(int minutes) {
-    int best = IDLE_SHUTDOWN_STEPS[0];
-    int best_diff = abs(minutes - best);
-    for (int i = 1; i < IDLE_SHUTDOWN_STEP_COUNT; i++) {
-        int diff = abs(minutes - IDLE_SHUTDOWN_STEPS[i]);
-        if (diff < best_diff) {
-            best_diff = diff;
-            best = IDLE_SHUTDOWN_STEPS[i];
-        }
-    }
-    return best;
-}
-
-/* Same snapping reasoning as nearest_screen_timeout_step() above. */
-static int nearest_sleep_timer_step(int minutes) {
-    int best = SLEEP_TIMER_STEPS[0];
-    int best_diff = abs(minutes - best);
-    for (int i = 1; i < SLEEP_TIMER_STEP_COUNT; i++) {
-        int diff = abs(minutes - SLEEP_TIMER_STEPS[i]);
-        if (diff < best_diff) {
-            best_diff = diff;
-            best = SLEEP_TIMER_STEPS[i];
+            best = steps[i];
         }
     }
     return best;
@@ -98,6 +61,7 @@ static void set_defaults(player_settings_t * out) {
     out->crossfade_enabled = false;
     out->replaygain_mode = 1; /* Per Track -- preserves the old replaygain_enabled=true default */
     out->car_mode_enabled = false;
+    out->inline_remote_enabled = true;
     out->lyrics_enabled = true;
     out->subsonic_url[0] = '\0';
     out->subsonic_username[0] = '\0';
@@ -312,6 +276,8 @@ bool settings_load(player_settings_t * out) {
             out->replaygain_mode = atoi(value);
         } else if (strcmp(key, "car_mode_enabled") == 0) {
             out->car_mode_enabled = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "inline_remote_enabled") == 0) {
+            out->inline_remote_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "lyrics_enabled") == 0) {
             out->lyrics_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "subsonic_url") == 0) {
@@ -450,10 +416,10 @@ bool settings_load(player_settings_t * out) {
         out->idle_suspend_default_migrated = true;
     }
 
-    out->screen_timeout_seconds = nearest_screen_timeout_step(out->screen_timeout_seconds);
-    out->screen_dim_delay_seconds = nearest_screen_dim_delay_step(out->screen_dim_delay_seconds);
-    out->idle_shutdown_minutes = nearest_idle_shutdown_step(out->idle_shutdown_minutes);
-    out->sleep_timer_minutes = nearest_sleep_timer_step(out->sleep_timer_minutes);
+    out->screen_timeout_seconds = nearest_step(out->screen_timeout_seconds, SCREEN_TIMEOUT_STEPS, SCREEN_TIMEOUT_STEP_COUNT);
+    out->screen_dim_delay_seconds = nearest_step(out->screen_dim_delay_seconds, SCREEN_DIM_DELAY_STEPS, SCREEN_DIM_DELAY_STEP_COUNT);
+    out->idle_shutdown_minutes = nearest_step(out->idle_shutdown_minutes, IDLE_SHUTDOWN_STEPS, IDLE_SHUTDOWN_STEP_COUNT);
+    out->sleep_timer_minutes = nearest_step(out->sleep_timer_minutes, SLEEP_TIMER_STEPS, SLEEP_TIMER_STEP_COUNT);
 
     import_legacy_subsonic_servers(out);
     sync_subsonic_saved_sidecar(out);
@@ -487,6 +453,7 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "crossfade=%d\n", settings->crossfade_enabled ? 1 : 0);
     fprintf(f, "replaygain_mode=%d\n", settings->replaygain_mode);
     fprintf(f, "car_mode_enabled=%d\n", settings->car_mode_enabled ? 1 : 0);
+    fprintf(f, "inline_remote_enabled=%d\n", settings->inline_remote_enabled ? 1 : 0);
     fprintf(f, "lyrics_enabled=%d\n", settings->lyrics_enabled ? 1 : 0);
     fprintf(f, "subsonic_url=%s\n", settings->subsonic_url);
     fprintf(f, "subsonic_username=%s\n", settings->subsonic_username);
@@ -644,16 +611,10 @@ void settings_factory_reset(void) {
     remove(SETTINGS_FILE_PATH);
     remove(SETTINGS_TMP_FILE_PATH); /* stray leftover from an interrupted settings_save(), if any -- harmless to attempt even when it doesn't exist */
 
-    /* Reboots immediately, same as idle_shutdown_now()'s /sbin/poweroff and
-     * firmware_update_enter_recovery()'s /sbin/reboot -- this function owns
-     * the whole destructive action end-to-end rather than leaving the
-     * reboot to whatever UI code called it, matching both of those. See
-     * this function's own doc comment in settings.h for why a reboot,
-     * not a live re-apply, is how the reset settings actually take
-     * effect. subprocess_run() just fails to find /sbin/reboot on the host
-     * build (same as idle_shutdown_now()'s own host-build comment) --
-     * harmless there, so this isn't guarded behind #ifndef HOST_BUILD. */
-    char * reboot_argv[] = { (char *) "/sbin/reboot", NULL };
-    subprocess_run(reboot_argv, NULL, 0);
-    DBG_LOG("settings_factory_reset: subprocess_run(/sbin/reboot) returned, still alive\n");
+#ifndef HOST_BUILD
+    sync();
+    execl("/sbin/reboot", "reboot", (char *) NULL);
+    reboot(RB_AUTOBOOT);
+    for (;;) pause();
+#endif
 }

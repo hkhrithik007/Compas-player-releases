@@ -2,6 +2,7 @@
 #define SCREEN_BUILDERS_H
 
 #include "lvgl/lvgl.h"
+#include "board_config.h"
 #include "fallback_font.h"
 #include "launcher_layout.h"
 #include "gui_theme.h"
@@ -26,9 +27,9 @@
  * Topbar assets (clock, battery, wifi, codec badges) are 30px tall, leaving
  * 1px margin above/below them. Consumers derive positions algebraically
  * from this constant. */
-#define STATUS_BAR_CLEARANCE 32
-#define TITLE_ROW_HEIGHT 64
-#define HOME_INDICATOR_BAND_HEIGHT 24
+#define STATUS_BAR_CLEARANCE BOARD_SCALE_PX(32)
+#define TITLE_ROW_HEIGHT BOARD_SCALE_PX(64)
+#define HOME_INDICATOR_BAND_HEIGHT BOARD_SCALE_PX(24)
 
 /* Shared touch-list row geometry -- every tappable row-of-text list
  * (Artists/Albums/Album Artist/Genres/All Songs/group-songs drill-down,
@@ -42,9 +43,9 @@ int32_t ui_list_row_width_wide(void);
 /* Compatibility name used by roomier library lists. Both row-width helpers
  * follow the active display width and intentionally add no outer gutter. */
 #define LIST_ROW_WIDTH_WIDE (ui_list_row_width_wide())
-#define LIST_ROW_HEIGHT 84
+#define LIST_ROW_HEIGHT BOARD_SCALE_PX(84)
 #define MUSIC_LIST_ROW_HEIGHT GUI_MUSIC_ROW_HEIGHT
-#define LIST_ROW_RADIUS 16
+#define LIST_ROW_RADIUS BOARD_SCALE_PX(16)
 #define LIST_ROW_BG_COLOR lv_color_hex(GUI_COLOR_ROW)
 #define LIST_ROW_FONT app_font_22 /* see fallback_font.h -- same metrics as lv_font_montserrat_22, plus a non-Latin fallback */
 #define LIST_ROW_LABEL_INSET GUI_TEXT_INSET
@@ -154,6 +155,24 @@ typedef struct {
     bool has_bg_color;   uint32_t bg_color;   /* 0xRRGGBB */
     bool has_text_color; uint32_t text_color; /* 0xRRGGBB */
     bool has_radius;     int32_t radius;      /* px corner radius */
+
+    /* ---- Optional per-item LIST-MODE overrides, ignored entirely in tile
+     * mode -- build_launcher_menu_screen()'s own per-tile counterpart to its
+     * `layout` argument's shared fields (plugin.set_home_layout(), PLUGINS.md).
+     * Unset (false/0/NULL) means "use `layout`'s own shared value for this
+     * field instead", same convention has_bg_color/has_text_color/has_radius
+     * above already use. Music/Stream Media/Wireless (launcher_layout_config's
+     * screens) leave every one of these unset -- their own layout is
+     * genuinely uniform across every tile, so `layout` alone is enough.
+     * Only Home's build_home_screen() (gui_settings.c), whose per-tile
+     * plugin.set_home_layout() overrides can legitimately differ tile by
+     * tile, ever sets these. ---- */
+    bool has_row_height; int32_t row_height;
+    bool has_row_width;  int32_t row_width;
+    bool has_accessory;  bool accessory;
+    const char * text_size;  /* non-NULL overrides layout's own text_size */
+    const char * text_align; /* non-NULL overrides layout's own align */
+    bool has_icon; bool icon; /* whether THIS item's icon_asset should render at all */
 } icon_grid_item_t;
 
 /* Titled screen: real back-arrow button (top-left, invokes back_btn_cb) and
@@ -348,9 +367,34 @@ const lv_font_t * pill_row_resolve_text_size(const char * text_size);
  * passes 6, today's exact hardcoded value -- see build_pill_list_screen()'s
  * own history). Only plugin.set_home_layout()'s options.row_gap
  * (PLUGINS.md, list mode) ever passes anything else. */
+/* icon_scale_pct: scales every row's own icon (item->icon_asset) the same
+ * way build_icon_grid_screen()'s icon_scale_percent scales a tile's icon --
+ * 100 = PILL_ROW_ICON_PX_DEFAULT (64px), unchanged from before this
+ * parameter existed. Every native call site passes 100. Only build_launcher_
+ * menu_screen()'s list-mode branch (plugin.set_home_layout(), PLUGINS.md)
+ * ever passes anything else, so its own icon_scale_pct argument no longer
+ * gets silently dropped when list_mode is set. */
 lv_obj_t * build_pill_list_screen(const char * title, lv_event_cb_t back_btn_cb,
                                    const pill_list_item_t * items, int item_count,
-                                   lv_style_t * toggle_accent_style, int32_t row_gap);
+                                   lv_style_t * toggle_accent_style, int32_t row_gap,
+                                   int32_t icon_scale_pct);
+
+/* Function pointer signatures matching plugin_manager_get_<target>_list_item_* accessors. */
+typedef int (*plugin_list_item_count_cb_t)(void);
+typedef const char * (*plugin_list_item_label_cb_t)(int index);
+typedef void (*plugin_list_item_options_cb_t)(int index, const char ** out_icon, int32_t * out_height,
+                                              int32_t * out_width, const char ** out_text_size);
+
+/* Appends up to max_items plugin-provided rows to items[] starting at index count,
+ * querying row metadata via the given get_count/get_label/get_options accessors and
+ * routing row clicks to click_cb with (void *)(intptr_t)index as user_data.
+ * Preserves the standard "medium" text_size fallback and chevron accessory styling.
+ * Returns the updated item count (count + rows appended). */
+int append_plugin_list_rows(pill_list_item_t * items, int count, int max_items,
+                            plugin_list_item_count_cb_t get_count_fn,
+                            plugin_list_item_label_cb_t get_label_fn,
+                            plugin_list_item_options_cb_t get_options_fn,
+                            lv_event_cb_t click_cb);
 
 lv_obj_t * build_launcher_menu_screen(const char * title, lv_event_cb_t back_btn_cb,
                                       const icon_grid_item_t * items, int item_count,
@@ -522,9 +566,43 @@ void compact_list_set_row_height(lv_obj_t * list, int32_t row_height);
 void compact_list_set_paged_provider(lv_obj_t * list, compact_list_fetch_page_cb_t fetch_page, void * ctx,
                                       int total_count);
 
-#endif /* SCREEN_BUILDERS_H */
+lv_obj_t * build_subsonic_list_screen(const char * default_title, lv_obj_t ** out_title_label, lv_obj_t ** out_list);
+lv_obj_t * build_confirm_popup(const char * title_text, lv_label_long_mode_t title_long_mode,
+                               lv_obj_t ** out_title, const char * body_text, const char * confirm_text,
+                               lv_color_t confirm_color, lv_event_cb_t confirm_cb, lv_obj_t ** out_confirm_row,
+                               const char * cancel_text, lv_color_t cancel_color, lv_event_cb_t cancel_cb,
+                               lv_obj_t ** out_cancel_row, lv_event_cb_t backdrop_cb, lv_obj_t ** out_backdrop);
+
+typedef struct {
+    lv_obj_t * popup;
+    lv_obj_t * backdrop;
+} gui_popup_t;
+
+void gui_popup_show(gui_popup_t * p);
+void gui_popup_hide(gui_popup_t * p);
+void gui_popup_teardown(gui_popup_t * p);
 
 lv_obj_t * add_pill_row_base(lv_obj_t * parent, const char * label_text);
 lv_obj_t * add_pill_toggle_row(lv_obj_t * parent, const char * label_text, bool checked, lv_event_cb_t on_click);
 lv_obj_t * add_pill_chevron_row(lv_obj_t * parent, const char * label_text, lv_event_cb_t on_click);
+lv_obj_t * add_pill_option_row(lv_obj_t * parent, const char * label_text, bool selected,
+                              lv_event_cb_t on_click, void * user_data);
 lv_obj_t * add_section_header(lv_obj_t * parent, const char * text);
+
+int find_nearest_step_index(const int * steps, int count, int value);
+
+/* Builds the shared "rounded card + slider + centered value label" widget
+ * tree used by several settings screens (screen timeout, screen dimming,
+ * startup volume, sleep timer, idle shutdown), including the gesture-bubble
+ * removal and swipe dead zone registration every one of them repeats.
+ * track_top_offset lets a caller that adds its own caption label above the
+ * slider (idle shutdown) push the slider down within the card. Does NOT set
+ * the value label's initial text (callers use different formats) or the
+ * card's hidden flag (callers use different enabled conditions) -- set both
+ * via the returned card / *out_value_label after the call. */
+lv_obj_t * build_setting_slider_card(lv_obj_t * parent, lv_obj_t * align_target, int32_t card_height,
+                                      int32_t track_top_offset, int32_t min_range, int32_t max_range,
+                                      int32_t initial_val, lv_event_cb_t slider_cb,
+                                      lv_obj_t ** out_slider, lv_obj_t ** out_value_label);
+
+#endif /* SCREEN_BUILDERS_H */

@@ -49,13 +49,13 @@ static void * text_entry_user_data;
  * Column 0 holds mode buttons (123/ABC/sym); columns 1-3 hold the 3x3
  * letter/digit/symbol pad; column 4 holds Del, Key 0/Shift, and Enter
  * (spanning rows 2-3). Row 3 holds Left, Right, and Space (cols 2-3). ---- */
-#define TEXT_ENTRY_KEY_SIZE 94
-#define TEXT_ENTRY_KEY_GAP 2
+#define TEXT_ENTRY_KEY_SIZE BOARD_SCALE_PX(94)
+#define TEXT_ENTRY_KEY_GAP BOARD_SCALE_PX(2)
 #define TEXT_ENTRY_GRID_COLS 5
 #define TEXT_ENTRY_GRID_ROWS 4
 #define TEXT_ENTRY_GRID_WIDTH (TEXT_ENTRY_GRID_COLS * TEXT_ENTRY_KEY_SIZE + (TEXT_ENTRY_GRID_COLS - 1) * TEXT_ENTRY_KEY_GAP)
 #define TEXT_ENTRY_GRID_HEIGHT (TEXT_ENTRY_GRID_ROWS * TEXT_ENTRY_KEY_SIZE + (TEXT_ENTRY_GRID_ROWS - 1) * TEXT_ENTRY_KEY_GAP)
-#define TEXT_ENTRY_BOTTOM_MARGIN 16
+#define TEXT_ENTRY_BOTTOM_MARGIN BOARD_SCALE_PX(16)
 #define TEXT_ENTRY_GRID_X ((BOARD_SCREEN_WIDTH - TEXT_ENTRY_GRID_WIDTH) / 2)
 #define TEXT_ENTRY_GRID_Y (BOARD_SCREEN_HEIGHT - TEXT_ENTRY_GRID_HEIGHT - TEXT_ENTRY_BOTTOM_MARGIN)
 #define TEXT_ENTRY_MULTITAP_MS 900
@@ -731,7 +731,7 @@ void gui_text_input_teardown(void) {
      * below rather than under one shared early-return, so it's still
      * cleaned up even if the two ever get out of sync. */
     if (text_entry_multitap_timer) { lv_timer_del(text_entry_multitap_timer); text_entry_multitap_timer = NULL; }
-    if (text_entry_screen) { lv_obj_del(text_entry_screen); text_entry_screen = NULL; }
+    if (text_entry_screen) { lv_obj_delete(text_entry_screen); text_entry_screen = NULL; }
 }
 
 lv_obj_t * gui_text_input_get_screen(void) {

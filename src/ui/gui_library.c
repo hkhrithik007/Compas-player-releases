@@ -18,7 +18,6 @@ void refresh_artist_albums_now_playing_indicator(void);
 #include "gui_notifications.h"
 #include "gui_settings.h"
 #include "gui_text_input.h"
-#include "gui_subsonic.h"
 #include "gui_books.h"
 #include "fallback_font.h"
 #include "plugin_manager.h"
@@ -155,7 +154,6 @@ extern void finalize_screen_navigation(lv_obj_t * screen);
 extern void on_file_selected(char ** new_playlist, int count, int selected_index);
 extern const char * playlist_path_at(int index);
 extern void enable_gesture_bubble_recursive(lv_obj_t * obj);
-extern lv_obj_t * build_confirm_popup(const char * title_text, lv_label_long_mode_t title_long_mode, lv_obj_t ** out_title, const char * body_text, const char * confirm_text, lv_color_t confirm_color, lv_event_cb_t confirm_cb, lv_obj_t ** out_confirm_row, const char * cancel_text, lv_color_t cancel_color, lv_event_cb_t cancel_cb, lv_obj_t ** out_cancel_row, lv_event_cb_t backdrop_cb, lv_obj_t ** out_backdrop);
 extern void register_static_snapshot(int index, lv_obj_t * screen);
 extern void unregister_static_snapshot(lv_obj_t * screen);
 
@@ -747,11 +745,11 @@ static void layout_music_submenu_row_text(lv_obj_t * row) {
     lv_obj_t * primary = lv_obj_get_child(row, 0);
     lv_obj_t * secondary = lv_obj_get_child(row, 1);
     if (lv_obj_has_flag(secondary, LV_OBJ_FLAG_HIDDEN)) {
-        lv_obj_set_y(primary, 28);
+        lv_obj_set_y(primary, BOARD_SCALE_PX(28));
         return;
     }
-    lv_obj_set_y(primary, 18);
-    lv_obj_set_y(secondary, 62);
+    lv_obj_set_y(primary, BOARD_SCALE_PX(18));
+    lv_obj_set_y(secondary, BOARD_SCALE_PX(62));
 }
 
 /* Positions/shows or hides group_songs_now_playing_bar against the CURRENT
@@ -838,29 +836,29 @@ static void populate_group_songs_rows(void) {
 
     for (int i = group_songs_page_start; i < page_end; i++) {
         if (editing) {
-            lv_obj_t * row = build_music_list_row(group_songs_list, group_songs_entries[i].title, NULL, 190);
+            lv_obj_t * row = build_music_list_row(group_songs_list, group_songs_entries[i].title, NULL, BOARD_SCALE_PX(190));
             if (group_songs_music_submenu) lv_obj_set_width(row, lv_pct(100));
             group_songs_visible_rows[i - group_songs_page_start] = row;
             if (group_songs_music_submenu) layout_music_submenu_row_text(row);
             for (int direction = 0; direction < 2; direction++) {
                 lv_obj_t * move = lv_label_create(row);
                 lv_label_set_text(move, direction ? LV_SYMBOL_DOWN : LV_SYMBOL_UP);
-                lv_obj_align(move, LV_ALIGN_RIGHT_MID, direction ? -80 : -130, 0);
-                lv_obj_set_ext_click_area(move, 12);
+                lv_obj_align(move, LV_ALIGN_RIGHT_MID, direction ? BOARD_SCALE_PX(-80) : BOARD_SCALE_PX(-130), 0);
+                lv_obj_set_ext_click_area(move, BOARD_SCALE_PX(12));
                 lv_obj_add_flag(move, LV_OBJ_FLAG_CLICKABLE);
                 lv_obj_add_event_cb(move, group_song_move_row_cb, LV_EVENT_CLICKED, (void *) (intptr_t) (i * 2 + direction));
             }
 
             lv_obj_t * remove_icon = lv_image_create(row);
             lv_image_set_src(remove_icon, asset_path("touch_list/del.png"));
-            lv_obj_align(remove_icon, LV_ALIGN_RIGHT_MID, -20, 0);
+            lv_obj_align(remove_icon, LV_ALIGN_RIGHT_MID, BOARD_SCALE_PX(-20), 0);
             lv_obj_add_flag(remove_icon, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_add_event_cb(remove_icon, group_song_remove_row_cb, LV_EVENT_CLICKED, (void *) (intptr_t) i);
         } else {
             /* One lv_label via the shared list_row_style, not a container +
              * child label each with their own local style properties -- see
              * list_row_style's own doc comment (screen_builders.h). */
-            lv_obj_t * row = build_music_list_row(group_songs_list, group_songs_entries[i].title, NULL, 70);
+            lv_obj_t * row = build_music_list_row(group_songs_list, group_songs_entries[i].title, NULL, BOARD_SCALE_PX(70));
             if (group_songs_music_submenu) lv_obj_set_width(row, lv_pct(100));
             group_songs_visible_rows[i - group_songs_page_start] = row;
             if (group_songs_music_submenu) layout_music_submenu_row_text(row);
@@ -870,7 +868,7 @@ static void populate_group_songs_rows(void) {
             /* Child alignment is relative to the label's padded content
              * box. Cancel the 70px text reserve so the badge is physically
              * 14px from the card edge (same rule as compact-list rows). */
-            lv_obj_align(quality, LV_ALIGN_RIGHT_MID, -14, 0);
+            lv_obj_align(quality, LV_ALIGN_RIGHT_MID, BOARD_SCALE_PX(-14), 0);
             lv_obj_remove_flag(quality, LV_OBJ_FLAG_CLICKABLE);
 
             lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
@@ -898,7 +896,7 @@ static void populate_group_songs_rows(void) {
      * open, e.g. a gapless auto-advance to the next track in the group. */
     group_songs_now_playing_bar = lv_obj_create(group_songs_list);
     lv_obj_remove_style_all(group_songs_now_playing_bar);
-    lv_obj_set_size(group_songs_now_playing_bar, 5, MUSIC_LIST_ROW_HEIGHT);
+    lv_obj_set_size(group_songs_now_playing_bar, BOARD_SCALE_PX(5), MUSIC_LIST_ROW_HEIGHT);
     lv_obj_set_style_bg_color(group_songs_now_playing_bar, accent_lv_color(), 0);
     lv_obj_set_style_bg_opa(group_songs_now_playing_bar, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(group_songs_now_playing_bar, 2, 0);
@@ -1014,7 +1012,7 @@ static lv_obj_t * build_group_songs_screen(void) {
     lv_label_set_text(group_songs_edit_btn, "Edit");
     lv_obj_set_style_text_color(group_songs_edit_btn, accent_lv_color(), 0);
     lv_obj_set_style_text_font(group_songs_edit_btn, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
-    align_screen_header_action(group_songs_edit_btn, 20);
+    align_screen_header_action(group_songs_edit_btn, BOARD_SCALE_PX(20));
     lv_obj_add_flag(group_songs_edit_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(group_songs_edit_btn, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(group_songs_edit_btn, group_songs_edit_btn_cb, LV_EVENT_CLICKED, NULL);
@@ -1084,12 +1082,12 @@ static lv_obj_t * build_group_songs_screen(void) {
 /* ---- Virtualized local-album thumbnails -------------------------------
  * Only the 20 recycled compact-list rows can request artwork. One worker at
  * a time reads/decodes a representative song's embedded or Rockbox albumart
- * file, while a 32-entry RGB565 LRU cache keeps the visible window plus
- * scroll headroom bounded at ~324 KiB. Persistent sized files live in
+ * file, while a 250-entry RGB565 LRU cache keeps the visible window plus
+ * scroll headroom bounded at ~2531 KiB. Persistent sized files live in
  * MUSIC_ROOT_DIR/.open_hiby_player/albumart/<artist>-<album>.72x72.bmp. */
 #define ALBUM_THUMBNAIL_PX ALBUMART_THUMBNAIL_SIZE
 #define ALBUM_PLAYER_CACHE_PX ALBUMART_PLAYER_CACHE_SIZE
-#define ALBUM_THUMBNAIL_CACHE_SIZE 32
+#define ALBUM_THUMBNAIL_CACHE_SIZE 250
 
 typedef struct {
     int64_t song_id;
@@ -1131,6 +1129,31 @@ static album_thumbnail_request_t album_thumbnail_queue[ALBUM_THUMBNAIL_QUEUE_SIZ
 static atomic_bool album_thumbnail_screen_active;
 static int album_thumbnail_queue_count;
 static bool album_thumbnail_scrolling;
+    /* Boot-time RAM cache preload: piggybacks on the existing persistent
+     * warmer thread (album_thumb_gen_thread_func) to also hand its first
+     * ALBUM_THUMBNAIL_CACHE_SIZE decoded thumbnails to the main/LVGL thread
+     * for insertion into album_thumbnail_cache[], instead of only writing the
+     * on-disk sized BMP sidecar. Single-slot rendezvous (like the on-screen
+     * lazy-decode hand-off above) -- the warmer thread blocks after staging
+     * one result until album_thumbnail_poll_cb() has consumed it, so at most
+     * one pending buffer ever exists and the cache array is still only ever
+     * written from the main thread. */
+    static int album_thumb_gen_ram_filled;
+    /* EMPTY: slot free, warmer may stage the next result into it.
+     * PENDING: warmer has staged a result and is waiting.
+     * CLAIMED: album_thumbnail_poll_cb() has taken ownership and is still
+     * reading/committing it -- the warmer must not touch the staged fields
+     * again until this goes back to EMPTY. A plain 2-state pending/not-
+     * pending flag let the warmer's own wait-loop-exit race the callback:
+     * clearing "pending" and THEN reading the payload left a window where
+     * the warmer saw the slot as free and overwrote the fields the callback
+     * was still using. The CAS transitions below close that window. */
+    enum { ALBUM_BOOT_PRELOAD_EMPTY = 0, ALBUM_BOOT_PRELOAD_PENDING, ALBUM_BOOT_PRELOAD_CLAIMED };
+    static atomic_int album_boot_preload_state;
+    static int64_t album_boot_preload_result_song_id;
+    static uint8_t * album_boot_preload_result_pixels;
+    static bool album_boot_preload_result_have_source_mtime;
+    static time_t album_boot_preload_result_source_mtime;
 static bool album_thumbnail_list_is_visible(lv_obj_t * list) {
     if (!list) return false;
     lv_obj_t * active = lv_screen_active();
@@ -1156,6 +1179,99 @@ static void album_thumbnail_cache_clear(void) {
     album_thumbnail_use_counter = 0;
     artwork_failure_cache_clear();
 }
+
+    /* Evicts the LRU slot (or the first unused one) and installs `pixels` (or
+     * a durable "known, no art" marker for a PERMANENT failure) into it.
+     * Shared by the on-screen lazy-decode commit and the boot-time RAM
+     * preload hand-off further below -- both only ever run on the main/LVGL
+     * thread, the only thread allowed to touch album_thumbnail_cache[].
+     * Takes ownership of `pixels`: either stores it or frees it, never both. */
+    static void album_thumbnail_cache_commit(int64_t song_id, uint8_t * pixels,
+                                              bool have_source_mtime, time_t source_mtime) {
+        /* A failed decode (pixels == NULL) is only worth caching as a durable
+         * "known, no art" entry if album_thumbnail_load_or_decode_ex() itself
+         * already recorded it as PERMANENT (corrupt/oversized/genuinely
+         * absent source). A TEMPORARY failure must NOT be cached here the
+         * same way -- album_thumbnail_cache_find()'s only gate is `known`, so
+         * caching it at all would make a transient hiccup permanent for this
+         * song for the rest of this cache slot's lifetime. Leaving the slot
+         * at its just-memset "unused" state (known=false) instead lets a
+         * future request legitimately retry this song. */
+        bool commit_known = pixels != NULL;
+        if (!commit_known && have_source_mtime) {
+            artwork_fail_reason_t fail_reason = ARTWORK_FAIL_NONE;
+            if (artwork_failure_cache_is_blocked(song_id, source_mtime, &fail_reason) &&
+                fail_reason == ARTWORK_FAIL_PERMANENT) {
+                commit_known = true;
+            }
+        }
+        int victim = -1;
+        /* An interrupted-then-restarted boot preload pass can reach the same
+         * song_id twice (it always restarts at offset 0). Without this check
+         * that would waste a second slot on a duplicate instead of just
+         * refreshing the one that's already there. The on-screen lazy-decode
+         * path never hits this: queue_album_thumbnail() already skips
+         * queuing a song album_thumbnail_cache_find() reports as known. A
+         * full pass for the match has to run before the unused/LRU pass
+         * below, which stops at the first unused slot -- a duplicate further
+         * down the array would otherwise never be seen. */
+        for (int i = 0; i < ALBUM_THUMBNAIL_CACHE_SIZE; i++) {
+            if (album_thumbnail_cache[i].known && album_thumbnail_cache[i].song_id == song_id) {
+                victim = i;
+                break;
+            }
+        }
+        /* A TEMPORARY failure must not blank a previously valid entry for
+         * this song. pixels is NULL whenever commit_known is false. */
+        if (victim >= 0 && !commit_known) {
+            free(pixels);
+            return;
+        }
+        if (victim < 0) {
+            uint32_t oldest = UINT32_MAX;
+            for (int i = 0; i < ALBUM_THUMBNAIL_CACHE_SIZE; i++) {
+                if (!album_thumbnail_cache[i].known) { victim = i; break; }
+                if (album_thumbnail_cache[i].last_use < oldest) {
+                    oldest = album_thumbnail_cache[i].last_use;
+                    victim = i;
+                }
+            }
+        }
+        album_thumbnail_cache_entry_t * e = &album_thumbnail_cache[victim];
+        uint8_t * retired_pixels = e->pixels;
+        if (retired_pixels) {
+            /* A leading lv_image can retain &e->dsc after its row last ran
+             * the decorator. Freeing pixels first made that image descriptor
+             * point into released heap memory until the row happened to be
+             * recycled: a redraw/scroll use-after-free on libraries larger
+             * than the LRU. Mark this as a known no-art entry temporarily and
+             * repaint every visible row so all references are detached before
+             * releasing/reusing the slot. */
+            e->pixels = NULL;
+            e->dsc.data = NULL;
+            if (album_thumbnail_active_list)
+                compact_list_refresh_visible(album_thumbnail_active_list);
+            free(retired_pixels);
+        }
+        memset(e, 0, sizeof(*e));
+        if (commit_known) {
+            e->song_id = song_id;
+            e->known = true;
+            e->pixels = pixels;
+            e->last_use = ++album_thumbnail_use_counter;
+            if (e->pixels) {
+                e->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+                e->dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+                e->dsc.header.w = ALBUM_THUMBNAIL_PX;
+                e->dsc.header.h = ALBUM_THUMBNAIL_PX;
+                e->dsc.header.stride = ALBUM_THUMBNAIL_PX * 2;
+                e->dsc.data = e->pixels;
+                e->dsc.data_size = ALBUM_THUMBNAIL_PX * ALBUM_THUMBNAIL_PX * 2;
+            }
+        } else {
+            free(pixels);
+        }
+    }
 
 static bool album_thumbnail_sized_cache_hit(const albumart_info_t * info, char * found, size_t found_size) {
     return albumart_sized_thumb_fresh(info, ALBUM_THUMBNAIL_PX, ALBUM_THUMBNAIL_PX, found, found_size);
@@ -1725,6 +1841,8 @@ static void * album_thumbnail_thread_func(void * arg) {
             albumart_info_from_song_row(&song, &info);
             album_thumbnail_result_source_mtime = album_source_mtime(&song, &info);
             album_thumbnail_result_have_source_mtime = true;
+        } else {
+            artwork_failure_cache_note_success(req->song_id);
         }
     }
     album_thumbnail_result_song_id = req->song_id;
@@ -1822,7 +1940,18 @@ static void * album_thumb_gen_thread_func(void * arg) {
             }
 
             char found[PATH_MAX];
-            if (album_thumbnail_sized_cache_hit(&info, found, sizeof(found)) &&
+            /* Still enter the decode call below for the first ALBUM_THUMBNAIL_
+             * CACHE_SIZE albums even when both persistent caches already exist
+             * -- on every boot after the very first one this is nearly always
+             * true for the whole library, and skipping straight to `continue`
+             * here (as every album past the RAM budget still does) would mean
+             * the RAM-preload hand-off below never runs at all on a normal
+             * boot. album_thumbnail_load_or_decode_ex() already returns the
+             * existing 72px sidecar's pixels immediately in this case without
+             * touching the original source file, so this costs one cheap BMP
+             * read+decode per album instead of a real cache regeneration. */
+            if (album_thumb_gen_ram_filled >= ALBUM_THUMBNAIL_CACHE_SIZE &&
+                album_thumbnail_sized_cache_hit(&info, found, sizeof(found)) &&
                 album_player_cache_hit(&info, found, sizeof(found))) {
                 cached++;
 #ifdef UI_PERF_TRACE
@@ -1840,13 +1969,74 @@ static void * album_thumb_gen_thread_func(void * arg) {
                 (artwork_failure_cache_is_blocked(song.id, source_mtime, &fail_reason) &&
                  fail_reason == ARTWORK_FAIL_TEMPORARY)))
                 atomic_store(&album_thumb_gen_retry_pending, true);
-            if (pixels) generated++; else failed++;
+            if (pixels) { artwork_failure_cache_note_success(song.id); generated++; } else { failed++; }
+            if (!pixels) {
+                artwork_fail_reason_t diag_fail_reason = ARTWORK_FAIL_NONE;
+                bool diag_blocked = artwork_failure_cache_is_blocked(song.id, source_mtime, &diag_fail_reason);
+                DB_LOG("ART_CACHE", "album_failed song=%lld path=%s reason=%s",
+                       (long long) song.id, song.path,
+                       !diag_blocked ? "unrecorded" :
+                       (diag_fail_reason == ARTWORK_FAIL_PERMANENT ? "PERMANENT" : "TEMPORARY"));
+            }
 
 #ifdef UI_PERF_TRACE
             if (pixels) perf_generated++; else perf_failed++;
 #endif
-            free(pixels);
-            atomic_fetch_add(&album_thumb_gen_done_count, 1);
+                if (album_thumb_gen_ram_filled < ALBUM_THUMBNAIL_CACHE_SIZE) {
+                    album_thumb_gen_ram_filled++;
+                    if (album_thumb_gen_should_cancel(my_generation)) {
+                        free(pixels);
+                    } else {
+                        album_boot_preload_result_song_id = song.id;
+                        album_boot_preload_result_pixels = (uint8_t *) pixels;
+                        album_boot_preload_result_have_source_mtime = (pixels == NULL);
+                        album_boot_preload_result_source_mtime = source_mtime;
+                        atomic_store(&album_boot_preload_state, ALBUM_BOOT_PRELOAD_PENDING);
+                        /* Single-slot rendezvous: wait for album_thumbnail_poll_cb()
+                         * (main/LVGL thread) to fully finish with this result before
+                         * decoding the next album, so at most one handed-off buffer
+                         * is ever outstanding and the cache array is still only ever
+                         * written from the main thread. Waiting for EMPTY specifically
+                         * (not just "not PENDING") matters: once the callback CASes
+                         * PENDING->CLAIMED it still needs to read album_boot_preload_
+                         * result_* before this thread may reuse them for the next
+                         * album -- stopping at "not PENDING" would let this thread
+                         * race ahead and overwrite fields the callback is still
+                         * reading. */
+                        while (atomic_load(&album_boot_preload_state) != ALBUM_BOOT_PRELOAD_EMPTY &&
+                               !album_thumb_gen_should_cancel(my_generation)) {
+                            usleep(5000);
+                        }
+                        /* CAS (not a plain load+store) so exactly one of "we reclaim
+                         * it here because nobody has claimed it yet" and the poll
+                         * callback's own PENDING->CLAIMED transition wins. If the
+                         * callback already claimed it, this CAS fails (state is
+                         * CLAIMED, not PENDING) and the callback alone owns freeing
+                         * or storing the pixels -- it moves the slot back to EMPTY
+                         * once done, which is what the wait loop above is for. */
+                        int expected_state = ALBUM_BOOT_PRELOAD_PENDING;
+                        if (atomic_compare_exchange_strong(&album_boot_preload_state, &expected_state,
+                                                            ALBUM_BOOT_PRELOAD_EMPTY)) {
+                            /* Cancelled while waiting and nobody claimed it first. */
+                            free(album_boot_preload_result_pixels);
+                            album_boot_preload_result_pixels = NULL;
+                        } else {
+                            /* The callback already CASed PENDING->CLAIMED (it can
+                             * race ahead of a should_cancel() that only looked true
+                             * for an instant). CLAIMED is always short-lived -- the
+                             * callback never blocks on anything while holding it --
+                             * so wait it out unconditionally rather than risk this
+                             * thread reusing album_boot_preload_result_* the moment
+                             * should_cancel() flips back to false. */
+                            while (atomic_load(&album_boot_preload_state) != ALBUM_BOOT_PRELOAD_EMPTY) {
+                                usleep(5000);
+                            }
+                        }
+                    }
+                } else {
+                    free(pixels);
+                }
+                atomic_fetch_add(&album_thumb_gen_done_count, 1);
 
             int diag_done = atomic_load(&album_thumb_gen_done_count);
             if ((diag_done % 50) == 0) {
@@ -1897,6 +2087,7 @@ static void start_album_thumbnail_generation(void) {
     cancel_album_thumbnail_generation();
     reap_album_thumbnail_generation();
     atomic_store(&album_thumb_gen_retry_pending, false);
+    album_thumb_gen_ram_filled = 0;
     album_thumb_gen_retry_tick = lv_tick_get();
 
     int artist_count = 0, album_artist_count = 0, album_count = 0;
@@ -1906,6 +2097,13 @@ static void start_album_thumbnail_generation(void) {
     atomic_store(&album_thumb_gen_cancel, false);
     int generation = atomic_fetch_add(&album_thumb_gen_generation, 1) + 1;
     atomic_store(&album_thumb_gen_active, true);
+    /* Only start_next_album_thumbnail()'s own two trigger points used to
+     * need this timer, and both already resume it. The RAM-preload hand-off
+     * below now also depends on it ticking to drain album_boot_preload_
+     * pending -- without this, a cold boot's first generation pass would
+     * stage exactly one result and then block forever with nothing left to
+     * consume it. */
+    if (album_thumbnail_poll_timer) lv_timer_resume(album_thumbnail_poll_timer);
     DB_LOG("ART_CACHE", "start generation=%d albums=%d rss_kb=%ld",
            generation, album_count, db_log_rss_kb());
 
@@ -2037,6 +2235,22 @@ static void album_thumbnail_poll_cb(lv_timer_t * timer) {
      * decode just sits ready a tick or two longer, and this timer keeps
      * rescheduling itself regardless. */
     if (gui_navigation_transition_in_progress()) return;
+    /* CAS claims sole ownership of album_boot_preload_result_* against the
+     * warmer thread's own matching CAS in album_thumb_gen_thread_func() --
+     * see that call site's comment for the full protocol. Moving the slot
+     * back to EMPTY only AFTER the payload is fully read/committed (not
+     * before) is what lets the warmer thread's wait loop safely tell "still
+     * being read by the callback" apart from "free to reuse". */
+    int boot_preload_state = ALBUM_BOOT_PRELOAD_PENDING;
+    if (atomic_compare_exchange_strong(&album_boot_preload_state, &boot_preload_state,
+                                        ALBUM_BOOT_PRELOAD_CLAIMED)) {
+        album_thumbnail_cache_commit(album_boot_preload_result_song_id, album_boot_preload_result_pixels,
+                                      album_boot_preload_result_have_source_mtime,
+                                      album_boot_preload_result_source_mtime);
+        album_boot_preload_result_pixels = NULL;
+        if (album_thumbnail_active_list) compact_list_refresh_visible(album_thumbnail_active_list);
+        atomic_store(&album_boot_preload_state, ALBUM_BOOT_PRELOAD_EMPTY);
+    }
     if (!album_thumbnail_active) {
         start_next_album_thumbnail();
         if (!album_thumbnail_active && !atomic_load(&album_thumb_gen_active)) lv_timer_pause(timer);
@@ -2051,68 +2265,9 @@ static void album_thumbnail_poll_cb(lv_timer_t * timer) {
     bool result_had_art = album_thumbnail_result_pixels != NULL;
     if (album_thumbnail_result_generation == album_thumbnail_generation &&
         album_thumbnail_active_list && album_thumbnail_list_is_visible(album_thumbnail_active_list)) {
-        int victim = -1;
-        uint32_t oldest = UINT32_MAX;
-        for (int i = 0; i < ALBUM_THUMBNAIL_CACHE_SIZE; i++) {
-            if (!album_thumbnail_cache[i].known) { victim = i; break; }
-            if (album_thumbnail_cache[i].last_use < oldest) {
-                oldest = album_thumbnail_cache[i].last_use;
-                victim = i;
-            }
-        }
-        album_thumbnail_cache_entry_t * e = &album_thumbnail_cache[victim];
-        uint8_t * retired_pixels = e->pixels;
-        if (retired_pixels) {
-            /* A leading lv_image can retain &e->dsc after its row last ran
-             * the decorator. Freeing pixels first made that image descriptor
-             * point into released heap memory until the row happened to be
-             * recycled: a redraw/scroll use-after-free on libraries larger
-             * than the LRU. Mark this as a known no-art entry temporarily and
-             * repaint every visible row so all references are detached before
-             * releasing/reusing the slot. */
-            e->pixels = NULL;
-            e->dsc.data = NULL;
-            if (album_thumbnail_active_list)
-                compact_list_refresh_visible(album_thumbnail_active_list);
-            free(retired_pixels);
-        }
-        memset(e, 0, sizeof(*e));
-        /* A failed decode (pixels == NULL) is only worth caching as a durable
-         * "known, no art" entry if album_thumbnail_load_or_decode_ex() itself
-         * already recorded it as PERMANENT (corrupt/oversized/genuinely
-         * absent source). A TEMPORARY failure (memory admission, coordinator
-         * busy, a cancelled/preempted decode) must NOT be cached here the
-         * same way -- album_thumbnail_cache_find()'s only gate is `known`,
-         * so caching it at all previously made a transient hiccup permanent
-         * for this song for the rest of this cache slot's lifetime, with no
-         * retry until unrelated LRU pressure happened to evict it. Leaving
-         * the slot at its just-memset "unused" state (known=false) instead
-         * lets queue_album_thumbnail() legitimately retry this song next
-         * time it scrolls back into view. */
-        bool commit_known = album_thumbnail_result_pixels != NULL;
-        if (!commit_known && album_thumbnail_result_have_source_mtime) {
-            artwork_fail_reason_t fail_reason = ARTWORK_FAIL_NONE;
-            if (artwork_failure_cache_is_blocked(album_thumbnail_result_song_id,
-                                                 album_thumbnail_result_source_mtime, &fail_reason) &&
-                fail_reason == ARTWORK_FAIL_PERMANENT) {
-                commit_known = true;
-            }
-        }
-        if (commit_known) {
-            e->song_id = album_thumbnail_result_song_id;
-            e->known = true;
-            e->pixels = album_thumbnail_result_pixels;
-            e->last_use = ++album_thumbnail_use_counter;
-            if (e->pixels) {
-                e->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-                e->dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-                e->dsc.header.w = ALBUM_THUMBNAIL_PX;
-                e->dsc.header.h = ALBUM_THUMBNAIL_PX;
-                e->dsc.header.stride = ALBUM_THUMBNAIL_PX * 2;
-                e->dsc.data = e->pixels;
-                e->dsc.data_size = ALBUM_THUMBNAIL_PX * ALBUM_THUMBNAIL_PX * 2;
-            }
-        }
+        album_thumbnail_cache_commit(album_thumbnail_result_song_id, album_thumbnail_result_pixels,
+                                      album_thumbnail_result_have_source_mtime,
+                                      album_thumbnail_result_source_mtime);
         album_thumbnail_result_pixels = NULL;
         result_applied = true;
     }
@@ -2438,8 +2593,8 @@ static void register_az_index(lv_obj_t * screen, lv_obj_t * list, metadata_db_az
     const lv_font_t * strip_font = &lv_font_montserrat_20;
     int32_t line_h = lv_font_get_line_height(strip_font);
     lv_obj_set_style_text_font(strip, strip_font, 0);
-    lv_obj_set_width(strip, 30);
-    lv_obj_set_style_pad_right(strip, 4, 0);
+    lv_obj_set_width(strip, BOARD_SCALE_PX(30));
+    lv_obj_set_style_pad_right(strip, BOARD_SCALE_PX(4), 0);
     lv_obj_add_style(strip, &style_theme_text_primary, 0);
     lv_obj_set_style_text_align(strip, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_bg_opa(strip, LV_OPA_TRANSP, 0);
@@ -3377,7 +3532,7 @@ static lv_obj_t * add_playlist_row_base(lv_obj_t * parent, const char * label_te
     lv_obj_add_style(label, &style_theme_text_primary, 0);
     lv_obj_set_style_text_font(label, &LIST_ROW_FONT, 0);
     lv_obj_align(label, LV_ALIGN_LEFT_MID, LIST_ROW_LABEL_INSET, 0);
-    configure_scrolling_row_label(label, LIST_ROW_WIDTH_WIDE - LIST_ROW_LABEL_INSET - 60);
+    configure_scrolling_row_label(label, LIST_ROW_WIDTH_WIDE - LIST_ROW_LABEL_INSET - BOARD_SCALE_PX(60));
     if (parent == playlists_list) {
         lv_obj_t * chevron = lv_label_create(row);
         lv_label_set_text(chevron, ">");
@@ -3392,14 +3547,13 @@ static lv_obj_t * add_playlist_row_base(lv_obj_t * parent, const char * label_te
  * never wired onto the Favorites/Most Played/Queue/Recently Added rows (see
  * populate_playlists_screen() below), since none is backed by a real file
  * playlist_files_delete()/playlist_files_rename() could act on. */
-static lv_obj_t * playlist_delete_popup, * playlist_delete_backdrop;
+static gui_popup_t playlist_delete_popup;
 static lv_obj_t * playlist_context_menu_popup, * playlist_context_menu_backdrop;
 static char playlist_action_path[PATH_MAX];
 
 static void playlist_delete_cancel_cb(lv_event_t * e) {
     (void) e;
-    if (playlist_delete_popup) lv_obj_add_flag(playlist_delete_popup, LV_OBJ_FLAG_HIDDEN);
-    if (playlist_delete_backdrop) lv_obj_add_flag(playlist_delete_backdrop, LV_OBJ_FLAG_HIDDEN);
+    gui_popup_hide(&playlist_delete_popup);
 }
 
 static void playlist_delete_confirm_cb(lv_event_t * e) {
@@ -3443,15 +3597,12 @@ static void playlist_context_menu_rename_cb(lv_event_t * e) {
 static void playlist_context_menu_delete_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     hide_playlist_context_menu_popup();
-    if (!playlist_delete_popup)
-        playlist_delete_popup = build_confirm_popup("Delete playlist?", LV_LABEL_LONG_WRAP, NULL,
+    if (!playlist_delete_popup.popup)
+        playlist_delete_popup.popup = build_confirm_popup("Delete playlist?", LV_LABEL_LONG_WRAP, NULL,
             "The playlist file will be deleted. Music files are kept.", "Delete",
             accent_lv_color(), playlist_delete_confirm_cb, NULL, "Cancel", accent_lv_color(),
-            playlist_delete_cancel_cb, NULL, playlist_delete_cancel_cb, &playlist_delete_backdrop);
-    lv_obj_remove_flag(playlist_delete_backdrop, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(playlist_delete_popup, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(playlist_delete_backdrop);
-    lv_obj_move_foreground(playlist_delete_popup);
+            playlist_delete_cancel_cb, NULL, playlist_delete_cancel_cb, &playlist_delete_popup.backdrop);
+    gui_popup_show(&playlist_delete_popup);
 }
 
 static void playlist_context_menu_cancel_cb(lv_event_t * e) {
@@ -3524,7 +3675,7 @@ static void populate_playlists_screen(void) {
         const char * display = playlists_m3u_paths[i];
         if (strncmp(display, PLAYLISTS_DIR "/", strlen(PLAYLISTS_DIR) + 1) == 0) display += strlen(PLAYLISTS_DIR) + 1;
         lv_obj_t * row = add_playlist_row_base(playlists_list, display);
-        lv_obj_set_width(lv_obj_get_child(row, 0), LIST_ROW_WIDTH_WIDE - LIST_ROW_LABEL_INSET - 60);
+        lv_obj_set_width(lv_obj_get_child(row, 0), LIST_ROW_WIDTH_WIDE - LIST_ROW_LABEL_INSET - BOARD_SCALE_PX(60));
         lv_label_set_long_mode(lv_obj_get_child(row, 0), LV_LABEL_LONG_DOT);
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(row, playlist_row_click_cb, LV_EVENT_CLICKED, (void *) (intptr_t) (4 + i));
@@ -4169,19 +4320,15 @@ void poll_sd_format(void) {
     }
 }
 
-static lv_obj_t * sd_mount_failed_popup;
-static lv_obj_t * sd_mount_failed_popup_backdrop;
-static lv_obj_t * sd_format_confirm_popup;
-static lv_obj_t * sd_format_confirm_popup_backdrop;
+static gui_popup_t sd_mount_failed_popup;
+static gui_popup_t sd_format_confirm_popup;
 
 static void hide_sd_mount_failed_popup(void) {
-    lv_obj_add_flag(sd_mount_failed_popup_backdrop, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(sd_mount_failed_popup, LV_OBJ_FLAG_HIDDEN);
+    gui_popup_hide(&sd_mount_failed_popup);
 }
 
 static void hide_sd_format_confirm_popup(void) {
-    lv_obj_add_flag(sd_format_confirm_popup_backdrop, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(sd_format_confirm_popup, LV_OBJ_FLAG_HIDDEN);
+    gui_popup_hide(&sd_format_confirm_popup);
 }
 
 static void sd_mount_failed_popup_backdrop_cb(lv_event_t * e) {
@@ -4207,10 +4354,7 @@ static void sd_format_cancel_cb(lv_event_t * e) {
 static void sd_mount_failed_format_btn_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     hide_sd_mount_failed_popup();
-    lv_obj_remove_flag(sd_format_confirm_popup_backdrop, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(sd_format_confirm_popup, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(sd_format_confirm_popup_backdrop);
-    lv_obj_move_foreground(sd_format_confirm_popup);
+    gui_popup_show(&sd_format_confirm_popup);
 }
 
 static void sd_format_confirm_cb(lv_event_t * e) {
@@ -4221,28 +4365,25 @@ static void sd_format_confirm_cb(lv_event_t * e) {
 
 /* Displayed when persistent SD card mount failure is detected. */
 static void show_sd_mount_failed_popup(void) {
-    lv_obj_remove_flag(sd_mount_failed_popup_backdrop, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(sd_mount_failed_popup, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(sd_mount_failed_popup_backdrop);
-    lv_obj_move_foreground(sd_mount_failed_popup);
+    gui_popup_show(&sd_mount_failed_popup);
 }
 
 static void build_sd_mount_failed_popup(void) {
-    sd_mount_failed_popup = build_confirm_popup(
+    sd_mount_failed_popup.popup = build_confirm_popup(
         "SD card couldn't be read", LV_LABEL_LONG_WRAP, NULL,
         "It may have no partition table or a file system this player can't use. "
         "Formatting will erase it and set it up for this player.",
         "Format SD Card", lv_color_make(255, 120, 120), sd_mount_failed_format_btn_cb, NULL, "Dismiss",
         accent_lv_color(), sd_mount_failed_dismiss_cb, NULL, sd_mount_failed_popup_backdrop_cb,
-        &sd_mount_failed_popup_backdrop);
+        &sd_mount_failed_popup.backdrop);
 }
 
 static void build_sd_format_confirm_popup(void) {
-    sd_format_confirm_popup = build_confirm_popup(
+    sd_format_confirm_popup.popup = build_confirm_popup(
         "Erase and format SD card?", LV_LABEL_LONG_WRAP, NULL,
         "This permanently deletes everything on the card. This cannot be undone.", "Format",
         lv_color_make(255, 120, 120), sd_format_confirm_cb, NULL, "Cancel", accent_lv_color(), sd_format_cancel_cb,
-        NULL, sd_format_confirm_popup_backdrop_cb, &sd_format_confirm_popup_backdrop);
+        NULL, sd_format_confirm_popup_backdrop_cb, &sd_format_confirm_popup.backdrop);
 }
 
 /* Power-off countdown -- shown when hw_buttons_consume_power_long_press()
@@ -4257,16 +4398,13 @@ static void build_sd_format_confirm_popup(void) {
  * beyond that. */
 #define POWER_OFF_COUNTDOWN_SECONDS 3
 
-static lv_obj_t * power_off_countdown_popup;
-static lv_obj_t * power_off_countdown_popup_backdrop;
+static gui_popup_t power_off_countdown_popup;
 static lv_obj_t * power_off_countdown_label;
 static bool power_off_countdown_active = false;
 static uint32_t power_off_countdown_start_tick;
 
 static void hide_power_off_countdown_popup(void) {
-    /* Null-check ensures safe teardown even if countdown popups were not built. */
-    if (power_off_countdown_popup_backdrop) lv_obj_add_flag(power_off_countdown_popup_backdrop, LV_OBJ_FLAG_HIDDEN);
-    if (power_off_countdown_popup) lv_obj_add_flag(power_off_countdown_popup, LV_OBJ_FLAG_HIDDEN);
+    gui_popup_hide(&power_off_countdown_popup);
 }
 
 static void cancel_power_off_countdown(void) {
@@ -4288,10 +4426,7 @@ void start_power_off_countdown(void) {
     power_off_countdown_active = true;
     power_off_countdown_start_tick = lv_tick_get();
     lv_label_set_text_fmt(power_off_countdown_label, "%d", POWER_OFF_COUNTDOWN_SECONDS);
-    lv_obj_remove_flag(power_off_countdown_popup_backdrop, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(power_off_countdown_popup, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(power_off_countdown_popup_backdrop);
-    lv_obj_move_foreground(power_off_countdown_popup);
+    gui_popup_show(&power_off_countdown_popup);
 }
 
 /* Called every tick from update_timer_cb while power_off_countdown_active --
@@ -4317,44 +4452,44 @@ void poll_power_off_countdown(void) {
 void build_power_off_countdown_popup(void) {
     lv_obj_t * top = lv_layer_top();
 
-    power_off_countdown_popup_backdrop = lv_obj_create(top);
-    lv_obj_set_size(power_off_countdown_popup_backdrop, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_bg_color(power_off_countdown_popup_backdrop, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(power_off_countdown_popup_backdrop, LV_OPA_50, 0);
-    lv_obj_set_style_border_width(power_off_countdown_popup_backdrop, 0, 0);
-    lv_obj_remove_flag(power_off_countdown_popup_backdrop, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(power_off_countdown_popup_backdrop, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(power_off_countdown_popup_backdrop, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_event_cb(power_off_countdown_popup_backdrop, power_off_countdown_backdrop_cb, LV_EVENT_CLICKED, NULL);
+    power_off_countdown_popup.backdrop = lv_obj_create(top);
+    lv_obj_set_size(power_off_countdown_popup.backdrop, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_bg_color(power_off_countdown_popup.backdrop, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(power_off_countdown_popup.backdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(power_off_countdown_popup.backdrop, 0, 0);
+    lv_obj_remove_flag(power_off_countdown_popup.backdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(power_off_countdown_popup.backdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(power_off_countdown_popup.backdrop, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(power_off_countdown_popup.backdrop, power_off_countdown_backdrop_cb, LV_EVENT_CLICKED, NULL);
 
-    power_off_countdown_popup = lv_obj_create(top);
-    lv_obj_set_size(power_off_countdown_popup, 320, 280);
-    lv_obj_align(power_off_countdown_popup, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_radius(power_off_countdown_popup, 16, 0);
-    lv_obj_add_style(power_off_countdown_popup, &style_theme_card_bg, 0);
-    lv_obj_set_style_bg_opa(power_off_countdown_popup, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(power_off_countdown_popup, 0, 0);
-    lv_obj_remove_flag(power_off_countdown_popup, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(power_off_countdown_popup, LV_OBJ_FLAG_HIDDEN);
+    power_off_countdown_popup.popup = lv_obj_create(top);
+    lv_obj_set_size(power_off_countdown_popup.popup, BOARD_SCALE_PX(320), BOARD_SCALE_PX(280));
+    lv_obj_align(power_off_countdown_popup.popup, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_radius(power_off_countdown_popup.popup, 16, 0);
+    lv_obj_add_style(power_off_countdown_popup.popup, &style_theme_card_bg, 0);
+    lv_obj_set_style_bg_opa(power_off_countdown_popup.popup, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(power_off_countdown_popup.popup, 0, 0);
+    lv_obj_remove_flag(power_off_countdown_popup.popup, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(power_off_countdown_popup.popup, LV_OBJ_FLAG_HIDDEN);
 
-    lv_obj_t * title = lv_label_create(power_off_countdown_popup);
+    lv_obj_t * title = lv_label_create(power_off_countdown_popup.popup);
     lv_obj_set_width(title, lv_pct(90));
     lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_add_style(title, &style_theme_text_primary, 0);
     lv_obj_set_style_text_font(title, gui_theme_font(GUI_FONT_ROLE_ROW), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, BOARD_SCALE_PX(20));
     lv_label_set_text(title, "Powering Off");
 
-    power_off_countdown_label = lv_label_create(power_off_countdown_popup);
+    power_off_countdown_label = lv_label_create(power_off_countdown_popup.popup);
     lv_obj_add_style(power_off_countdown_label, &style_theme_text_primary, 0);
     lv_obj_set_style_text_font(power_off_countdown_label, gui_theme_font(GUI_FONT_ROLE_TITLE), 0);
-    lv_obj_align(power_off_countdown_label, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_align(power_off_countdown_label, LV_ALIGN_CENTER, 0, BOARD_SCALE_PX(-10));
     lv_label_set_text_fmt(power_off_countdown_label, "%d", POWER_OFF_COUNTDOWN_SECONDS);
 
-    lv_obj_t * cancel_row = lv_obj_create(power_off_countdown_popup);
-    lv_obj_set_size(cancel_row, lv_pct(90), 56);
-    lv_obj_align(cancel_row, LV_ALIGN_BOTTOM_MID, 0, -20);
+	lv_obj_t * cancel_row = lv_obj_create(power_off_countdown_popup.popup);
+	lv_obj_set_size(cancel_row, lv_pct(90), BOARD_SCALE_PX(56));
+	lv_obj_align(cancel_row, LV_ALIGN_BOTTOM_MID, 0, BOARD_SCALE_PX(-20));
     lv_obj_set_style_radius(cancel_row, 12, 0);
     lv_obj_set_style_bg_opa(cancel_row, 0, 0);
     lv_obj_set_style_border_width(cancel_row, 0, 0);
@@ -4434,7 +4569,8 @@ static lv_obj_t * build_music_screen(void) {
      * genre.png/genre_s.png here since Genres no longer has a tile of its
      * own to need it. */
     items[5] = (icon_grid_item_t){ "category/genre.png", "category/genre_s.png", "Playlists", playlists_tile_cb, NULL };
-    lv_obj_t * scr = build_launcher_menu_screen("Music", generic_back_cb, items, 6, 100, false,
+    // icon size percentage is scaled using BOARD_SCALE_PX which is relative to device screen width, so that it look a similar size on all devices
+    lv_obj_t * scr = build_launcher_menu_screen("Music", generic_back_cb, items, 6, BOARD_SCALE_PX(100), false,
                                                  &launcher_layout_config.music);
     /* Same real stock-firmware gear icon as the Queue screen's own Options
      * button (sub_back/set.png) -- build_top_right_icon_button() guarantees
@@ -4452,7 +4588,7 @@ void gui_library_refresh_music_screen(void) {
     if (!fresh) return;
     music_screen = fresh;
     gui_navigation_replace_static_screen(1, old, fresh);
-    if (old) lv_obj_del(old);
+    if (old) lv_obj_delete(old);
 }
 
 
@@ -5079,8 +5215,7 @@ void gui_library_teardown(void) {
     reset_az_index_bindings();
     if (playlist_start_popup) { lv_obj_delete(playlist_start_popup); playlist_start_popup = NULL; }
     if (playlist_start_backdrop) { lv_obj_delete(playlist_start_backdrop); playlist_start_backdrop = NULL; }
-    if (playlist_delete_popup) { lv_obj_delete(playlist_delete_popup); playlist_delete_popup = NULL; }
-    if (playlist_delete_backdrop) { lv_obj_delete(playlist_delete_backdrop); playlist_delete_backdrop = NULL; }
+    gui_popup_teardown(&playlist_delete_popup);
     if (playlist_context_menu_popup) { lv_obj_delete(playlist_context_menu_popup); playlist_context_menu_popup = NULL; }
     if (playlist_context_menu_backdrop) { lv_obj_delete(playlist_context_menu_backdrop); playlist_context_menu_backdrop = NULL; }
     /* poll_power_off_countdown() runs every tick from update_timer_cb,
@@ -5097,48 +5232,44 @@ void gui_library_teardown(void) {
     library_teardown_diag("cancel_power_off_countdown before");
     cancel_power_off_countdown();
     library_teardown_diag("sd_mount_failed_popup before");
-    if (sd_mount_failed_popup) { lv_obj_del(sd_mount_failed_popup); sd_mount_failed_popup = NULL; }
-    library_teardown_diag("sd_mount_failed_popup_backdrop before");
-    if (sd_mount_failed_popup_backdrop) { lv_obj_del(sd_mount_failed_popup_backdrop); sd_mount_failed_popup_backdrop = NULL; }
+    gui_popup_teardown(&sd_mount_failed_popup);
     library_teardown_diag("sd_format_confirm_popup before");
-    if (sd_format_confirm_popup) { lv_obj_del(sd_format_confirm_popup); sd_format_confirm_popup = NULL; }
-    library_teardown_diag("sd_format_confirm_popup_backdrop before");
-    if (sd_format_confirm_popup_backdrop) { lv_obj_del(sd_format_confirm_popup_backdrop); sd_format_confirm_popup_backdrop = NULL; }
+    gui_popup_teardown(&sd_format_confirm_popup);
     library_teardown_diag("collection_menu_popup before");
-    if (collection_menu_popup) { lv_obj_del(collection_menu_popup); collection_menu_popup = NULL; }
+    if (collection_menu_popup) { lv_obj_delete(collection_menu_popup); collection_menu_popup = NULL; }
     library_teardown_diag("collection_menu_backdrop before");
-    if (collection_menu_backdrop) { lv_obj_del(collection_menu_backdrop); collection_menu_backdrop = NULL; }
+    if (collection_menu_backdrop) { lv_obj_delete(collection_menu_backdrop); collection_menu_backdrop = NULL; }
     library_teardown_diag("album_collection_menu_popup before");
-    if (album_collection_menu_popup) { lv_obj_del(album_collection_menu_popup); album_collection_menu_popup = NULL; }
+    if (album_collection_menu_popup) { lv_obj_delete(album_collection_menu_popup); album_collection_menu_popup = NULL; }
     library_teardown_diag("album_collection_menu_backdrop before");
     if (album_collection_menu_backdrop) {
-        lv_obj_del(album_collection_menu_backdrop);
+        lv_obj_delete(album_collection_menu_backdrop);
         album_collection_menu_backdrop = NULL;
     }
     library_teardown_diag("music_screen before");
-    if (music_screen) { lv_obj_del(music_screen); music_screen = NULL; }
+    if (music_screen) { lv_obj_delete(music_screen); music_screen = NULL; }
     library_teardown_diag("files_screen before");
-    if (files_screen) { lv_obj_del(files_screen); files_screen = NULL; }
+    if (files_screen) { lv_obj_delete(files_screen); files_screen = NULL; }
     library_teardown_diag("all_songs_screen before");
-    if (all_songs_screen) { lv_obj_del(all_songs_screen); all_songs_screen = NULL; }
+    if (all_songs_screen) { lv_obj_delete(all_songs_screen); all_songs_screen = NULL; }
     library_teardown_diag("recently_added_screen before");
-    if (recently_added_screen) { lv_obj_del(recently_added_screen); recently_added_screen = NULL; }
+    if (recently_added_screen) { lv_obj_delete(recently_added_screen); recently_added_screen = NULL; }
     library_teardown_diag("artists_screen before");
-    if (artists_screen) { lv_obj_del(artists_screen); artists_screen = NULL; }
+    if (artists_screen) { lv_obj_delete(artists_screen); artists_screen = NULL; }
     library_teardown_diag("albums_screen before");
-    if (albums_screen) { lv_obj_del(albums_screen); albums_screen = NULL; }
+    if (albums_screen) { lv_obj_delete(albums_screen); albums_screen = NULL; }
     library_teardown_diag("album_artist_screen before");
-    if (album_artist_screen) { lv_obj_del(album_artist_screen); album_artist_screen = NULL; }
+    if (album_artist_screen) { lv_obj_delete(album_artist_screen); album_artist_screen = NULL; }
     library_teardown_diag("group_songs_screen before");
-    if (group_songs_screen) { lv_obj_del(group_songs_screen); group_songs_screen = NULL; }
+    if (group_songs_screen) { lv_obj_delete(group_songs_screen); group_songs_screen = NULL; }
     library_teardown_diag("artist_albums_screen before");
-    if (artist_albums_screen) { lv_obj_del(artist_albums_screen); artist_albums_screen = NULL; }
+    if (artist_albums_screen) { lv_obj_delete(artist_albums_screen); artist_albums_screen = NULL; }
     library_teardown_diag("playlists_screen before");
-    if (playlists_screen) { lv_obj_del(playlists_screen); playlists_screen = NULL; }
+    if (playlists_screen) { lv_obj_delete(playlists_screen); playlists_screen = NULL; }
     library_teardown_diag("cue_tracks_screen before");
-    if (cue_tracks_screen) { lv_obj_del(cue_tracks_screen); cue_tracks_screen = NULL; }
+    if (cue_tracks_screen) { lv_obj_delete(cue_tracks_screen); cue_tracks_screen = NULL; }
     library_teardown_diag("add_to_playlist_screen before");
-    if (add_to_playlist_screen) { lv_obj_del(add_to_playlist_screen); add_to_playlist_screen = NULL; }
+    if (add_to_playlist_screen) { lv_obj_delete(add_to_playlist_screen); add_to_playlist_screen = NULL; }
     /* The screens owned these children; clear the borrowed pointers with
      * their parents so non-NULL remains a valid liveness check. */
     files_search_list = NULL;
@@ -5166,12 +5297,7 @@ void gui_library_teardown(void) {
      * rebuilt UI forever, invisible only until the next power-off countdown
      * actually shows it. */
     library_teardown_diag("power_off_countdown_popup before");
-    if (power_off_countdown_popup) { lv_obj_del(power_off_countdown_popup); power_off_countdown_popup = NULL; }
-    library_teardown_diag("power_off_countdown_popup_backdrop before");
-    if (power_off_countdown_popup_backdrop) {
-        lv_obj_del(power_off_countdown_popup_backdrop);
-        power_off_countdown_popup_backdrop = NULL;
-    }
+    gui_popup_teardown(&power_off_countdown_popup);
     power_off_countdown_label = NULL;
     library_teardown_diag("done");
 }
@@ -5534,6 +5660,23 @@ void library_load_from_cache_only(void) {
      * handle against the previous (or empty unmounted) mount. */
     metadata_db_close();
     metadata_db_open();
+}
+
+    /* Kicks off the persistent album-art warmer at boot (normally only
+     * started after a rescan or SD reinsert) so its first
+     * ALBUM_THUMBNAIL_CACHE_SIZE decoded thumbnails are already sitting in
+     * album_thumbnail_cache[] before the user ever opens Albums, in addition
+     * to its existing on-disk sized-BMP warming. No-op on a fresh/empty
+     * database, matching every other start_album_thumbnail_generation() call
+     * site's own guard. */
+/* Kicks off the persistent album-art warmer at boot (normally only started
+ * after a rescan or SD reinsert) so its first ALBUM_THUMBNAIL_CACHE_SIZE
+ * decoded thumbnails are already sitting in album_thumbnail_cache[] before
+ * the user ever opens Albums, in addition to its existing on-disk sized-BMP
+ * warming. No-op on a fresh/empty database, matching every other
+ * start_album_thumbnail_generation() call site's own guard. */
+void gui_library_start_boot_thumbnail_warmup(void) {
+    if (metadata_db_get_song_count() > 0) start_album_thumbnail_generation();
 }
 
 bool gui_library_has_background_work(void) {
