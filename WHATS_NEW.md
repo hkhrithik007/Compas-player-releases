@@ -1,99 +1,122 @@
 # What's New
 
-This file is the curated changelog for the next weekly beta. Update it in the
-same pull request or commit as a user-visible player change; every Sunday
-release embeds its current contents and links back to the exact revision used.
+Changes from August 31 to September 14, 2026, for the next weekly beta.
 
-## Beta 2
+This update brings a redesigned player and menus, lyrics that open directly
+from the album cover, smoother navigation, and improvements to audio playback
+and library browsing. It also adds headphone remote controls and clearer
+feedback when a Subsonic connection or library request fails.
 
-- Added runtime plugin management and consolidated theme support, including
-  custom Home layouts and Home-only background images.
-- UI and theme reloads now preserve active Bluetooth, Wi-Fi, remote-control,
-  AirPlay, DLNA, and Wi-Fi Import services while releasing stale UI resources.
-- Reduced memory pressure during plugin reloads, artwork/database scans, long
-  track seeking, and Stock-player handoff.
-- Improved boot selection: Stock always exposes the menu, newer player builds
-  are preferred, and equal builds prefer the internal player.
-- Added manual clock controls, automatic synchronization, 12/24-hour display,
-  and timezone selection under Settings > System > Clock.
-- Added collection action menus for artists, album artists, and albums.
-- Improved long MP3/AAC/Opus seeking and rapid skip/seek recovery.
-- Made volume and brightness dragging responsive while coalescing hardware
-  updates in the background.
-- Added adaptive SD-card readiness handling and clearer boot diagnostics.
+## A refreshed player and interface
 
-## Everything in Beta 2
+- **A new Now Playing layout.** Album art sits in a rounded card over a
+  blurred background drawn from the cover. The title and smaller, gray
+  artist/album line are left-aligned, with a short pause before long text
+  starts scrolling. The cover also shows your position in the queue.
+- **Lyrics stay part of the player.** Tap the cover to shrink it into the
+  upper-left corner, move the track information beside it, and show lyrics
+  below. Tap again to bring back the full cover and playback controls.
+  Fixed a drawer-gesture conflict that hid the return animation. Lyrics can
+  be disabled in Music Controls.
+- **Clearer playback details.** The quality badge expands to show the
+  format, bit depth, and sample rate without scrolling. Its outer ring was
+  removed after it caused visible flickering. The three-dot menu now sits
+  beside the next-track button, and the favorite button is easier to tap.
+- **A more consistent look.** Home, Settings, Wireless, and other main menus
+  have refreshed icons and backgrounds. Net Radio and Audiobooks follow
+  the new menu style too. The status bar uses Lucide icons, including the
+  battery, with a centered clock and sizing independent of text-size settings.
+- **More display options.** Home supports custom background images and
+  individual tile colors through themes and plugins. You can also choose
+  how long the screen waits before dimming. Custom fonts have improved
+  performance and optional emoji support.
 
-This is the first tracked release, so here's the complete feature set, not
-just the delta above.
+## Playback and everyday controls
 
-### Playback
+- Added **SBC-XQ** to Bluetooth codec settings for higher-quality SBC
+  output to compatible headphones. Turn Bluetooth off and on after
+  switching into or out of this mode.
+- Added native 24-bit USB audio output and support for 24-bit crossfades.
+  Improved high-sample-rate playback and fixed USB DAC compatibility with macOS.
+- Improved Bluetooth DAC buffering for longer listening sessions and fixed
+  Bluetooth/USB output write-timeout handling.
+- Improved automatic switching between the R3 Pro II's 3.5mm and 4.4mm
+  outputs. Fixed playback-position restoration after a restart, seek-bar
+  positioning, and EQ preset saving.
+- Added an **In-line Remote** setting for supported wired-headphone
+  controls. It is enabled by default.
+- Reworked playlist and queue handling. Queue state is now stored on the
+  SD card, and the active queue clears when that card is removed.
 
-- FLAC, MP3, WAV, AIFF/AIFF-C, DSD64/128, AAC, ALAC, APE, OPUS
-- Gapless by default, crossfade, ReplayGain track gain
-- 10-band PEQ with saved presets
-- Resume last track (playing or paused), original album context kept
-- Hardware volume/play-pause/next/previous controls
-- Sequential, Repeat All, Repeat One, Shuffle
-- Bluetooth playback, metadata streaming, working DAC output
-- Album art up to 1200x1200, embedded and external (`cover.*`/`folder.*`)
-- Queue / "Up Next" independent of shuffle or repeat
+## Faster browsing and better artwork support
 
-### Music Library
+- More artwork stays cached, reducing repeated thumbnail loading as you
+  browse. Player-sized cover caching and lighter metadata reads also
+  reduce work when opening tracks and lyrics.
+- Added progressive JPEG support and improved handling of large JPEGs,
+  16-bit PNGs, BMPs, and JPEGs with unusual color-sampling layouts. Artwork
+  detection and decoding are more reliable across different files.
+- Album lists now show **Album Artist** information.
+- In Files, the back button and back swipe move up one folder before
+  leaving the browser. Quick swipes are less likely to bounce back, and a
+  crash during player-screen swipe navigation was fixed.
 
-- File browser, All Songs, Artists, Albums, Album Artists
-- Playlists: Favorites, Most Played, user M3U/M3U8, all in one place
-- Real tag scanning: FLAC, MP3 ID3v1/v2, WAV RIFF, M4A
-- Full-screen synced lyrics
-- Incremental database updates on a Rockbox-tagcache backend, no SQLite
-- Paged/virtualized song lists for large libraries
-- SD card hotplug
-- Plain-text book reader with Favorites, scoped to `Books/`
-- Audiobook browsing and playback via the Audiobooks plugin
+## Subsonic and plugins
 
-### Network & Streaming
+- **Subsonic requests now have visible failure feedback.** Connection and
+  library-loading screens have a 30-second UI timeout. Errors distinguish
+  network failures, HTTP responses, and invalid server data instead of
+  silently returning to the previous screen.
+- **Failed artist loading can be retried.** A successful login no longer
+  requires a populated artist list. If the initial artist request fails,
+  opening Artists retries it rather than leaving a permanently empty cache.
+- Added the missing Subsonic download-button icon and improved handling of server
+  addresses with trailing slashes or `/rest`.
+- Last.fm now keeps a persistent queue of scrobbles for upload when the
+  service is reachable again, including after a restart.
+- Plugins can be enabled, disabled, and reloaded from Settings without a
+  firmware reinstall. Fixed unexpected restarts during plugin management
+  and integrated plugin options into Music Settings categories.
+- Added the **MSEB** plugin, with MSEB-inspired sound shaping using the
+  player's own parametric EQ, and improved its navigation.
+  Lock Screen gained a clock over artwork and smoother swipe-up behavior;
+  Play Through also received fixes.
 
-- Subsonic-compatible streaming (Subsonic, Navidrome, Airsonic, others) over HTTPS
-- Optional Subsonic tile on Home, plus Subsonic music downloading
-- DLNA/UPnP-AV renderer, AirPlay support
-- LAN remote control with a browser-based web UI: browse, queue, playlists
-- Wi-Fi music import, all supported file types, stock limits removed
+## Device support, charging, and updates
 
-### Device & Hardware
+- Added board-specific builds and display layouts for **R3 Pro II** and
+  **R3 II 2025**, alongside the R1 build. Hardware support and behavior
+  remain specific to each model.
+- On R3 Pro II, Charge Limiter and Safe Charging now apply voltage and
+  current limits to the dedicated charger, with restoration when disabled.
+  Charging status also reads from the correct hardware source.
+- Improved installation of player updates from the SD card. The bootloader
+  compares build dates so an older installed player does not override a
+  newer player included in a firmware update.
+- Fixed the Firmware Update action powering off instead of rebooting into
+  recovery, and corrected updater status text.
 
-- USB DAC support
-- Smoothed real battery percentage, real Wi-Fi signal strength
-- 85% charge limiter, Safe Charging (500mA) mode
-- Configurable idle shutdown/suspend, car mode
-- More reliable Bluetooth, A2DP status in the top bar
-- Auto-stop playback when audio output disconnects
-- Physical hardware button support
-- Time zone picker, startup volume
-- Resume-last-track modes with preserved library context
-- Storage/USB DAC/ADB mode selector
-- Configurable charge-status LEDs
+## Behind the scenes
 
-### Interface
+Upgraded LVGL, the library that powers the interface, from **9.1 to 9.5**.
 
-- Stock UI assets and fonts, swipe transitions, pull-down quick controls
-- Sleep timer, crossfade quick toggle
-- Configurable screen timeout and idle dimming
-- Configurable font size/battery display, marquee scrolling for long titles
-- Non-Latin text: Cyrillic, Japanese, Korean, Thai
-- App-wide accent theming, live-switchable `.theme` files
-- Customizable Home: reorder/hide/add tiles, grid or list mode, plugin background image
-- Independently themeable Music, Stream Media, and Wireless screens
-- Manual or automatic clock, 12/24-hour
-- Books section with plugin-provided audiobook tools
+Song lists now read track duration and format in the background, so titles
+appear without waiting for every audio file to be opened. Details fill in
+without resetting your scroll position, and results from pages you have left
+are ignored. WMA decoder initialization is also synchronized so background
+probing and playback can safely open WMA files at the same time.
 
-### Plugins
+Shared UI builders and substantial cleanup across the player reduce duplicated
+code and make layouts easier to maintain. Other work includes safer handling
+of overlapping DLNA requests, reduced memory use during plugin reloads,
+and improved crash diagnostics. The build configuration
+again selects mbedTLS 3.6.2 after connectivity regressions with 3.6.7.
 
-- Third-party Lua plugins, no rebuild or reflash
-- Drop a `.lua` file in `.plugins/` on the SD card, picked up automatically
-- Versioned API with capability discovery
-- Extension rows/tiles for Books, Settings, Stream Media, and Home
-- Live reload of icon, color, background image, and layout changes
-- Enable/disable individual plugins from Settings without removing files
-- Examples included: Audiobooks, Themes, MSEB, Home Background, Net Radio,
-  Play Through, Extended Sleep Timer, Last.fm scrobbling, sound profiles,
-  async HTTP
+Automated daily builds continue; weekly beta builds are scheduled for Mondays
+at 1:00 p.m. Costa Rica time.
+
+## Before updating
+
+Emoji support needs the new font supplied in the full firmware package;
+replacing only the player executable will not install it. Updated plugin
+features also require the corresponding plugin files.
