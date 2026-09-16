@@ -124,6 +124,10 @@ typedef struct {
      * drmp3* was opened against a local file or a read callback, only
      * decoder_open()/decoder_close() need to know the difference. */
     http_stream_t * net_stream;
+
+    /* Local FLAC callback stream. dr_flac has no relaxed file convenience
+     * wrapper, so keep the FILE alive for the decoder lifetime. */
+    FILE * flac_file;
 } decoder_t;
 
 /* A stream URL is never dispatched by file extension (see decoder_open()
@@ -169,6 +173,26 @@ static drflac_bool32 flac_stream_seek_cb(void * user_data, int offset, drflac_se
         if (http_stream_read((http_stream_t *) user_data, discard, take) != take) return DRFLAC_FALSE;
         remaining -= (int) take;
     }
+    return DRFLAC_TRUE;
+}
+
+/* Use relaxed native-container parsing for local FLAC files. This tolerates
+ * damaged metadata and lets dr_flac skip malformed frames in otherwise
+ * playable files, as desktop decoders do. */
+static size_t flac_file_read_cb(void * user_data, void * buffer_out, size_t bytes_to_read) {
+    return fread(buffer_out, 1, bytes_to_read, (FILE *) user_data);
+}
+
+static drflac_bool32 flac_file_seek_cb(void * user_data, int offset, drflac_seek_origin origin) {
+    int whence = origin == DRFLAC_SEEK_SET ? SEEK_SET
+               : origin == DRFLAC_SEEK_END ? SEEK_END : SEEK_CUR;
+    return fseek((FILE *) user_data, (long) offset, whence) == 0 ? DRFLAC_TRUE : DRFLAC_FALSE;
+}
+
+static drflac_bool32 flac_file_tell_cb(void * user_data, drflac_int64 * cursor) {
+    long position = ftell((FILE *) user_data);
+    if (position < 0) return DRFLAC_FALSE;
+    *cursor = (drflac_int64) position;
     return DRFLAC_TRUE;
 }
 
@@ -288,8 +312,16 @@ static bool decoder_open(decoder_t * dec, const char * path) {
 
     if (strcasecmp(ext, ".flac") == 0) {
         dec->type = DECODER_FLAC;
-        dec->as.flac = drflac_open_file(path, NULL);
-        if (!dec->as.flac) return false;
+        dec->flac_file = fopen(path, "rb");
+        if (!dec->flac_file) return false;
+        dec->as.flac = drflac_open_relaxed(flac_file_read_cb, flac_file_seek_cb,
+                                           flac_file_tell_cb, drflac_container_native,
+                                           dec->flac_file, NULL);
+        if (!dec->as.flac) {
+            fclose(dec->flac_file);
+            dec->flac_file = NULL;
+            return false;
+        }
         dec->channels = dec->as.flac->channels;
         dec->sample_rate = dec->as.flac->sampleRate;
         dec->source_sample_rate = dec->sample_rate;
@@ -609,10 +641,24 @@ static bool decoder_seek(decoder_t * dec, uint64_t frame) {
     return false;
 }
 
+/* Every branch nulls the union member it just freed, making this safe to
+ * call more than once in a row on the same decoder_t without an
+ * intervening decoder_open() (whose own memset() would otherwise be the
+ * only thing clearing a stale pointer). reopen_decoder_at()'s premature-EOF
+ * recovery path relies on exactly this: it calls decoder_close() itself
+ * when a post-reopen seek fails, then returns false, and the retry loop
+ * that called it goes straight into another decoder_close() (via the next
+ * reopen_decoder_at() attempt) without an open in between. Before this
+ * nulled the pointer, that second close ran drflac_close() (etc.) again on
+ * an already-freed pointer -- a real use-after-free/double-free, reliably
+ * reachable by any local file whose decoder opens fine but whose audio data
+ * is corrupt at the retry position (confirmed independently with ffmpeg on
+ * a real-world file: "invalid sync code" / "invalid frame header"). */
 static void decoder_close(decoder_t * dec) {
     switch (dec->type) {
         case DECODER_FLAC:
-            if (dec->as.flac) drflac_close(dec->as.flac);
+            if (dec->as.flac) { drflac_close(dec->as.flac); dec->as.flac = NULL; }
+            if (dec->flac_file) { fclose(dec->flac_file); dec->flac_file = NULL; }
             if (dec->net_stream) { http_stream_close(dec->net_stream); dec->net_stream = NULL; }
             break;
         case DECODER_MP3:
@@ -620,6 +666,7 @@ static void decoder_close(decoder_t * dec) {
                 drmp3_bind_seek_table(dec->as.mp3, 0, NULL);
                 drmp3_uninit(dec->as.mp3);
                 free(dec->as.mp3);
+                dec->as.mp3 = NULL;
             }
             free(dec->mp3_seek_points);
             dec->mp3_seek_points = NULL;
@@ -627,32 +674,32 @@ static void decoder_close(decoder_t * dec) {
             if (dec->net_stream) { http_stream_close(dec->net_stream); dec->net_stream = NULL; }
             break;
         case DECODER_WAV:
-            if (dec->as.wav) { drwav_uninit(dec->as.wav); free(dec->as.wav); }
+            if (dec->as.wav) { drwav_uninit(dec->as.wav); free(dec->as.wav); dec->as.wav = NULL; }
             break;
         case DECODER_AIFF:
-            if (dec->as.aiff) aiff_close(dec->as.aiff);
+            if (dec->as.aiff) { aiff_close(dec->as.aiff); dec->as.aiff = NULL; }
             break;
         case DECODER_DSD:
-            if (dec->as.dsd) dsd_close(dec->as.dsd);
+            if (dec->as.dsd) { dsd_close(dec->as.dsd); dec->as.dsd = NULL; }
             break;
         case DECODER_AAC:
-            if (dec->as.aac) aac_close(dec->as.aac);
+            if (dec->as.aac) { aac_close(dec->as.aac); dec->as.aac = NULL; }
             if (dec->net_stream) { http_stream_close(dec->net_stream); dec->net_stream = NULL; }
             break;
         case DECODER_ALAC:
-            if (dec->as.alac) alac_close(dec->as.alac);
+            if (dec->as.alac) { alac_close(dec->as.alac); dec->as.alac = NULL; }
             break;
         case DECODER_APE:
-            if (dec->as.ape) ape_close(dec->as.ape);
+            if (dec->as.ape) { ape_close(dec->as.ape); dec->as.ape = NULL; }
             break;
         case DECODER_WMA:
-            if (dec->as.wma) wma_close(dec->as.wma);
+            if (dec->as.wma) { wma_close(dec->as.wma); dec->as.wma = NULL; }
             break;
         case DECODER_OPUS:
-            if (dec->as.opus) opus_close(dec->as.opus);
+            if (dec->as.opus) { opus_close(dec->as.opus); dec->as.opus = NULL; }
             break;
         case DECODER_VORBIS:
-            if (dec->as.vorbis) vorbis_close(dec->as.vorbis);
+            if (dec->as.vorbis) { vorbis_close(dec->as.vorbis); dec->as.vorbis = NULL; }
             break;
     }
 }
