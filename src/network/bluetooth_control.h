@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+typedef bool (*bt_control_cancel_callback_t)(void * ctx);
+
 typedef struct {
     char mac[18]; /* "XX:XX:XX:XX:XX:XX" + NUL */
     char name[64];
@@ -50,6 +52,32 @@ void bt_control_disable(void);
  * device, without the scan step. Still forks one process per paired device,
  * so callers should poll this at a throttled cadence, not every frame. */
 bool bt_control_is_connected(void);
+
+/* Like bt_control_is_connected(), but avoids the per-paired-device fork
+ * loop when the bluetoothctl on this system supports filtering `devices` by
+ * property (the same capability bt_control_list_paired_states() already
+ * detects and caches for the `Paired` filter) -- a single
+ * `bluetoothctl devices Connected` call replaces querying every paired
+ * device individually on that path. Falls back to bt_control_is_connected()
+ * only when that capability is not (yet) known to be available; a failed
+ * `devices Connected` call on a system already known to support it does
+ * NOT fall back, to avoid reintroducing the O(N) fork cost on exactly the
+ * transient failures most likely during Bluetooth power-on -- see the .c
+ * file's own comment. Returns 1/0/-1 (connected / not connected / could not
+ * determine this cycle), not a bool -- callers should keep their last known
+ * state on -1 rather than treat it as "nothing connected".
+ *
+ * Note the fast path answers a very slightly different question than the
+ * per-device path: `devices Connected` reports any currently-connected
+ * device, not only paired ones, so it can briefly disagree with
+ * bt_control_is_connected() during an in-progress pairing handshake. Given
+ * this is only used for the topbar/quick-drawer "is Bluetooth connected to
+ * something" icon (not anything pairing-sensitive), that's an accepted
+ * tradeoff, not a bug. This is what that icon refresh should poll instead of
+ * bt_control_is_connected() -- see the .c file's own comment on why the
+ * naive per-device version noticeably competes with the UI thread for CPU
+ * on systems with several paired devices. */
+int bt_control_any_paired_connected(void);
 
 /* Like bt_control_is_connected(), but returns the full per-device
  * paired/connected breakdown instead of collapsing it into a single bool --
@@ -110,6 +138,13 @@ bool bt_control_disconnect(const char * mac);
  * command. Blocking; call off the UI thread. */
 bool bt_control_forget(const char * mac);
 
+/* Bounded, cancellation-aware reconnect of an already-paired trusted A2DP
+ * headset. Never pairs or trusts. Call only from the reconnect worker; all
+ * Bluetooth chip/control operations are serialized with manual actions. */
+bool bt_control_reconnect_paired(const char * preferred_mac,
+                                bt_control_cancel_callback_t cancel_cb,
+                                void * cancel_ctx);
+
 /* Output settings, confirmed against the real firmware's bt_init script,
  * which launches bluealsa as `bluealsa -p a2dp-source --a2dp-volume` --
  * a2dp-source only (this device sending audio OUT to headphones/speakers),
@@ -144,12 +179,9 @@ bool bt_control_apply_output_settings(bool dac_mode_enabled, bool volume_sync_en
  * consistency with everything else here. */
 bool bt_control_set_codec(const char * codec);
 
-/* Restore the encoder preference before Bluetooth workers start; no I/O.
- * SBC-XQ changes take effect after Bluetooth is turned off and on, or a
- * profile restart. They do not alter Bluetooth DAC receiver encoding. */
+/* Restore the saved outgoing encoder preference without doing I/O. */
 void bt_control_restore_codec_preference(const char * codec);
-/* ALSA PCM used for outgoing audio. SBC-XQ explicitly selects SBC while
- * daemon startup supplies --sbc-quality=xq. Returned storage is static. */
+/* ALSA PCM used for outgoing Bluetooth audio; SBC-XQ explicitly selects SBC. */
 const char * bt_control_get_playback_pcm(void);
 
 /* Keeps this app's own playback volume and a connected a2dp-source
@@ -161,23 +193,30 @@ const char * bt_control_get_playback_pcm(void);
  * introduce a second, compounding gain stage. Call start whenever
  * Bluetooth output is actually in use (mirror audio_set_bt_output()'s own
  * gating -- gui.c calls both together) and stop when it isn't; both are
- * cheap/safe to call repeatedly with the same effective state (idempotent,
- * matching every other start/stop pair in this file). */
+ * idempotent. Serialize start/stop calls on one lifecycle worker; stop can
+ * wait for child cleanup and must not run on the LVGL thread. */
 void bt_control_source_volume_sync_start(void);
 void bt_control_source_volume_sync_stop(void);
+/* Nonblocking status snapshots, safe from the UI thread. */
+bool bt_control_source_volume_sync_is_running(void);
 bool bt_control_source_volume_sync_consume_percent(int * out_percent);
 
 /* Fast disconnect detection for a2dp-source output PCM via `bluealsa-cli monitor`.
- * Provides immediate notification of device disconnection to supplement polling.
+ * Confirms absence after a short grace interval: sample-rate/codec changes can
+ * remove and re-create the same PCM without disconnecting the headphones.
  *
  * Same start/stop lifecycle convention as bt_control_source_volume_sync_start()/
  * _stop() just above -- start whenever Bluetooth output is actually in use,
  * stop when it isn't, both idempotent. bt_control_output_disconnect_consume()
  * is edge-triggered: true (and clears itself) the first poll after a real
- * removal was observed, false otherwise -- callers don't need to know the
- * PCM path themselves. */
+ * removal remained absent through the grace interval, false otherwise.
+ * A matching addition cancels a pending or unconsumed removal. EOF does not
+ * confirm absence; periodic polling remains the fallback for a lost monitor.
+ * The consumer performs no subprocess calls or waits for this grace period. */
+#define BT_OUTPUT_RECONFIGURE_GRACE_MS 750
 void bt_control_output_disconnect_watch_start(void);
 void bt_control_output_disconnect_watch_stop(void);
+bool bt_control_output_disconnect_watch_is_running(void);
 bool bt_control_output_disconnect_consume(void);
 
 #endif /* BLUETOOTH_CONTROL_H */
