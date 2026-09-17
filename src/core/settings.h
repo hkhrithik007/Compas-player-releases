@@ -100,11 +100,9 @@ typedef struct {
     } subsonic_saved[SETTINGS_SUBSONIC_SAVED_MAX];
     int subsonic_saved_count;
 
-    /* Bluetooth output settings -- see bluetooth_control.h for what each
-     * actually does at the bluealsa/alsa.conf level. Defaults match the
-     * stock firmware's own bt_init script (`bluealsa -p a2dp-source
-     * --a2dp-volume`, no a2dp-sink, no forced codec). */
-    bool bt_volume_sync_enabled; /* --a2dp-volume: HW volume buttons also change the paired device's volume */
+    /* Bluetooth output settings -- see bluetooth_control.h for the BlueALSA
+     * 5 service behavior. */
+    bool bt_volume_sync_enabled; /* Mirror hardware volume changes to the paired device. */
     bool bt_dac_mode_enabled;    /* a2dp-sink profile: lets another device stream audio TO this one */
     char bt_codec[16];           /* "auto"/"ldac_hq"/"ldac_sq"/"aptx"/"aac"/"sbc"/"sbc_xq" */
     char bt_last_output_mac[18]; /* verified A2DP source MAC, empty when none is remembered */
@@ -159,7 +157,7 @@ typedef struct {
      * device charging overnight in a dark room. */
     bool led_indicator_enabled;
 
-    /* Settings -> About -> Developer Options -> "Enable database logging" --
+    /* Settings -> About -> Developer Options -> "Enable debug logging" --
      * writes a detailed, timestamped log of library database scans and
      * album art cache jobs (including lazy load) to .logs/database_artwork.log
      * on the SD card (see db_log.h), and also gates the USB DAC bridge's own

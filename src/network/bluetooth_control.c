@@ -23,31 +23,34 @@
 static pthread_mutex_t bt_chip_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Shared by fallback bring-up and explicit profile changes. */
 static pthread_mutex_t bt_daemon_respawn_mutex = PTHREAD_MUTEX_INITIALIZER;
-static atomic_bool sbc_xq_enabled = false;
+typedef enum {
+    BT_CODEC_AUTO = 0,
+    BT_CODEC_LDAC_HQ,
+    BT_CODEC_LDAC_SQ,
+    BT_CODEC_APTX,
+    BT_CODEC_AAC,
+    BT_CODEC_SBC,
+    BT_CODEC_SBC_XQ,
+} bt_codec_preference_t;
+
+static atomic_int bt_codec_preference = BT_CODEC_AUTO;
 static atomic_bool modern_soft_volume_requested = false;
 static pthread_mutex_t bt_soft_volume_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char bt_soft_volume_applied_path[256];
 #define BT_SOURCE_VOLUME_MAX 127
 
-/* BlueALSA 5 renamed both executables.  Select the pair as one unit: using a
- * v5 daemon with the legacy client (or vice versa) leaves the control path
- * talking to the wrong CLI/API.  access(2) is intentionally used here rather
- * than probing with a command on hot paths. */
+/* The firmware overlay contains BlueALSA 5 only. Keep the daemon and control
+ * client names centralized so every path uses the same current API. */
 typedef struct {
     const char * daemon;
     const char * daemon_name;
     const char * ctl;
-    bool modern;
 } bluealsa_backend_t;
 
 static bluealsa_backend_t bluealsa_backend(void) {
-    if (access("/usr/bin/bluealsad", X_OK) == 0 &&
-            access("/usr/bin/bluealsactl", X_OK) == 0) {
-        return (bluealsa_backend_t) {
-            "/usr/bin/bluealsad", "bluealsad", "/usr/bin/bluealsactl", true
-        };
-    }
-    return (bluealsa_backend_t) { "bluealsa", "bluealsa", "bluealsa-cli", false };
+    return (bluealsa_backend_t) {
+        "/usr/bin/bluealsad", "bluealsad", "/usr/bin/bluealsactl"
+    };
 }
 
 static const char * bluealsa_ctl_name(void) {
@@ -55,11 +58,100 @@ static const char * bluealsa_ctl_name(void) {
 }
 
 void bt_control_restore_codec_preference(const char * codec) {
-    atomic_store(&sbc_xq_enabled, codec && strcmp(codec, "sbc_xq") == 0);
+    bt_codec_preference_t preference = BT_CODEC_AUTO;
+    if (codec) {
+        if (strcmp(codec, "ldac_hq") == 0) preference = BT_CODEC_LDAC_HQ;
+        else if (strcmp(codec, "ldac_sq") == 0 || strcmp(codec, "ldac") == 0) preference = BT_CODEC_LDAC_SQ;
+        else if (strcmp(codec, "aptx") == 0) preference = BT_CODEC_APTX;
+        else if (strcmp(codec, "aac") == 0) preference = BT_CODEC_AAC;
+        else if (strcmp(codec, "sbc") == 0) preference = BT_CODEC_SBC;
+        else if (strcmp(codec, "sbc_xq") == 0) preference = BT_CODEC_SBC_XQ;
+    }
+    atomic_store(&bt_codec_preference, preference);
 }
 
 const char * bt_control_get_playback_pcm(void) {
-    return atomic_load(&sbc_xq_enabled) ? "bluealsa:CODEC=SBC" : "bluealsa";
+    switch ((bt_codec_preference_t) atomic_load(&bt_codec_preference)) {
+    case BT_CODEC_LDAC_HQ:
+    case BT_CODEC_LDAC_SQ:
+        return "bluealsa:CODEC=LDAC";
+    case BT_CODEC_APTX:
+        return "bluealsa:CODEC=aptX";
+    case BT_CODEC_AAC:
+        return "bluealsa:CODEC=AAC";
+    case BT_CODEC_SBC:
+    case BT_CODEC_SBC_XQ:
+        return "bluealsa:CODEC=SBC";
+    case BT_CODEC_AUTO:
+    default:
+        return "bluealsa";
+    }
+}
+
+static bool bt_codec_is_sbc_xq(void) {
+    return (bt_codec_preference_t) atomic_load(&bt_codec_preference) == BT_CODEC_SBC_XQ;
+}
+
+/* Optional codecs are not all enabled by BlueALSA's default configuration.
+ * Enabling the selected codec here keeps the setting effective. SBC is
+ * mandatory and needs no -c option. */
+static const char * bt_codec_daemon_name(void) {
+    switch ((bt_codec_preference_t) atomic_load(&bt_codec_preference)) {
+    case BT_CODEC_LDAC_HQ:
+    case BT_CODEC_LDAC_SQ: return "LDAC";
+    case BT_CODEC_APTX: return "aptX";
+    case BT_CODEC_AAC: return "AAC";
+    default: return NULL;
+    }
+}
+
+/* The codec name `bluealsactl codec PCM_PATH CODEC` expects. Deliberately
+ * NOT bt_codec_daemon_name() above: that one feeds the daemon's own -c
+ * enable flag, where SBC is omitted because it is mandatory and always
+ * built in, but selecting a codec on a live PCM has to name SBC explicitly.
+ * AUTO returns NULL -- there is nothing to force, BlueALSA negotiating on
+ * its own IS the preference. */
+static const char * bt_codec_select_name(void) {
+    switch ((bt_codec_preference_t) atomic_load(&bt_codec_preference)) {
+    case BT_CODEC_LDAC_HQ:
+    case BT_CODEC_LDAC_SQ: return "LDAC";
+    case BT_CODEC_APTX: return "aptX";
+    case BT_CODEC_AAC: return "AAC";
+    case BT_CODEC_SBC:
+    case BT_CODEC_SBC_XQ: return "SBC";
+    default: return NULL;
+    }
+}
+
+static const char * bt_codec_daemon_quality(void) {
+    switch ((bt_codec_preference_t) atomic_load(&bt_codec_preference)) {
+    case BT_CODEC_LDAC_HQ: return "high";
+    case BT_CODEC_LDAC_SQ: return "standard";
+    default: return NULL;
+    }
+}
+
+static bool bt_codec_auto(void) {
+    return (bt_codec_preference_t) atomic_load(&bt_codec_preference) == BT_CODEC_AUTO;
+}
+
+/* Build source-daemon codec arguments for BlueALSA 5. */
+static int bt_codec_append_daemon_args(char ** argv, int argc) {
+    if (bt_codec_auto()) {
+        argv[argc++] = (char *) "--all-codecs";
+    } else {
+        const char * daemon_codec = bt_codec_daemon_name();
+        if (daemon_codec) {
+            argv[argc++] = (char *) "-c";
+            argv[argc++] = (char *) daemon_codec;
+        }
+    }
+    const char * daemon_quality = bt_codec_daemon_quality();
+    if (daemon_quality) {
+        argv[argc++] = (char *) "--ldac-quality";
+        argv[argc++] = (char *) daemon_quality;
+    }
+    return argc;
 }
 
 static bool bluealsa_is_audio_pcm_path(const char * path) {
@@ -67,12 +159,11 @@ static bool bluealsa_is_audio_pcm_path(const char * path) {
                     strstr(path, "/a2dpsrc/sink") != NULL);
 }
 
-/* BlueALSA 4's missing --a2dp-volume meant local/software volume.  BlueALSA
- * 5 defaults to native volume and has no --a2dp-soft-volume daemon option;
- * apply the equivalent v5 control command when each PCM appears. */
+/* BlueALSA 5 has no daemon-level --a2dp-volume option; apply the equivalent
+ * control command when each PCM appears. */
 static void bluealsa_apply_soft_volume(const char * path) {
     bluealsa_backend_t backend = bluealsa_backend();
-    if (!backend.modern || !bluealsa_is_audio_pcm_path(path)) return;
+    if (!bluealsa_is_audio_pcm_path(path)) return;
     pthread_mutex_lock(&bt_soft_volume_mutex);
     if (strcmp(bt_soft_volume_applied_path, path) == 0) {
         pthread_mutex_unlock(&bt_soft_volume_mutex);
@@ -93,6 +184,96 @@ static void bluealsa_clear_soft_volume_path(const char * path) {
     if (!path || strcmp(bt_soft_volume_applied_path, path) == 0)
         bt_soft_volume_applied_path[0] = '\0';
     pthread_mutex_unlock(&bt_soft_volume_mutex);
+}
+
+/* Extracts the "Selected codec: X" line from `bluealsactl info` output.
+ * Shared by the codec readback below and bt_control_get_connected_device_
+ * codec() so the two cannot drift apart on the format. */
+static bool bluealsa_parse_selected_codec(const char * info_out, char * out, size_t out_size) {
+    const char * line = strstr(info_out, "Selected codec:");
+    if (!line) return false;
+    line += strlen("Selected codec:");
+    while (*line == ' ') line++;
+    size_t i = 0;
+    while (line[i] != '\0' && line[i] != '\n' && line[i] != '\r' && i < out_size - 1) {
+        out[i] = line[i];
+        i++;
+    }
+    out[i] = '\0';
+    return i != 0;
+}
+
+/* Applies the user's codec preference to a live PCM.
+ *
+ * Without this, the preference only ever reached BlueALSA through the
+ * bluealsa:CODEC=... PCM name that audio_output.c opens (see
+ * bt_control_get_playback_pcm()), so a freshly connected accessory kept
+ * whatever BlueALSA negotiated on its own -- usually AAC -- until the next
+ * time playback happened to reopen that PCM, i.e. a track change a couple
+ * of songs later. That is GitHub issue #94's remaining half: manual
+ * selection appeared to work only because changing it restarts the daemon
+ * and the user then presses play.
+ *
+ * `bluealsactl codec` terminates the PCM if it is currently running (its
+ * own documented behavior), which is exactly why this runs at PCMAdded --
+ * the PCM exists but nothing has opened it for playback yet. A codec change
+ * can itself cycle the PCM; that is already tolerated, since PCMRemoved
+ * starts BT_OUTPUT_RECONFIGURE_GRACE_MS rather than reporting a disconnect,
+ * and the re-add carries the same path (BlueALSA paths key on device and
+ * profile, not codec), so the latch below suppresses a re-apply loop.
+ *
+ * Purely additive: if this fails, the PCM-name path still applies the codec
+ * on the next open exactly as before, so the worst case is today's
+ * behavior. */
+static char bt_codec_applied_path[256];
+static pthread_mutex_t bt_codec_applied_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void bluealsa_clear_codec_path(const char * path) {
+    pthread_mutex_lock(&bt_codec_applied_mutex);
+    if (!path || strcmp(bt_codec_applied_path, path) == 0)
+        bt_codec_applied_path[0] = '\0';
+    pthread_mutex_unlock(&bt_codec_applied_mutex);
+}
+
+/* Defined further down alongside the volume-sync helpers; needed earlier by
+ * bt_control_reconcile_source_settings()'s already-connected case. */
+static bool find_source_pcm_path(char * out, size_t out_size);
+
+static void bluealsa_apply_codec_preference(const char * path) {
+    const char * codec = bt_codec_select_name();
+    if (!codec) return; /* AUTO -- let BlueALSA negotiate, nothing to force */
+    if (!bluealsa_is_audio_pcm_path(path)) return;
+    bluealsa_backend_t backend = bluealsa_backend();
+
+    pthread_mutex_lock(&bt_codec_applied_mutex);
+    if (strcmp(bt_codec_applied_path, path) == 0) {
+        pthread_mutex_unlock(&bt_codec_applied_mutex);
+        return;
+    }
+    snprintf(bt_codec_applied_path, sizeof(bt_codec_applied_path), "%s", path);
+    char * argv[] = { (char *) backend.ctl, (char *) "codec",
+                      (char *) path, (char *) codec, NULL };
+    int exit_code = -1;
+    bool ok = subprocess_run_checked(argv, NULL, 0, 5000, &exit_code) && exit_code == 0;
+    if (!ok) bt_codec_applied_path[0] = '\0'; /* let the next PCMAdded retry */
+    pthread_mutex_unlock(&bt_codec_applied_mutex);
+
+    if (!ok) {
+        DBG_LOG("bt_control: codec select %s -> %s FAILED (exit %d)\n", path, codec, exit_code);
+        return;
+    }
+    /* Read back rather than trusting the exit status: the accessory can
+     * refuse a codec it advertised, and the top bar reports the real
+     * transport, so a silent mismatch would look like the original bug. */
+    char info_out[2048];
+    char * info_argv[] = { (char *) backend.ctl, (char *) "info", (char *) path, NULL };
+    char active[32];
+    if (subprocess_run(info_argv, info_out, sizeof(info_out)) &&
+        bluealsa_parse_selected_codec(info_out, active, sizeof(active))) {
+        DBG_LOG("bt_control: codec select %s -> %s, now reports %s\n", path, codec, active);
+    } else {
+        DBG_LOG("bt_control: codec select %s -> %s applied, readback unavailable\n", path, codec);
+    }
 }
 
 static bool parse_monitor_volume(const char * text, int * out) {
@@ -355,7 +536,8 @@ static int count_process_exact(const char * name) {
 /* Reconcile only the backend daemon itself.  The stock startup scripts can
  * leave a source daemon running without the requested encoder quality; a
  * sink daemon is deliberately left alone because SBC-XQ is source-only. */
-static bool bluealsa_needs_source_restart(const bluealsa_backend_t * backend, bool xq) {
+static bool bluealsa_needs_source_restart(const bluealsa_backend_t * backend,
+                                          bt_codec_preference_t preference) {
     DIR * proc = opendir("/proc");
     if (!proc) return false;
     bool restart = false;
@@ -373,7 +555,9 @@ static bool bluealsa_needs_source_restart(const bluealsa_backend_t * backend, bo
         const char * name = strrchr(args, '/');
         name = name ? name + 1 : args;
         if (strcmp(name, backend->daemon_name) != 0) continue;
-        bool sink = false, active_xq = false;
+        bool sink = false, active_xq = false, active_all_codecs = false;
+        const char * active_codec = NULL;
+        const char * active_ldac_quality = NULL;
         for (size_t pos = strlen(args) + 1; pos < len; ) {
             size_t arg_len = strlen(args + pos);
             const char * arg = args + pos;
@@ -385,10 +569,35 @@ static bool bluealsa_needs_source_restart(const bluealsa_backend_t * backend, bo
                     (strcmp(arg, "--sbc-quality") == 0 &&
                      pos + arg_len + 1 < len &&
                      strcmp(args + pos + arg_len + 1, "xq") == 0)) active_xq = true;
+            if (strcmp(arg, "--all-codecs") == 0) active_all_codecs = true;
+            if (strcmp(arg, "-c") == 0 || strcmp(arg, "--codec") == 0) {
+                if (pos + arg_len + 1 < len) active_codec = args + pos + arg_len + 1;
+            } else if (strncmp(arg, "--codec=", 8) == 0) {
+                active_codec = arg + 8;
+            }
+            if (strncmp(arg, "--ldac-quality=", 15) == 0) active_ldac_quality = arg + 15;
+            else if (strcmp(arg, "--ldac-quality") == 0 && pos + arg_len + 1 < len)
+                active_ldac_quality = args + pos + arg_len + 1;
             if (!arg_len) break;
             pos += arg_len + 1;
         }
-        if (!sink && active_xq != xq) restart = true;
+        if (!sink) {
+            const char * expected_codec = NULL;
+            if (preference == BT_CODEC_LDAC_HQ || preference == BT_CODEC_LDAC_SQ) expected_codec = "LDAC";
+            else if (preference == BT_CODEC_APTX) expected_codec = "aptX";
+            else if (preference == BT_CODEC_AAC) expected_codec = "AAC";
+            bool expected_xq = preference == BT_CODEC_SBC_XQ;
+            const char * expected_ldac_quality = preference == BT_CODEC_LDAC_HQ ? "high" :
+                                                  preference == BT_CODEC_LDAC_SQ ? "standard" : NULL;
+            bool expected_all_codecs = preference == BT_CODEC_AUTO;
+            if (active_xq != expected_xq || active_all_codecs != expected_all_codecs ||
+                    (expected_codec && (!active_codec || strcasecmp(active_codec, expected_codec) != 0)) ||
+                    (!expected_codec && active_codec) ||
+                    (expected_ldac_quality && (!active_ldac_quality ||
+                                               strcasecmp(active_ldac_quality, expected_ldac_quality) != 0)) ||
+                    (!expected_ldac_quality && active_ldac_quality))
+                restart = true;
+        }
     }
     closedir(proc);
     return restart;
@@ -589,15 +798,14 @@ bool bt_control_is_powered(void) {
  * not available` regardless of the remote device. Since
  * bt_control_init_chip()'s early return is keyed purely on hci0 presence,
  * it was silently skipping bt_resume's own bluealsa-start step. This
- * ensures bluealsa specifically, every time, decoupled from whether hci0
- * needed a fresh bring-up; bt_control_apply_output_settings() still layers
- * DAC mode / --a2dp-volume on top via its own call sites once the user
- * touches a Bluetooth output setting. */
-static void ensure_bluealsa_running(void) {
+ * ensures the BlueALSA 5 source daemon specifically, every time, decoupled
+ * from whether hci0 needed a fresh bring-up; DAC mode and the app's volume
+ * synchronization are handled by their own call sites. */
+static bool ensure_bluealsa_running(void) {
     pthread_mutex_lock(&bt_daemon_respawn_mutex);
     bluealsa_backend_t backend = bluealsa_backend();
-    bool xq = atomic_load(&sbc_xq_enabled);
-    bool must_restart = bluealsa_needs_source_restart(&backend, xq);
+    bt_codec_preference_t preference = (bt_codec_preference_t) atomic_load(&bt_codec_preference);
+    bool must_restart = bluealsa_needs_source_restart(&backend, preference);
     if (must_restart)
         subprocess_kill_all_matching(backend.daemon_name);
     /* Killing detached daemons is asynchronous; the old process may still be
@@ -606,18 +814,19 @@ static void ensure_bluealsa_running(void) {
      * suppress the replacement. */
     if (!must_restart && count_process_exact(backend.daemon_name) > 0) {
         pthread_mutex_unlock(&bt_daemon_respawn_mutex);
-        return;
+        return true;
     }
-    char * argv[6];
+    char * argv[10];
     int argc = 0;
     argv[argc++] = (char *) backend.daemon;
     argv[argc++] = (char *) "-p";
     argv[argc++] = (char *) "a2dp-source";
-    if (!backend.modern) argv[argc++] = (char *) "--a2dp-volume";
-    if (xq) argv[argc++] = (char *) "--sbc-quality=xq";
+    if (bt_codec_is_sbc_xq()) argv[argc++] = (char *) "--sbc-quality=xq";
+    argc = bt_codec_append_daemon_args(argv, argc);
     argv[argc] = NULL;
-    subprocess_spawn_daemon(argv);
+    bool ok = subprocess_spawn_daemon(argv);
     pthread_mutex_unlock(&bt_daemon_respawn_mutex);
+    return ok;
 }
 
 bool bt_control_init_chip(void) {
@@ -637,6 +846,19 @@ bool bt_control_init_chip(void) {
     bool result = bt_control_adapter_present();
     pthread_mutex_unlock(&bt_chip_mutex);
     return result;
+}
+
+bool bt_control_reconcile_source_settings(void) {
+    if (!ensure_bluealsa_running()) return false;
+    /* An accessory already connected before the PCMAdded watch started
+     * never produces that event, so the codec preference would sit
+     * unapplied until the next reconnect. Same reasoning (and same pairing
+     * with discovery) find_source_pcm_path() already documents for the v5
+     * SoftVolume preference, which it applies on discovery itself. */
+    char path[256];
+    if (find_source_pcm_path(path, sizeof(path)))
+        bluealsa_apply_codec_preference(path);
+    return true;
 }
 
 /* /usr/bin/bt_enable -- matches hiby_player's own confirmed strings rather
@@ -1188,8 +1410,8 @@ static bool find_source_pcm_path(char * out, size_t out_size) {
     char list_out[4096];
     char * argv[] = { (char *) bluealsa_ctl_name(), (char *) "list-pcms", NULL };
     if (!subprocess_run(argv, list_out, sizeof(list_out))) {
-        /* Log failure if bluealsa-cli list-pcms fails or times out. */
-        DBG_LOG("bt_control: find_source_pcm_path: bluealsa-cli list-pcms failed/timed out\n");
+        /* Log failure if bluealsactl list-pcms fails or times out. */
+        DBG_LOG("bt_control: find_source_pcm_path: bluealsactl list-pcms failed/timed out\n");
         return false;
     }
 
@@ -1198,7 +1420,7 @@ static bool find_source_pcm_path(char * out, size_t out_size) {
     while (line) {
         /* "a2dpsrc" (not "a2dpsnk") distinguishes this from a DAC-mode PCM
          * if one ever coexisted; "/sink" is bluealsa's own role name for
-         * the PCM WE write into (confirmed live: `bluealsa-cli list-pcms`
+         * the PCM WE write into (confirmed live: `bluealsactl list-pcms`
          * on a real connected device returned exactly
          * "/org/bluealsa/hci0/dev_XX_XX_XX_XX_XX_XX/a2dpsrc/sink"). */
         if (strstr(line, "/a2dpsrc/sink") != NULL) {
@@ -1254,23 +1476,12 @@ bool bt_control_get_connected_device_codec(char * out, size_t out_size) {
     char * argv[] = { (char *) bluealsa_ctl_name(), (char *) "info", path, NULL };
     if (!subprocess_run(argv, info_out, sizeof(info_out))) return false;
 
-    /* "Selected codec: AAC" -- confirmed live via `bluealsa-cli info
+    /* "Selected codec: AAC" -- confirmed live via `bluealsactl info
      * <pcm-path>` (also reports "Available codecs: SBC AAC", but that's
      * every codec the accessory advertised support for, not what's
      * actually in use right now). */
-    const char * line = strstr(info_out, "Selected codec:");
-    if (!line) return false;
-    line += strlen("Selected codec:");
-    while (*line == ' ') line++;
-
     char codec[32];
-    int i = 0;
-    while (line[i] != '\0' && line[i] != '\n' && line[i] != '\r' && i < (int) sizeof(codec) - 1) {
-        codec[i] = line[i];
-        i++;
-    }
-    codec[i] = '\0';
-    if (i == 0) return false;
+    if (!bluealsa_parse_selected_codec(info_out, codec, sizeof(codec))) return false;
 
     snprintf(out, out_size, "%s", codec);
     return true;
@@ -1438,7 +1649,7 @@ bool bt_control_source_volume_sync_consume_percent(int * out_percent) {
 
 /* See bt_control_output_disconnect_watch_start()'s own doc comment
  * (bluetooth_control.h) for what this is and why. Plain `monitor`, no `-p`
- * needed -- confirmed via `strings` on the real bluealsa-cli binary that
+ * needed -- confirmed via `strings` on the real bluealsactl binary that
  * PCMAdded/PCMRemoved come from its base InterfacesAdded/InterfacesRemoved
  * subscription (path_namespace='/org/bluealsa'), which is always active;
  * `-p` only adds the separate PropertyChanged stream (Volume/Codec/Running/
@@ -1464,6 +1675,12 @@ static void bt_output_disconnect_process_line(const char * line, char * pending_
         if (strstr(path, "/a2dpsrc/sink") != NULL) {
             snprintf(pending_path, 256, "%s", path);
             *pending_deadline = bt_control_monotonic_ms() + BT_OUTPUT_RECONFIGURE_GRACE_MS;
+            /* Soft volume only: the PCM is recreated by a reconfigure, so
+             * that setting must be re-applied. The codec latch deliberately
+             * survives here and is cleared only once a disconnect is
+             * actually confirmed -- selecting a codec can itself cycle the
+             * PCM, and clearing on every PCMRemoved would let the resulting
+             * PCMAdded re-select, cycling it again without end. */
             bluealsa_clear_soft_volume_path(path);
             DBG_LOG("bt_control: output_disconnect_watch: PCMRemoved %s -- pending disconnect\n", path);
         }
@@ -1520,6 +1737,7 @@ static void bt_output_disconnect_publish_if_due(char * pending_path, uint32_t * 
     }
     pthread_mutex_unlock(&bt_output_disconnect_state_mutex);
     DBG_LOG("bt_control: output_disconnect_watch: PCMRemoved %s -- flagging disconnect\n", pending_path);
+    bluealsa_clear_codec_path(pending_path); /* real disconnect: next connect must re-select */
     pending_path[0] = '\0';
     *pending_deadline = 0;
 }
@@ -1531,7 +1749,7 @@ static void * bt_output_disconnect_thread_func(void * arg) {
     pid_t pid;
     int read_fd;
     if (!subprocess_popen(argv, &pid, &read_fd)) {
-        DBG_LOG("bt_control: output_disconnect_watch: failed to spawn bluealsa-cli monitor\n");
+        DBG_LOG("bt_control: output_disconnect_watch: failed to spawn bluealsactl monitor\n");
         atomic_store(&bt_output_disconnect_active, false);
         return NULL;
     }
@@ -1584,13 +1802,20 @@ static void * bt_output_disconnect_thread_func(void * arg) {
         /* Do not let volume subprocesses delay reading a replacement while
          * a removal is pending. Keep the bounded queue until it settles. */
         if (!pending_path[0]) {
-            for (int i = 0; i < added_count && atomic_load(&bt_output_disconnect_active); i++)
+            for (int i = 0; i < added_count && atomic_load(&bt_output_disconnect_active); i++) {
+                /* Codec first: selecting one can cycle the PCM, which would
+                 * otherwise drop a soft-volume setting applied just before. */
+                bluealsa_apply_codec_preference(added_paths[i]);
                 bluealsa_apply_soft_volume(added_paths[i]);
+            }
             added_count = 0;
         }
     }
 
     DBG_LOG("bt_control: output_disconnect_watch: monitor exited (pid %d)\n", (int) pid);
+    /* The monitor can exit with a removal still unconfirmed, which would
+     * leave the latch set and suppress the re-select on the next connect. */
+    bluealsa_clear_codec_path(NULL);
     close(read_fd);
     subprocess_terminate(pid);
     atomic_store(&bt_output_disconnect_active, false);
@@ -1665,7 +1890,7 @@ bool bt_control_apply_output_settings(bool dac_mode_enabled, bool volume_sync_en
     last_applied_dac_mode_enabled = dac_mode_enabled;
     last_applied_volume_sync_enabled = volume_sync_enabled;
     output_settings_ever_applied = true;
-    atomic_store(&modern_soft_volume_requested, !volume_sync_enabled && bluealsa_backend().modern);
+    atomic_store(&modern_soft_volume_requested, !volume_sync_enabled);
     bluealsa_clear_soft_volume_path(NULL);
 
     /* Single profile mode: runs a2dp-sink or a2dp-source. */
@@ -1688,21 +1913,9 @@ bool bt_control_apply_output_settings(bool dac_mode_enabled, bool volume_sync_en
     argv[i++] = (char *) backend.daemon;
     argv[i++] = (char *) "-p";
     argv[i++] = dac_mode_enabled ? (char *) "a2dp-sink" : (char *) "a2dp-source";
-    if (volume_sync_enabled && !backend.modern) argv[i++] = (char *) "--a2dp-volume";
-    if (!dac_mode_enabled && atomic_load(&sbc_xq_enabled))
+    if (!dac_mode_enabled && bt_codec_is_sbc_xq())
         argv[i++] = (char *) "--sbc-quality=xq";
-    /* Codec restriction (-c SBC -c AAC, excluding LDAC) TEMPORARILY REMOVED
-     * for a live A/B test: the stock player's own bluealsa_profile script
-     * runs with no codec restriction at all and was just confirmed on a
-     * real device to work flawlessly over a real phone connection, while
-     * this app's DAC mode (with the restriction) has been consistently
-     * failing to ever reach AVDTP Start on the same phone. This is the one
-     * concrete command-line difference between the two, worth testing in
-     * isolation before assuming it's unrelated to the LDAC/SoftVolume
-     * distortion issue that motivated it in the first place -- this file
-     * isn't under version control yet, so if this needs restoring later,
-     * it was `-c` "SBC" `-c` "AAC" appended to argv right after
-     * --a2dp-volume, only when dac_mode_enabled. */
+    if (!dac_mode_enabled) i = bt_codec_append_daemon_args(argv, i);
     argv[i] = NULL;
     if (!spawn_bluealsa_and_verify(argv)) {
         pthread_mutex_unlock(&bt_daemon_respawn_mutex);
@@ -1755,30 +1968,13 @@ static void bt_control_reapply_last_output_settings(void) {
 }
 
 bool bt_control_set_codec(const char * codec) {
-    FILE * f = fopen("/usr/data/alsa.conf", "w");
-    if (!f) return false;
-
-    fprintf(f, "pcm.bt_alsa_sink {\n");
-    fprintf(f, "    type plug\n");
-    fprintf(f, "    slave {\n");
-    fprintf(f, "        pcm {\n");
-    fprintf(f, "            type bluealsa\n");
-    fprintf(f, "            device XX:XX:XX:XX:XX:XX\n");
-    fprintf(f, "            profile \"a2dp\"\n");
-    if (strcmp(codec, "auto") != 0) {
-        if (strncmp(codec, "ldac", 4) == 0) {
-            fprintf(f, "            codec \"ldac\"\n");
-            fprintf(f, "            ldac_eqmid \"%s\"\n", strcmp(codec, "ldac_hq") == 0 ? "LDAC_HQ" : "LDAC_SQ");
-        } else {
-            fprintf(f, "            codec \"%s\"\n", strcmp(codec, "sbc_xq") == 0 ? "sbc" : codec);
-        }
-    }
-    fprintf(f, "        }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "}\n");
-
-    bool ok = !ferror(f);
-    if (fclose(f) != 0) ok = false;
-    if (ok) bt_control_restore_codec_preference(codec);
-    return ok;
+    if (!codec || (strcmp(codec, "auto") != 0 && strcmp(codec, "ldac") != 0 && strcmp(codec, "ldac_hq") != 0 &&
+                   strcmp(codec, "ldac_sq") != 0 && strcmp(codec, "aptx") != 0 &&
+                   strcmp(codec, "aac") != 0 && strcmp(codec, "sbc") != 0 &&
+                   strcmp(codec, "sbc_xq") != 0)) return false;
+    /* BlueALSA 5 receives the preference through its daemon arguments and
+     * the bluealsa:CODEC=... PCM name. There is no per-user ALSA config file
+     * to generate, and the old ldac_eqmid stanza is not a BlueALSA 5 API. */
+    bt_control_restore_codec_preference(codec);
+    return true;
 }
