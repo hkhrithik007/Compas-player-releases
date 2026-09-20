@@ -15,6 +15,7 @@
 #include <strings.h>
 #include <stdio.h>
 #include <errno.h>
+#include <unistd.h>
 
 typedef struct {
     char name[256];
@@ -303,31 +304,52 @@ static void rebuild_list(void) {
 
 
 /* Bounded-memory variant used by the database scanner. Does not sort:
- * ordering belongs in the on-disk DB, not in the discovery pass. */
+ * ordering belongs in the on-disk DB, not in the discovery pass.
+ * False means the scan is void. Unreadable entries and subtrees are stepped
+ * over and counted in *skipped, which marks the walk incomplete. add_files is
+ * inherited from the parent and flipped by database.ignore/database.unignore;
+ * subdirectories are descended either way, so a nested database.unignore can
+ * re-include a subtree. */
 static bool walk_all_songs_recursive(const char * dir_path, file_browser_song_visit_cb_t cb, void * user,
                                      int * count, int depth, atomic_int * progress,
-                                     const char * excluded_top_level_dir) {
-    if (depth > SCAN_ALL_SONGS_MAX_DEPTH) return false;
+                                     const char * excluded_top_level_dir, int * skipped, bool add_files) {
+    if (depth > SCAN_ALL_SONGS_MAX_DEPTH) { (*skipped)++; return true; }
 
     DIR * dir = opendir(dir_path);
-    if (!dir) return false;
+    if (!dir) { (*skipped)++; return true; }
 
-    bool keep_going = true;
+    /* One path buffer for the whole frame: this function recurses to
+     * SCAN_ALL_SONGS_MAX_DEPTH on a fixed-size thread stack. */
+    char path_buf[PATH_MAX];
+    int probe_len = snprintf(path_buf, sizeof(path_buf), "%s/database.ignore", dir_path);
+    bool has_ignore = (probe_len > 0 && (size_t) probe_len < sizeof(path_buf) && access(path_buf, F_OK) == 0);
+
+    probe_len = snprintf(path_buf, sizeof(path_buf), "%s/database.unignore", dir_path);
+    bool has_unignore = (probe_len > 0 && (size_t) probe_len < sizeof(path_buf) && access(path_buf, F_OK) == 0);
+
+    if (has_ignore != has_unignore) add_files = has_unignore;
+
+    bool fatal = false;
     struct dirent * de;
-    while (keep_going) {
+    for (;;) {
         errno = 0;
         de = readdir(dir);
-        if (!de) { if (errno) keep_going = false; break; }
+        if (!de) {
+            /* NULL is end-of-directory or a read error; errno separates them.
+             * An error hides the rest of this directory, so it counts as an
+             * omission rather than a clean end. */
+            if (errno) (*skipped)++;
+            break;
+        }
         if (de->d_name[0] == '.') continue;
 
-        char full_path[PATH_MAX];
-        int length = snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, de->d_name);
-        if (length < 0 || (size_t) length >= sizeof(full_path)) { keep_going = false; break; }
+        int length = snprintf(path_buf, sizeof(path_buf), "%s/%s", dir_path, de->d_name);
+        if (length < 0 || (size_t) length >= sizeof(path_buf)) { (*skipped)++; continue; }
 
         struct stat st;
-        bool stat_ok = lstat(full_path, &st) == 0;
+        bool stat_ok = lstat(path_buf, &st) == 0;
         if (progress) atomic_fetch_add_explicit(progress, 1, memory_order_relaxed);
-        if (!stat_ok) { keep_going = false; break; }
+        if (!stat_ok) { (*skipped)++; continue; }
         /* Reject symlinks to prevent path traversal outside the music root. */
         if (S_ISLNK(st.st_mode)) continue;
 
@@ -338,26 +360,42 @@ static bool walk_all_songs_recursive(const char * dir_path, file_browser_song_vi
             if (depth == 0 && excluded_top_level_dir &&
                 strcasecmp(de->d_name, excluded_top_level_dir) == 0)
                 continue;
-            keep_going = walk_all_songs_recursive(full_path, cb, user, count, depth + 1, progress,
-                                                  excluded_top_level_dir);
+            if (!walk_all_songs_recursive(path_buf, cb, user, count, depth + 1, progress,
+                                          excluded_top_level_dir, skipped, add_files)) {
+                fatal = true;
+                break;
+            }
             continue;
         }
         if (!is_playable_file(de->d_name)) continue;
 
-        (*count)++;
-        if (cb && !cb(full_path, user)) keep_going = false;
+        if (add_files) {
+            (*count)++;
+            if (cb && !cb(path_buf, user)) { fatal = true; break; }
+        }
     }
 
     closedir(dir);
-    return keep_going;
+    return !fatal;
 }
 
 bool file_browser_walk_all_songs_excluding_top_level(const char * root, const char * excluded_dir,
                                                      file_browser_song_visit_cb_t cb, void * user,
-                                                     int * out_count, atomic_int * progress) {
+                                                     int * out_count, atomic_int * progress,
+                                                     int * out_skipped) {
     int count = 0;
-    bool completed = walk_all_songs_recursive(root, cb, user, &count, 0, progress, excluded_dir);
+    int skipped = 0;
+    /* A root that cannot be opened is a void scan, not an empty library. */
+    DIR * root_dir = opendir(root);
+    if (!root_dir) {
+        if (out_count) *out_count = 0;
+        if (out_skipped) *out_skipped = 0;
+        return false;
+    }
+    closedir(root_dir);
+    bool completed = walk_all_songs_recursive(root, cb, user, &count, 0, progress, excluded_dir, &skipped, true);
     if (out_count) *out_count = count;
+    if (out_skipped) *out_skipped = skipped;
     return completed;
 }
 
