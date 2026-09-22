@@ -26,36 +26,121 @@ jobs:
       - name: Install repository-cached MIPS musl toolchain
         run: |
           set -euo pipefail
+
           toolchain_dir="$(scripts/install_mips_toolchain.sh "$RUNNER_TEMP")"
+
           echo "$toolchain_dir/bin" >> "$GITHUB_PATH"
 
-      - name: Install validation tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends file lua5.4 zip
-
-      - name: Build open_hiby_player_target
+      - name: Install build and validation tools
         run: |
           set -euo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install --yes --no-install-recommends \
+            file \
+            lua5.4 \
+            zip \
+            unzip
+
+      - name: Build player
+        run: |
+          set -euo pipefail
+
           make -j2 target
 
-      - name: Verify binary
+      - name: Build bootloader
+        run: |
+          set -euo pipefail
+
+          make -j2 bootloader
+
+      - name: Run bootloader player-selection self-test
+        run: |
+          set -euo pipefail
+
+          make bootloader-player-selftest
+
+      - name: Verify player binary
         run: |
           set -euo pipefail
 
           BINARY="open_hiby_player_target"
 
-          echo "Verifying binary: $BINARY"
+          echo "Verifying player: $BINARY"
 
           test -f "$BINARY"
           test -s "$BINARY"
 
           file "$BINARY"
 
-          mipsel-linux-musl-readelf -h "$BINARY" | grep 'Machine:.*MIPS' >/dev/null
+          mipsel-linux-musl-readelf -h "$BINARY" \
+            | grep 'Machine:.*MIPS' >/dev/null
 
-          echo "Binary successfully built:"
+          echo "Player binary successfully built:"
           ls -lh "$BINARY"
+
+      - name: Verify bootloader binary
+        run: |
+          set -euo pipefail
+
+          BINARY="open_hiby_bootloader"
+
+          echo "Verifying bootloader: $BINARY"
+
+          test -f "$BINARY"
+          test -s "$BINARY"
+
+          file "$BINARY"
+
+          mipsel-linux-musl-readelf -h "$BINARY" \
+            | grep 'Machine:.*MIPS' >/dev/null
+
+          echo "Bootloader binary successfully built:"
+          ls -lh "$BINARY"
+
+      - name: Prepare firmware package
+        run: |
+          set -euo pipefail
+
+          PACKAGE_DIR="hiby-r1-firmware"
+
+          rm -rf "$PACKAGE_DIR"
+          mkdir -p "$PACKAGE_DIR"
+
+          cp open_hiby_bootloader "$PACKAGE_DIR/"
+          cp open_hiby_player_target "$PACKAGE_DIR/"
+
+          cat > "$PACKAGE_DIR/BUILD_INFO.txt" <<EOF
+          HiBy R1 Player
+
+          Commit: ${GITHUB_SHA}
+          Build: ${GITHUB_RUN_NUMBER}
+          Ref: ${GITHUB_REF_NAME}
+
+          Bootloader:
+          open_hiby_bootloader
+
+          Player:
+          open_hiby_player_target
+          EOF
+
+          zip -9 -r \
+            "hiby-r1-firmware-${GITHUB_SHA::7}.zip" \
+            "$PACKAGE_DIR"
+
+          echo "Firmware package:"
+          ls -lh "hiby-r1-firmware-${GITHUB_SHA::7}.zip"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hiby-r1-firmware-${{ github.sha }}
+          path: |
+            hiby-r1-firmware-*.zip
+            open_hiby_bootloader
+            open_hiby_player_target
+          if-no-files-found: error
 
       - name: Create automatic main build release
         if: ${{ github.ref == 'refs/heads/main' }}
@@ -64,8 +149,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          BINARY="open_hiby_player_target"
           TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          PACKAGE="hiby-r1-firmware-${GITHUB_SHA::7}.zip"
 
           cat > release-notes.txt <<EOF
           Automatic HiBy R1 build
@@ -73,11 +158,20 @@ jobs:
           Commit: ${GITHUB_SHA}
           Build: ${GITHUB_RUN_NUMBER}
 
-          Binary: ${BINARY}
+          This release contains:
+
+          - HiBy R1 bootloader
+          - HiBy R1 player
+          - Firmware package
+
+          Package:
+          ${PACKAGE}
           EOF
 
           gh release create "$TAG" \
-            "$BINARY" \
+            "$PACKAGE" \
+            open_hiby_bootloader \
+            open_hiby_player_target \
             --target "$GITHUB_SHA" \
             --title "Latest Build" \
             --notes-file release-notes.txt \
@@ -90,19 +184,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          BINARY="open_hiby_player_target"
           TAG="${GITHUB_REF_NAME}"
+          PACKAGE="hiby-r1-firmware-${GITHUB_SHA::7}.zip"
 
           cat > release-notes.txt <<EOF
           HiBy R1 Player ${TAG}
 
           Commit: ${GITHUB_SHA}
 
-          Binary: ${BINARY}
+          This release contains:
+
+          - HiBy R1 bootloader
+          - HiBy R1 player
+          - Firmware package
+
+          Package:
+          ${PACKAGE}
           EOF
 
           gh release create "$TAG" \
-            "$BINARY" \
+            "$PACKAGE" \
+            open_hiby_bootloader \
+            open_hiby_player_target \
             --verify-tag \
             --title "HiBy R1 Player ${TAG}" \
             --notes-file release-notes.txt \
