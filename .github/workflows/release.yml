@@ -18,195 +18,360 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # ----------------------------------------------------------------------
+      # Checkout
+      # ----------------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          fetch-depth: 0
 
-      - name: Install repository-cached MIPS musl toolchain
-        run: |
-          set -euo pipefail
-
-          toolchain_dir="$(scripts/install_mips_toolchain.sh "$RUNNER_TEMP")"
-
-          echo "$toolchain_dir/bin" >> "$GITHUB_PATH"
-
-      - name: Install build and validation tools
+      # ----------------------------------------------------------------------
+      # Build dependencies
+      # ----------------------------------------------------------------------
+      - name: Install build dependencies
+        shell: bash
         run: |
           set -euo pipefail
 
           sudo apt-get update
 
           sudo apt-get install --yes --no-install-recommends \
+            ca-certificates \
+            curl \
             file \
-            lua5.4 \
+            gzip \
+            make \
+            tar \
             zip \
-            unzip
+            lua5.4
 
-      - name: Build player
+      # ----------------------------------------------------------------------
+      # Install MIPS musl cross compiler
+      #
+      # The Makefile requires:
+      #   mipsel-linux-musl-gcc
+      #   mipsel-linux-musl-g++
+      #   mipsel-linux-musl-strip
+      #   mipsel-linux-musl-readelf
+      #
+      # Keep the existing repository installer, but put a hard timeout around
+      # it so a dead mirror cannot consume the entire GitHub Actions job.
+      # ----------------------------------------------------------------------
+      - name: Install MIPS musl toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Installing MIPS musl toolchain..."
+
+          if [[ ! -x scripts/install_mips_toolchain.sh ]]; then
+            echo "ERROR: scripts/install_mips_toolchain.sh was not found."
+            exit 1
+          fi
+
+          chmod +x scripts/install_mips_toolchain.sh
+
+          TOOLCHAIN_DIR="$RUNNER_TEMP/mipsel-linux-musl-cross"
+
+          rm -rf "$TOOLCHAIN_DIR"
+          mkdir -p "$TOOLCHAIN_DIR"
+
+          echo "Toolchain directory:"
+          echo "  $TOOLCHAIN_DIR"
+
+          timeout --signal=TERM --kill-after=30s 10m \
+            scripts/install_mips_toolchain.sh "$RUNNER_TEMP" \
+            > "$RUNNER_TEMP/toolchain-install.log"
+
+          cat "$RUNNER_TEMP/toolchain-install.log"
+
+          TOOLCHAIN_PATH="$(tail -n 1 "$RUNNER_TEMP/toolchain-install.log")"
+
+          if [[ -z "$TOOLCHAIN_PATH" ]]; then
+            echo "ERROR: Toolchain installer did not return a directory."
+            exit 1
+          fi
+
+          if [[ ! -d "$TOOLCHAIN_PATH/bin" ]]; then
+            echo "ERROR: Toolchain bin directory does not exist:"
+            echo "  $TOOLCHAIN_PATH/bin"
+            exit 1
+          fi
+
+          echo "$TOOLCHAIN_PATH/bin" >> "$GITHUB_PATH"
+
+          echo "Installed toolchain:"
+          echo "  $TOOLCHAIN_PATH"
+
+          echo "Checking required executables..."
+
+          command -v mipsel-linux-musl-gcc
+          command -v mipsel-linux-musl-g++
+          command -v mipsel-linux-musl-strip
+          command -v mipsel-linux-musl-readelf
+
+          echo
+          echo "Compiler version:"
+          mipsel-linux-musl-gcc --version | head -n 1
+
+          echo
+          echo "C++ compiler version:"
+          mipsel-linux-musl-g++ --version | head -n 1
+
+      # ----------------------------------------------------------------------
+      # Verify cross compiler before touching the actual project
+      # ----------------------------------------------------------------------
+      - name: Verify MIPS toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "MIPS GCC:"
+          mipsel-linux-musl-gcc --version | head -n 2
+
+          echo
+          echo "MIPS G++:"
+          mipsel-linux-musl-g++ --version | head -n 2
+
+          echo
+          echo "MIPS strip:"
+          mipsel-linux-musl-strip --version | head -n 2
+
+          echo
+          echo "MIPS readelf:"
+          mipsel-linux-musl-readelf --version | head -n 2
+
+      # ----------------------------------------------------------------------
+      # Clean previous build output
+      # ----------------------------------------------------------------------
+      - name: Clean build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          make clean || true
+
+      # ----------------------------------------------------------------------
+      # Build HiBy R1 player
+      # ----------------------------------------------------------------------
+      - name: Build HiBy R1 player
+        shell: bash
         run: |
           set -euo pipefail
 
           make -j2 target
 
-      - name: Build bootloader
+      # ----------------------------------------------------------------------
+      # Build HiBy R1 bootloader
+      # ----------------------------------------------------------------------
+      - name: Build HiBy R1 bootloader
+        shell: bash
         run: |
           set -euo pipefail
 
           make -j2 bootloader
 
-      - name: Run bootloader player-selection self-test
+      # ----------------------------------------------------------------------
+      # Run bootloader self-test
+      # ----------------------------------------------------------------------
+      - name: Run bootloader player selection self-test
+        shell: bash
         run: |
           set -euo pipefail
 
           make bootloader-player-selftest
 
+      # ----------------------------------------------------------------------
+      # Verify player binary
+      # ----------------------------------------------------------------------
       - name: Verify player binary
+        shell: bash
         run: |
           set -euo pipefail
 
           BINARY="open_hiby_player_target"
 
-          echo "Verifying player: $BINARY"
+          if [[ ! -f "$BINARY" ]]; then
+            echo "ERROR: Player binary was not produced:"
+            echo "  $BINARY"
+            exit 1
+          fi
 
-          test -f "$BINARY"
-          test -s "$BINARY"
+          if [[ ! -x "$BINARY" ]]; then
+            echo "ERROR: Player binary is not executable:"
+            echo "  $BINARY"
+            exit 1
+          fi
 
-          file "$BINARY"
-
-          mipsel-linux-musl-readelf -h "$BINARY" \
-            | grep 'Machine:.*MIPS' >/dev/null
-
-          echo "Player binary successfully built:"
+          echo "Player binary:"
           ls -lh "$BINARY"
 
+          echo
+          echo "File information:"
+          file "$BINARY"
+
+          echo
+          echo "ELF header:"
+          mipsel-linux-musl-readelf -h "$BINARY"
+
+          echo
+          echo "Checking architecture..."
+
+          mipsel-linux-musl-readelf -h "$BINARY" |
+            grep -E 'Class:|Data:|Machine:.*MIPS'
+
+      # ----------------------------------------------------------------------
+      # Verify bootloader binary
+      # ----------------------------------------------------------------------
       - name: Verify bootloader binary
+        shell: bash
         run: |
           set -euo pipefail
 
           BINARY="open_hiby_bootloader"
 
-          echo "Verifying bootloader: $BINARY"
+          if [[ ! -f "$BINARY" ]]; then
+            echo "ERROR: Bootloader binary was not produced:"
+            echo "  $BINARY"
+            exit 1
+          fi
 
-          test -f "$BINARY"
-          test -s "$BINARY"
+          if [[ ! -x "$BINARY" ]]; then
+            echo "ERROR: Bootloader binary is not executable:"
+            echo "  $BINARY"
+            exit 1
+          fi
 
-          file "$BINARY"
-
-          mipsel-linux-musl-readelf -h "$BINARY" \
-            | grep 'Machine:.*MIPS' >/dev/null
-
-          echo "Bootloader binary successfully built:"
+          echo "Bootloader binary:"
           ls -lh "$BINARY"
 
-      - name: Prepare firmware package
+          echo
+          echo "File information:"
+          file "$BINARY"
+
+          echo
+          echo "ELF header:"
+          mipsel-linux-musl-readelf -h "$BINARY"
+
+          echo
+          echo "Checking architecture..."
+
+          mipsel-linux-musl-readelf -h "$BINARY" |
+            grep -E 'Class:|Data:|Machine:.*MIPS'
+
+      # ----------------------------------------------------------------------
+      # Package build outputs
+      # ----------------------------------------------------------------------
+      - name: Package firmware binaries
+        shell: bash
         run: |
           set -euo pipefail
 
-          PACKAGE_DIR="hiby-r1-firmware"
+          rm -rf release
+          mkdir -p release
 
-          rm -rf "$PACKAGE_DIR"
-          mkdir -p "$PACKAGE_DIR"
+          cp -f open_hiby_player_target \
+            release/open_hiby_player_target
 
-          cp open_hiby_bootloader "$PACKAGE_DIR/"
-          cp open_hiby_player_target "$PACKAGE_DIR/"
+          cp -f open_hiby_bootloader \
+            release/open_hiby_bootloader
 
-          cat > "$PACKAGE_DIR/BUILD_INFO.txt" <<EOF
-          HiBy R1 Player
+          chmod +x \
+            release/open_hiby_player_target \
+            release/open_hiby_bootloader
 
-          Commit: ${GITHUB_SHA}
-          Build: ${GITHUB_RUN_NUMBER}
-          Ref: ${GITHUB_REF_NAME}
+          (
+            cd release
+            sha256sum \
+              open_hiby_player_target \
+              open_hiby_bootloader \
+              > SHA256SUMS
+          )
 
-          Bootloader:
-          open_hiby_bootloader
+          cd release
 
-          Player:
-          open_hiby_player_target
-          EOF
+          zip -9 \
+            ../hiby-r1-firmware-binaries.zip \
+            open_hiby_player_target \
+            open_hiby_bootloader \
+            SHA256SUMS
 
-          zip -9 -r \
-            "hiby-r1-firmware-${GITHUB_SHA::7}.zip" \
-            "$PACKAGE_DIR"
+          cd ..
 
-          echo "Firmware package:"
-          ls -lh "hiby-r1-firmware-${GITHUB_SHA::7}.zip"
+          echo
+          echo "Release files:"
+          ls -lh \
+            open_hiby_player_target \
+            open_hiby_bootloader \
+            hiby-r1-firmware-binaries.zip
 
-      - name: Upload firmware artifact
+          echo
+          echo "SHA256:"
+          cat release/SHA256SUMS
+
+      # ----------------------------------------------------------------------
+      # Upload CI artifact
+      # ----------------------------------------------------------------------
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: hiby-r1-firmware-${{ github.sha }}
-          path: |
-            hiby-r1-firmware-*.zip
-            open_hiby_bootloader
-            open_hiby_player_target
           if-no-files-found: error
+          path: |
+            open_hiby_player_target
+            open_hiby_bootloader
+            hiby-r1-firmware-binaries.zip
+            release/SHA256SUMS
 
-      - name: Create automatic main build release
-        if: ${{ github.ref == 'refs/heads/main' }}
+      # ----------------------------------------------------------------------
+      # Main branch release
+      # ----------------------------------------------------------------------
+      - name: Create main branch release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
-          PACKAGE="hiby-r1-firmware-${GITHUB_SHA::7}.zip"
 
-          cat > release-notes.txt <<EOF
-          Automatic HiBy R1 build
-
-          Commit: ${GITHUB_SHA}
-          Build: ${GITHUB_RUN_NUMBER}
-
-          This release contains:
-
-          - HiBy R1 bootloader
-          - HiBy R1 player
-          - Firmware package
-
-          Package:
-          ${PACKAGE}
-          EOF
+          echo "Creating release:"
+          echo "  $TAG"
 
           gh release create "$TAG" \
-            "$PACKAGE" \
-            open_hiby_bootloader \
             open_hiby_player_target \
+            open_hiby_bootloader \
+            hiby-r1-firmware-binaries.zip \
+            release/SHA256SUMS \
             --target "$GITHUB_SHA" \
             --title "Latest Build" \
-            --notes-file release-notes.txt \
+            --notes "Automatic HiBy R1 firmware build from ${GITHUB_SHA}." \
             --latest
 
+      # ----------------------------------------------------------------------
+      # Version tag release
+      # ----------------------------------------------------------------------
       - name: Create version release
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           TAG="${GITHUB_REF_NAME}"
-          PACKAGE="hiby-r1-firmware-${GITHUB_SHA::7}.zip"
 
-          cat > release-notes.txt <<EOF
-          HiBy R1 Player ${TAG}
-
-          Commit: ${GITHUB_SHA}
-
-          This release contains:
-
-          - HiBy R1 bootloader
-          - HiBy R1 player
-          - Firmware package
-
-          Package:
-          ${PACKAGE}
-          EOF
+          echo "Creating release for:"
+          echo "  $TAG"
 
           gh release create "$TAG" \
-            "$PACKAGE" \
-            open_hiby_bootloader \
             open_hiby_player_target \
+            open_hiby_bootloader \
+            hiby-r1-firmware-binaries.zip \
+            release/SHA256SUMS \
             --verify-tag \
             --title "HiBy R1 Player ${TAG}" \
-            --notes-file release-notes.txt \
+            --notes "HiBy R1 firmware build ${TAG}." \
             --latest
