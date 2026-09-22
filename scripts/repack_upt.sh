@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
-# Repack an approved R1 Staging Image with freshly built player binaries.
+# Repack a supported HiBy firmware image with freshly built player binaries.
 # The base remains external because it contains stock HiBy firmware assets.
 
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 BASE_R1_UPT PLAYER_BINARY BOOTLOADER_BINARY OUTPUT_R1_UPT" >&2
+    echo "Usage: $0 [--board r1|r3proii] BASE_UPT PLAYER_BINARY BOOTLOADER_BINARY OUTPUT_UPT" >&2
+    echo "       BOARD=r3proii $0 BASE_UPT PLAYER_BINARY BOOTLOADER_BINARY OUTPUT_UPT" >&2
     exit 2
 }
 
+board=${BOARD:-r1}
+if [[ ${1:-} == --board ]]; then
+    [[ $# -ge 2 ]] || usage
+    board=$2
+    shift 2
+fi
+[[ $board == r1 || $board == r3proii ]] || {
+    echo "Unsupported board '$board' (expected r1 or r3proii)" >&2
+    exit 2
+}
 [[ $# -eq 4 ]] || usage
 
 base_upt=$(realpath "$1")
@@ -20,7 +31,7 @@ for file in "$base_upt" "$player" "$bootloader"; do
     [[ -s "$file" ]] || { echo "Missing or empty input: $file" >&2; exit 1; }
 done
 
-for command in 7z unsquashfs mksquashfs genisoimage md5sum split; do
+for command in 7z unsquashfs mksquashfs genisoimage md5sum split file; do
     command -v "$command" >/dev/null || {
         echo "Required command is unavailable: $command" >&2
         exit 1
@@ -46,25 +57,53 @@ cat "${root_chunks[@]}" > "$work/rootfs.squashfs"
 cat "${kernel_chunks[@]}" > "$work/xImage"
 unsquashfs -no-xattrs -d "$work/root" "$work/rootfs.squashfs" >/dev/null
 
-# An approved Staging Image must already contain the bootloader handoff.
-# Refuse an older public beta instead of quietly producing a firmware that
-# bypasses the boot menu after the new bootloader binary is copied in.
+if [[ $board == r3proii ]]; then
+    stock_player="$work/root/usr/bin/hiby_player"
+    if [[ ! -s "$stock_player" ]] || ! grep -aFq 'R3PROII' "$stock_player"; then
+        echo "Base OTA does not contain an R3 Pro II stock player; refusing a cross-board image" >&2
+        exit 1
+    fi
+fi
+
 wrapper="$work/root/usr/bin/hiby_player.sh"
-if [[ ! -f "$wrapper" ]] || ! grep -q '/usr/bin/open_hiby_bootloader' "$wrapper"; then
-    echo "Base OTA is not an approved Staging Image (bootloader wrapper missing)" >&2
+if [[ ! -f "$wrapper" ]]; then
+    echo "Base OTA is missing /usr/bin/hiby_player.sh" >&2
     exit 1
+fi
+
+if [[ $board == r1 ]]; then
+    # An approved R1 Staging Image must already contain the bootloader handoff.
+    # Refuse an older public beta instead of quietly producing a firmware that
+    # bypasses the boot menu after the new bootloader binary is copied in.
+    grep -q '/usr/bin/open_hiby_bootloader' "$wrapper" || {
+        echo "Base OTA is not an approved R1 Staging Image (bootloader wrapper missing)" >&2
+        exit 1
+    }
+else
+    # R3 Pro II stock firmware starts the stock player directly. Replace only
+    # the standalone command, preserving /usr/bin/hiby_player as the stock
+    # player that the bootloader can launch when selected from the SD card.
+    if ! grep -q '/usr/bin/open_hiby_bootloader' "$wrapper"; then
+        grep -Eq '^[[:space:]]*/usr/bin/hiby_player[[:space:]]*$' "$wrapper" || {
+            echo "R3 OTA has no standalone /usr/bin/hiby_player launcher to patch" >&2
+            exit 1
+        }
+        sed -i 's|^[[:space:]]*/usr/bin/hiby_player[[:space:]]*$|/usr/bin/open_hiby_bootloader|' "$wrapper"
+    fi
+    grep -q '/usr/bin/open_hiby_bootloader' "$wrapper" || {
+        echo "Failed to patch R3 /usr/bin/hiby_player.sh" >&2
+        exit 1
+    }
 fi
 
 install -m 0755 "$player" "$work/root/usr/bin/open_hiby_player"
 install -m 0755 "$bootloader" "$work/root/usr/bin/open_hiby_bootloader"
 
-# The stock boot scripts start the A2DP source daemon without the encoder
-# arguments the player's default "auto" codec preference expects, so the
-# player would have to restart the daemon on every boot to correct them --
-# tearing down any accessory that connected first. Patched here rather than
-# shipped under firmware/overlay/ because these are HiBy's scripts, not ours
-# to redistribute. Idempotent, so a base image that already carries the
-# argument is left alone.
+# The R1 stock boot scripts start the A2DP source daemon without the encoder
+# arguments the player's default "auto" codec preference expects. Keep this
+# established R1 fix; R3 stock uses a different bluealsa command line and its
+# Bluetooth scripts are deliberately left untouched.
+if [[ $board == r1 ]]; then
 for bt_script in bt_init bt_resume; do
     bt_script_path="$work/root/usr/bin/$bt_script"
     [[ -f "$bt_script_path" ]] || {
@@ -91,8 +130,35 @@ for bt_script in bt_init bt_resume; do
     done
     sh -n "$bt_script_path"
 done
+fi
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
+
+# These boot images are part of each board's identity. Require the exact
+# tracked files and panel dimensions before building a firmware package.
+require_boot_image() {
+    local path=$1 type=$2 width=$3 height=$4 description
+    git -C "$repo" ls-files --error-unmatch "$path" >/dev/null 2>&1 || {
+        echo "Boot image is not tracked in git: $path" >&2
+        exit 1
+    }
+    [[ -s "$repo/$path" ]] || { echo "Missing boot image: $path" >&2; exit 1; }
+    description=$(file -b "$repo/$path")
+    [[ $description == *"$type image data"* &&
+       $description =~ (^|[^0-9])${width}[[:space:]]*x[[:space:]]*${height}([^0-9]|$) ]] || {
+        echo "Wrong boot image format or size ($type ${width}x${height} required): $path" >&2
+        exit 1
+    }
+}
+if [[ $board == r1 ]]; then
+    require_boot_image assets/theme2/boot_animation/en/0.jpg JPEG 480 800
+    require_boot_image assets/theme2/boot_animation/en/0.png PNG 480 800
+    require_boot_image assets/r1/etc/logo1.jpeg JPEG 480 800
+else
+    require_boot_image assets/r3proii/theme2/boot_animation/en/0.jpg JPEG 480 720
+    require_boot_image assets/r3proii/theme2/boot_animation/en/0.png PNG 480 720
+    require_boot_image assets/r3proii/etc/logo1.jpeg JPEG 480 720
+fi
 
 # UI assets and fonts we own, kept under assets/ in the tree the device itself
 # uses: assets/theme2/<dir>/<file> lands at /usr/resource/litegui/theme2/, and
@@ -112,7 +178,13 @@ copy_tracked_assets() {
         cp -a "$repo/$f" "$dest/$rel"
     done < <(git -C "$repo" ls-files "$src")
 }
-copy_tracked_assets assets/theme2 "$work/root/usr/resource/litegui/theme2"
+if [[ $board == r1 ]]; then
+    copy_tracked_assets assets/theme2 "$work/root/usr/resource/litegui/theme2"
+    copy_tracked_assets assets/r1/etc "$work/root/etc"
+else
+    copy_tracked_assets assets/r3proii/theme2 "$work/root/usr/resource/litegui/theme2"
+    copy_tracked_assets assets/r3proii/etc "$work/root/etc"
+fi
 copy_tracked_assets assets/fonts  "$work/root/usr/resource/fonts"
 
 # Non-asset files we own that are not in stock, laid out as squashfs-root-
@@ -122,6 +194,19 @@ copy_tracked_assets assets/fonts  "$work/root/usr/resource/fonts"
 overlay="$repo/firmware/overlay"
 if [[ -d "$overlay" ]]; then
     cp -a "$overlay"/. "$work/root/"
+fi
+
+# Keep the two board packages on the same known-good font set. The manifest
+# contains hashes extracted from the approved R1 package and is checked after
+# every stock asset and overlay has been applied.
+font_manifest="$repo/scripts/r1_firmware_fonts.sha256"
+[[ -s "$font_manifest" ]] || {
+    echo "Missing font parity manifest: $font_manifest" >&2
+    exit 1
+}
+if ! (cd "$work/root" && sha256sum -c "$font_manifest"); then
+    echo "Firmware font parity check failed; R1 and R3 packages must use the same font files" >&2
+    exit 1
 fi
 
 mksquashfs "$work/root" "$work/new-rootfs.squashfs" \

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #ifdef HOST_BUILD
 #include <execinfo.h>
@@ -163,6 +164,64 @@ static bool sd_mount_point_mounted(void) {
     return parent_st.st_dev != mnt_st.st_dev;
 }
 
+/* mdev normally creates these nodes when hardware appears.  If mdev died or
+ * missed the hotplug event, an old node can remain in /dev with the previous
+ * major/minor pair.  Read the kernel's current pair from sysfs and repair
+ * only nodes explicitly requested by the callers below.  Never replace a
+ * non-device entry: an unexpected file or symlink must remain untouched. */
+static void sync_device_node_from_sysfs(const char * sysfs_class,
+                                        const char * device_name,
+                                        const char * device_path,
+                                        mode_t device_type) {
+    char sysfs_path[PATH_MAX];
+    unsigned int major_num, minor_num;
+    struct stat node_st;
+    FILE * sysfs;
+
+    if (snprintf(sysfs_path, sizeof(sysfs_path),
+                 "/sys/class/%s/%s/dev", sysfs_class, device_name) >= (int) sizeof(sysfs_path)) {
+        return;
+    }
+    sysfs = fopen(sysfs_path, "r");
+    if (!sysfs) return;
+    if (fscanf(sysfs, "%u:%u", &major_num, &minor_num) != 2) {
+        fclose(sysfs);
+        return;
+    }
+    fclose(sysfs);
+
+    dev_t expected = makedev(major_num, minor_num);
+    if (lstat(device_path, &node_st) == 0) {
+        if ((node_st.st_mode & S_IFMT) != device_type) return;
+        if (node_st.st_rdev == expected) return;
+        if (unlink(device_path) != 0) return;
+    } else if (errno != ENOENT) {
+        return;
+    }
+
+    (void) mknod(device_path, device_type | 0660, expected);
+}
+
+static void sync_sd_device_nodes(void) {
+    sync_device_node_from_sysfs("block", "mmcblk0", "/dev/mmcblk0", S_IFBLK);
+    sync_device_node_from_sysfs("block", "mmcblk0p1", "/dev/mmcblk0p1", S_IFBLK);
+}
+
+/* Recover the two internal ALSA nodes needed by audio_init() when mdev has
+ * missed the sound-card event.  mkdir() is intentionally non-destructive:
+ * an existing unexpected /dev/snd entry is left alone. */
+static void sync_sound_device_nodes(void) {
+    struct stat snd_dir_st;
+
+    if (lstat("/dev/snd", &snd_dir_st) != 0) {
+        if (errno != ENOENT || mkdir("/dev/snd", 0755) != 0) return;
+    }
+    if (lstat("/dev/snd", &snd_dir_st) != 0 || !S_ISDIR(snd_dir_st.st_mode)) return;
+
+    sync_device_node_from_sysfs("sound", "controlC0", "/dev/snd/controlC0", S_IFCHR);
+    sync_device_node_from_sysfs("sound", "pcmC0D0p", "/dev/snd/pcmC0D0p", S_IFCHR);
+}
+
 /* Tries each supported filesystem type (vfat, exfat, NTFS) against one
  * device node in turn, stopping at the first that actually mounts.
  *
@@ -196,6 +255,8 @@ void mount_sd_card_if_needed(void) {
     mkdir("/data/mnt", 0755);
     mkdir("/data/mnt/sd_0", 0755);
     if (sd_mount_point_mounted()) return;
+
+    sync_sd_device_nodes();
 
     try_mount_sd_device_node("/dev/mmcblk0p1");
     if (sd_mount_point_mounted()) return;
@@ -459,6 +520,9 @@ int main(int argc, char ** argv) {
 #endif
 
     /* 2. Initialize audio playback and the application GUI */
+#ifndef HOST_BUILD
+    sync_sound_device_nodes();
+#endif
     audio_init();
 #ifndef HOST_BUILD
     boot_checkpoint("audio_init done");

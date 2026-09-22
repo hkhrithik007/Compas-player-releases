@@ -35,9 +35,14 @@ make bootloader             # -> open_hiby_bootloader
 
 ```bash
 make target BOARD=r3proii   # -> open_hiby_player_target_r3proii
+make bootloader BOARD=r3proii # -> open_hiby_bootloader_r3proii
 ```
 
-The tree has a 480×720 layout, 4.4 mm balanced-output routing, extra charger-IC handling, and UI scaling. Do not treat an R3 build as an R1 binary.
+The tree has a 480×720 layout, 4.4 mm balanced-output routing, extra charger-IC handling, and UI scaling. Do not treat an R3 build as an R1 binary. The scheduled GitHub **Daily build** workflow publishes these two R3 binaries as a downloadable workflow artifact. A complete R3 `.upt` release requires a separately approved R3 staging image and checksum secret; the stock image is not used automatically.
+
+For a local R3 firmware candidate, supply your own R3 Pro II `.upt` and run `BOARD=r3proii scripts/repack_upt.sh BASE_R3_UPT open_hiby_player_target_r3proii open_hiby_bootloader_r3proii OUTPUT_R3_UPT`. The repacker checks the stock player for the R3 board marker, adds the bootloader handoff, and installs the 480×720 boot assets. Keep the original base image for recovery; the candidate has not been validated on R3 hardware.
+
+When the repository secret `R3PROII_STAGING_IMAGE_SHA256` is configured, the same workflow can verify the R3 base image and publish a second, staging-only workflow artifact containing the repacked `.upt`. The manual workflow's `r3_base_asset` input selects the `.upt` asset from the private `staging-image-base` release. No public GitHub release is created by this path.
 
 ## HiBy R3 II 2025
 
@@ -131,6 +136,24 @@ Download `r1.upt` from the **[releases page](https://github.com/Starnished66/R1-
 Build the R1 binaries with `make target BOARD=r1` and `make bootloader BOARD=r1`, then follow **[docs/HOW_TO_BUILD_A_UPT_FILE.md](docs/HOW_TO_BUILD_A_UPT_FILE.md)**.
 
 This needs a base image, which is not in the repository — download the *Base image for new releases* from the releases page. It has to be that approved staging image: the packer checks the base's `hiby_player.sh` and refuses an arbitrary stock `.upt` or an older public beta. It also rejects images over 45 MiB and will not mix R1 and R3 binaries.
+
+To build both board images in one run, provide the approved R1 and R3 Pro II
+base images and an output directory:
+
+```sh
+scripts/build_both_upt.sh /path/to/r1-base.upt /path/to/r3proii-base.upt output/
+```
+
+This builds each board's player and bootloader, then writes `output/r1.upt` and
+`output/r3proii.upt` without modifying either base image.
+
+The GitHub **Daily build** workflow also packages both board images as separate
+staging artifacts. It reads `r1.upt` and the selected R3 `.upt` from the
+`staging-image-base` release and requires their corresponding checksum secrets
+(`STAGING_IMAGE_SHA256` and `R3PROII_STAGING_IMAGE_SHA256`). A package job is
+shown as skipped when its secret is absent. The weekly beta packages both R1
+and R3 Pro II and requires both approved base images and checksum secrets;
+R3 Pro II still needs validation on real hardware.
 
 ---
 
