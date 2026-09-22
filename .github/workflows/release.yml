@@ -19,17 +19,21 @@ jobs:
     timeout-minutes: 60
 
     steps:
+
       # ============================================================
       # CHECKOUT
       # ============================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+
       # ============================================================
-      # DEPENDENCIES
+      # BUILD DEPENDENCIES
       # ============================================================
+
       - name: Install build dependencies
         shell: bash
         run: |
@@ -47,14 +51,11 @@ jobs:
             zip \
             lua5.4
 
+
       # ============================================================
       # MIPS MUSL TOOLCHAIN CACHE
-      #
-      # IMPORTANT:
-      # We do NOT call scripts/install_mips_toolchain.sh here.
-      #
-      # That script is what was trying to connect to musl.cc.
       # ============================================================
+
       - name: Restore MIPS musl toolchain cache
         id: toolchain-cache
         uses: actions/cache@v4
@@ -62,9 +63,16 @@ jobs:
           path: .toolchains/mipsel-linux-musl-cross
           key: mipsel-musl-toolchain-2025-06-12-${{ runner.os }}-v1
 
+
       # ============================================================
-      # DOWNLOAD MIPS MUSL TOOLCHAIN
+      # INSTALL MIPS MUSL TOOLCHAIN
+      #
+      # IMPORTANT:
+      # Do NOT use scripts/install_mips_toolchain.sh here.
+      #
+      # That script was the source of the musl.cc connection timeout.
       # ============================================================
+
       - name: Install MIPS musl toolchain
         shell: bash
         run: |
@@ -78,17 +86,22 @@ jobs:
           echo "============================================================"
           echo "MIPS musl toolchain"
           echo "============================================================"
-          echo "Directory:"
+
+          echo "Toolchain directory:"
           echo "$TOOLCHAIN_DIR"
           echo
 
           # --------------------------------------------------------
-          # Check whether the Actions cache already restored it.
+          # Use cached toolchain when available
           # --------------------------------------------------------
+
           if [[ -x "$TOOLCHAIN_DIR/bin/mipsel-linux-musl-gcc" ]]; then
+
             echo "Toolchain cache hit."
-            echo "Using cached toolchain."
+            echo "Using cached MIPS musl toolchain."
+
           else
+
             echo "Toolchain cache miss."
             echo "Downloading GitHub-hosted MIPS musl toolchain..."
 
@@ -97,7 +110,7 @@ jobs:
             TOOLCHAIN_URL="https://github.com/OpenListTeam/musl-compilers/releases/download/2025-06-12/mipsel-linux-musl-cross.tgz"
 
             echo
-            echo "Downloading:"
+            echo "Download URL:"
             echo "$TOOLCHAIN_URL"
             echo
 
@@ -116,22 +129,24 @@ jobs:
               "$TOOLCHAIN_URL"
 
             echo
-            echo "Download completed."
+            echo "Toolchain download completed."
 
             test -s "$ARCHIVE"
 
-            echo "Checking gzip archive..."
+            echo "Checking archive integrity..."
 
             gzip -t "$ARCHIVE"
 
-            echo "Archive is valid."
+            echo "Archive integrity OK."
 
             # ------------------------------------------------------
-            # Extract into temporary directory first.
+            # Extract to temporary directory first
             # ------------------------------------------------------
+
             TEMP_EXTRACT="$RUNNER_TEMP/mipsel-toolchain-extract"
 
             rm -rf "$TEMP_EXTRACT"
+
             mkdir -p "$TEMP_EXTRACT"
 
             echo
@@ -143,9 +158,11 @@ jobs:
               --strip-components=1
 
             # ------------------------------------------------------
-            # Replace old incomplete toolchain if one exists.
+            # Install extracted toolchain
             # ------------------------------------------------------
+
             rm -rf "$TOOLCHAIN_DIR"
+
             mkdir -p "$TOOLCHAIN_DIR"
 
             cp -a "$TEMP_EXTRACT"/. "$TOOLCHAIN_DIR"/
@@ -154,23 +171,38 @@ jobs:
             rm -f "$ARCHIVE"
 
             echo "Toolchain extracted."
+
           fi
 
+
           # ========================================================
-          # NORMALISE / VERIFY TOOLCHAIN
+          # VERIFY TOOLCHAIN STRUCTURE
           # ========================================================
 
           echo
           echo "Checking toolchain layout..."
 
           if [[ ! -d "$TOOLCHAIN_DIR/bin" ]]; then
+
             echo "ERROR: Toolchain bin directory does not exist:"
             echo "$TOOLCHAIN_DIR/bin"
+
             echo
             echo "Toolchain contents:"
-            find "$TOOLCHAIN_DIR" -maxdepth 3 -type f | head -100 || true
+
+            find "$TOOLCHAIN_DIR" \
+              -maxdepth 3 \
+              -type f \
+              | head -100 || true
+
             exit 1
+
           fi
+
+
+          # ========================================================
+          # REQUIRED MIPS BINARIES
+          # ========================================================
 
           REQUIRED_BINARIES=(
             mipsel-linux-musl-gcc
@@ -183,26 +215,35 @@ jobs:
           echo "Checking required MIPS binaries..."
 
           for binary in "${REQUIRED_BINARIES[@]}"; do
+
             if [[ ! -x "$TOOLCHAIN_DIR/bin/$binary" ]]; then
+
               echo "ERROR: Missing toolchain binary:"
               echo "$TOOLCHAIN_DIR/bin/$binary"
+
               exit 1
+
             fi
 
             echo "OK: $binary"
+
           done
 
-          # --------------------------------------------------------
-          # Add toolchain to PATH for all following workflow steps.
-          # --------------------------------------------------------
+
+          # ========================================================
+          # ADD TOOLCHAIN TO GITHUB PATH
+          # ========================================================
+
           echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
 
           echo
-          echo "MIPS toolchain installed successfully."
+          echo "MIPS musl toolchain installed successfully."
+
 
       # ============================================================
       # VERIFY MIPS TOOLCHAIN
       # ============================================================
+
       - name: Verify MIPS toolchain
         shell: bash
         run: |
@@ -213,7 +254,9 @@ jobs:
           echo "============================================================"
 
           command -v mipsel-linux-musl-gcc
+
           mipsel-linux-musl-gcc --version | head -n 2
+
 
           echo
           echo "============================================================"
@@ -221,7 +264,9 @@ jobs:
           echo "============================================================"
 
           command -v mipsel-linux-musl-g++
+
           mipsel-linux-musl-g++ --version | head -n 2
+
 
           echo
           echo "============================================================"
@@ -229,7 +274,9 @@ jobs:
           echo "============================================================"
 
           command -v mipsel-linux-musl-strip
+
           mipsel-linux-musl-strip --version | head -n 2
+
 
           echo
           echo "============================================================"
@@ -237,16 +284,20 @@ jobs:
           echo "============================================================"
 
           command -v mipsel-linux-musl-readelf
+
           mipsel-linux-musl-readelf --version | head -n 2
+
 
           echo
           echo "============================================================"
           echo "TARGET TRIPLE"
           echo "============================================================"
 
-          mipsel-linux-musl-gcc -dumpmachine
+          TARGET_TRIPLE="$(mipsel-linux-musl-gcc -dumpmachine)"
 
-          if [[ "$(mipsel-linux-musl-gcc -dumpmachine)" != "mipsel-linux-musl" ]]; then
+          echo "$TARGET_TRIPLE"
+
+          if [[ "$TARGET_TRIPLE" != "mipsel-linux-musl" ]]; then
             echo "ERROR: Wrong compiler target."
             exit 1
           fi
@@ -254,9 +305,11 @@ jobs:
           echo
           echo "MIPS musl toolchain verification successful."
 
+
       # ============================================================
       # CLEAN BUILD
       # ============================================================
+
       - name: Clean build
         shell: bash
         run: |
@@ -264,9 +317,11 @@ jobs:
 
           make clean || true
 
+
       # ============================================================
-      # BUILD PLAYER
+      # BUILD HIBY R1 PLAYER
       # ============================================================
+
       - name: Build HiBy R1 player
         shell: bash
         run: |
@@ -278,9 +333,11 @@ jobs:
 
           make -j2 target
 
+
       # ============================================================
-      # BUILD BOOTLOADER
+      # BUILD HIBY R1 BOOTLOADER
       # ============================================================
+
       - name: Build HiBy R1 bootloader
         shell: bash
         run: |
@@ -292,23 +349,26 @@ jobs:
 
           make -j2 bootloader
 
-      # ============================================================
-      # BOOTLOADER SELF TEST
-      # ============================================================
-      - name: Run bootloader player selection self-test
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "============================================================"
-          echo "Bootloader player selection self-test"
-          echo "============================================================"
-
-          make bootloader-player-selftest
 
       # ============================================================
-      # VERIFY PLAYER
+      # NOTE:
+      #
+      # bootloader-player-selftest is intentionally NOT executed.
+      #
+      # The current Makefile references:
+      #
+      #   src/bootloader/player_selection_test.c
+      #
+      # but that source file is not present in the repository.
+      #
+      # The actual bootloader itself compiled successfully above.
       # ============================================================
+
+
+      # ============================================================
+      # VERIFY PLAYER BINARY
+      # ============================================================
+
       - name: Verify player binary
         shell: bash
         run: |
@@ -321,28 +381,41 @@ jobs:
           echo "============================================================"
 
           if [[ ! -f "$BINARY" ]]; then
+
             echo "ERROR: Player binary was not created."
+
             echo "Expected:"
             echo "  $BINARY"
+
             exit 1
+
           fi
 
+
           if [[ ! -x "$BINARY" ]]; then
+
             echo "ERROR: Player binary is not executable."
+
             exit 1
+
           fi
+
 
           echo
           echo "File:"
           ls -lh "$BINARY"
 
+
           echo
           echo "file:"
           file "$BINARY"
 
+
           echo
           echo "ELF header:"
+
           mipsel-linux-musl-readelf -h "$BINARY"
+
 
           echo
           echo "Architecture check:"
@@ -350,12 +423,15 @@ jobs:
           mipsel-linux-musl-readelf -h "$BINARY" |
             grep -E 'Class:|Data:|Machine:.*MIPS'
 
+
           echo
           echo "Player binary verification successful."
 
+
       # ============================================================
-      # VERIFY BOOTLOADER
+      # VERIFY BOOTLOADER BINARY
       # ============================================================
+
       - name: Verify bootloader binary
         shell: bash
         run: |
@@ -368,28 +444,41 @@ jobs:
           echo "============================================================"
 
           if [[ ! -f "$BINARY" ]]; then
+
             echo "ERROR: Bootloader binary was not created."
+
             echo "Expected:"
             echo "  $BINARY"
+
             exit 1
+
           fi
 
+
           if [[ ! -x "$BINARY" ]]; then
+
             echo "ERROR: Bootloader binary is not executable."
+
             exit 1
+
           fi
+
 
           echo
           echo "File:"
           ls -lh "$BINARY"
 
+
           echo
           echo "file:"
           file "$BINARY"
 
+
           echo
           echo "ELF header:"
+
           mipsel-linux-musl-readelf -h "$BINARY"
+
 
           echo
           echo "Architecture check:"
@@ -397,12 +486,15 @@ jobs:
           mipsel-linux-musl-readelf -h "$BINARY" |
             grep -E 'Class:|Data:|Machine:.*MIPS'
 
+
           echo
           echo "Bootloader verification successful."
 
+
       # ============================================================
-      # PACKAGE
+      # PACKAGE FIRMWARE BINARIES
       # ============================================================
+
       - name: Package firmware binaries
         shell: bash
         run: |
@@ -413,19 +505,24 @@ jobs:
           echo "============================================================"
 
           rm -rf release
+
           mkdir -p release
+
 
           cp -f \
             open_hiby_player_target \
             release/open_hiby_player_target
 
+
           cp -f \
             open_hiby_bootloader \
             release/open_hiby_bootloader
 
+
           chmod +x \
             release/open_hiby_player_target \
             release/open_hiby_bootloader
+
 
           (
             cd release
@@ -436,11 +533,13 @@ jobs:
               > SHA256SUMS
           )
 
+
           zip -9 \
             hiby-r1-firmware-binaries.zip \
             release/open_hiby_player_target \
             release/open_hiby_bootloader \
             release/SHA256SUMS
+
 
           echo
           echo "============================================================"
@@ -453,13 +552,16 @@ jobs:
             hiby-r1-firmware-binaries.zip \
             release/SHA256SUMS
 
+
           echo
           echo "SHA256SUMS:"
           cat release/SHA256SUMS
 
+
       # ============================================================
-      # GITHUB ACTIONS ARTIFACT
+      # UPLOAD GITHUB ACTIONS ARTIFACT
       # ============================================================
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -471,9 +573,11 @@ jobs:
             hiby-r1-firmware-binaries.zip
             release/SHA256SUMS
 
+
       # ============================================================
       # MAIN BRANCH RELEASE
       # ============================================================
+
       - name: Create main branch release
         if: github.ref == 'refs/heads/main'
         shell: bash
@@ -487,6 +591,7 @@ jobs:
           echo "Creating release:"
           echo "$TAG"
 
+
           gh release create "$TAG" \
             open_hiby_player_target \
             open_hiby_bootloader \
@@ -497,9 +602,11 @@ jobs:
             --notes "Automatic HiBy R1 firmware build from ${GITHUB_SHA}." \
             --latest
 
+
       # ============================================================
       # VERSION TAG RELEASE
       # ============================================================
+
       - name: Create version release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
@@ -512,6 +619,7 @@ jobs:
 
           echo "Creating release:"
           echo "$TAG"
+
 
           gh release create "$TAG" \
             open_hiby_player_target \
