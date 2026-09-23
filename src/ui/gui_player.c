@@ -71,6 +71,7 @@ static bool is_sd_card_path(const char *path);
 #include "settings.h"
 #include "assets.h"
 #include "device_config.h"
+#include "storage_paths.h"
 #include "plugin_manager.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -3110,10 +3111,8 @@ static void commit_decoder_failure_advance_plan(const failure_advance_plan_t * p
         if (plan->queued_consumed >= queued_pending_count) {
             queued_pending_count = 0;
             queue_next_insert_index = -1;
-            remote_control_sync_queue(NULL, 0);
         } else {
             queued_pending_count -= plan->queued_consumed;
-            remote_control_sync_queue((const char * const *) &playlist[plan->target_index + 1], queued_pending_count);
         }
     }
 
@@ -3146,8 +3145,6 @@ void commit_auto_advance(void) {
         if (shuffle_order && shuffle_order_count == playlist_count) shuffle_pos++;
         queued_pending_count--;
         if (queued_pending_count == 0) queue_next_insert_index = -1;
-        remote_control_sync_queue(queued_pending_count > 0 ? (const char * const *) &playlist[playlist_index + 2] : NULL,
-                                  queued_pending_count);
         return;
     }
 
@@ -3175,7 +3172,6 @@ int compute_manual_step_index(int index, int direction) {
     if (index < 0 || playlist_count <= 0) return -1;
     if (direction < 0 && queued_pending_count > 0) {
         queued_pending_count = 0; queue_next_insert_index = -1;
-        remote_control_sync_queue(NULL, 0);
     }
 
     /* Same queue-priority override as compute_auto_advance_index()/
@@ -3189,8 +3185,6 @@ int compute_manual_step_index(int index, int direction) {
         if (shuffle_order && shuffle_order_count == playlist_count) shuffle_pos++;
         queued_pending_count--;
         if (queued_pending_count == 0) queue_next_insert_index = -1;
-        remote_control_sync_queue(queued_pending_count > 0 ? (const char * const *) &playlist[index + 2] : NULL,
-                                  queued_pending_count);
         return index + 1;
     }
 
@@ -3476,7 +3470,6 @@ void gui_player_queue_add_many(const char * const * paths, int count) {
     queue_shuffle_insert(pos, count);
     lv_label_set_text_fmt(song_count_label, "%d/%d", playlist_index + 1, playlist_count);
     arm_next_track_for_audio(playlist_index);
-    remote_control_sync_queue((const char * const *) &playlist[playlist_index + 1], queued_pending_count);
 
     char msg[64];
     snprintf(msg, sizeof(msg), "Added %d songs to queue", count);
@@ -3498,8 +3491,6 @@ void queue_remove_song_at_offset(int offset) {
     queue_next_insert_index = queued_pending_count > 0 ? playlist_index + 1 + queued_pending_count : -1;
     lv_label_set_text_fmt(song_count_label, "%d/%d", playlist_index + 1, playlist_count);
     arm_next_track_for_audio(playlist_index);
-    remote_control_sync_queue(queued_pending_count > 0 ? (const char * const *) &playlist[playlist_index + 1] : NULL,
-                              queued_pending_count);
     show_info_toast("Removed from queue");
 }
 
@@ -3705,7 +3696,6 @@ void on_file_selected(char ** new_playlist, int count, int selected_index) {
      * clears "Up Next". */
     queued_pending_count = 0;
     queue_next_insert_index = -1;
-    remote_control_sync_queue(NULL, 0);
     play_track_at(selected_index);
 }
 
@@ -3721,7 +3711,6 @@ void on_file_selected_at(char ** new_playlist, int count, int selected_index, do
     queue_pin_sd_dir_if_needed();
     queued_pending_count = 0;
     queue_next_insert_index = -1;
-    remote_control_sync_queue(NULL, 0);
     play_track_at_from(selected_index, start_seconds);
 }
 
@@ -3815,7 +3804,6 @@ void on_file_browser_index_selected(file_browser_index_t *index, unsigned playab
     for (unsigned i = 0; i < playable_count; i++) order[i] = (int) i;
     queue_sd_dirfd = pinned_queue_dirfd;
     queued_pending_count = 0; queue_next_insert_index = -1;
-    remote_control_sync_queue(NULL, 0);
     set_player_source_file_browser(file_browser_get_last_selected_dir(), file_browser_get_last_selected_row());
     play_track_at((int) selected_playable);
 }
@@ -4307,7 +4295,6 @@ void on_file_selected_lazy_all_songs(int selected_index) {
     for (int i = 0; i < count; i++) playlist_lazy_sort_order[i] = i;
     playlist_lazy_order_is_recency = false;
     queued_pending_count = 0;
-    remote_control_sync_queue(NULL, 0);
     play_track_at(selected_index);
 }
 
@@ -4338,20 +4325,23 @@ void on_file_selected_lazy_recently_added(int selected_index) {
     for (int i = 0; i < count; i++) playlist_lazy_sort_order[i] = i;
     playlist_lazy_order_is_recency = true;
     queued_pending_count = 0;
-    remote_control_sync_queue(NULL, 0);
     play_track_at(selected_index);
 }
 
 static bool resume_playlist_needs_lazy_order = false;
 static file_browser_index_t *resume_file_index = NULL;
 #ifdef HOST_BUILD
-#define QUEUE_RESUME_PATH "./open_hiby_player_queue.bin"
-#define SD_QUEUE_RESUME_PATH "./music/.open_hiby_player/queue.bin"
-#define SD_QUEUE_RESUME_DIR "./music/.open_hiby_player"
+#define QUEUE_RESUME_PATH "./.compas/queue.bin"
+#define SD_QUEUE_RESUME_PATH "./music/.compas/queue.bin"
+#define SD_QUEUE_RESUME_DIR "./music/.compas"
+#define QUEUE_RESUME_LEGACY_PATH "./open_hiby_player_queue.bin"
+#define SD_QUEUE_RESUME_LEGACY_PATH "./music/.open_hiby_player/queue.bin"
 #else
-#define QUEUE_RESUME_PATH "/usr/data/open_hiby_player_queue.bin"
-#define SD_QUEUE_RESUME_PATH "/data/mnt/sd_0/.open_hiby_player/queue.bin"
-#define SD_QUEUE_RESUME_DIR "/data/mnt/sd_0/.open_hiby_player"
+#define QUEUE_RESUME_PATH "/usr/data/.compas/queue.bin"
+#define SD_QUEUE_RESUME_PATH "/data/mnt/sd_0/.compas/queue.bin"
+#define SD_QUEUE_RESUME_DIR "/data/mnt/sd_0/.compas"
+#define QUEUE_RESUME_LEGACY_PATH "/usr/data/open_hiby_player_queue.bin"
+#define SD_QUEUE_RESUME_LEGACY_PATH "/data/mnt/sd_0/.open_hiby_player/queue.bin"
 #endif
 
 /* A lazy All-Songs queue has no paths until playlist_path_at() resolves them.
@@ -4388,6 +4378,7 @@ static bool have_restored_queue;
 typedef struct {
     int target_dirfd;
     char target_name[NAME_MAX];
+    bool target_is_sd;
     queue_resume_t queue;
 } checkpoint_worker_ctx_t;
 
@@ -4414,8 +4405,8 @@ static int open_sd_queue_dir(void) {
      * rename/unlink to the new card. */
     int rootfd = open(MUSIC_ROOT_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (rootfd < 0) return -1;
-    (void) mkdirat(rootfd, ".open_hiby_player", 0755);
-    int dirfd = openat(rootfd, ".open_hiby_player", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    (void) mkdirat(rootfd, COMPAS_STORAGE_DIR, 0755);
+    int dirfd = openat(rootfd, COMPAS_STORAGE_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     close(rootfd);
     return dirfd;
 }
@@ -4426,8 +4417,8 @@ static int open_queue_dir_from_snapshot(const metadata_db_snapshot_t *snapshot) 
     int rootfd = openat(dbfd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     close(dbfd);
     if (rootfd < 0) return -1;
-    (void) mkdirat(rootfd, ".open_hiby_player", 0755);
-    int dirfd = openat(rootfd, ".open_hiby_player", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    (void) mkdirat(rootfd, COMPAS_STORAGE_DIR, 0755);
+    int dirfd = openat(rootfd, COMPAS_STORAGE_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     close(rootfd);
     return dirfd;
 }
@@ -4452,8 +4443,8 @@ static int open_queue_dir_from_file_index(const file_browser_index_t *index) {
         if (parent < 0) { close(fd); return -1; }
         close(fd); fd = parent;
     }
-    (void) mkdirat(fd, ".open_hiby_player", 0755);
-    int queuefd = openat(fd, ".open_hiby_player", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    (void) mkdirat(fd, COMPAS_STORAGE_DIR, 0755);
+    int queuefd = openat(fd, COMPAS_STORAGE_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     close(fd);
     return queuefd;
 }
@@ -4471,6 +4462,23 @@ static int open_checkpoint_target_dir(const char * path) {
 
 static void remove_queue_checkpoint_at(int dirfd, const char * name) {
     if (dirfd >= 0 && name) (void) unlinkat(dirfd, name, 0);
+}
+
+static void remove_legacy_sd_checkpoint(int compas_dirfd) {
+    int rootfd = openat(compas_dirfd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (rootfd < 0) return;
+    int legacyfd = openat(rootfd, LEGACY_STORAGE_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (legacyfd >= 0) { (void) unlinkat(legacyfd, "queue.bin", 0); close(legacyfd); }
+    close(rootfd);
+}
+
+static void retire_legacy_checkpoint(const checkpoint_worker_ctx_t * ctx) {
+    if (!ctx) return;
+    if (!ctx->target_is_sd) {
+        (void) unlink(QUEUE_RESUME_LEGACY_PATH);
+        return;
+    }
+    remove_legacy_sd_checkpoint(ctx->target_dirfd);
 }
 
 /* Plain uint64_t, not atomic: this target's toolchain lacks a native 64-bit
@@ -4491,10 +4499,14 @@ static double checkpoint_position_sd = -1;
 
 static void * queue_checkpoint_worker(void * arg) {
     checkpoint_worker_ctx_t * ctx = (checkpoint_worker_ctx_t *) arg;
-    if (!queue_resume_write_at(ctx->target_dirfd, ctx->target_name, &ctx->queue)) {
+    bool wrote = queue_resume_write_at(ctx->target_dirfd, ctx->target_name, &ctx->queue);
+    if (!wrote) {
         /* Retry on the next checkpoint; never replace a valid file on failure. */
         atomic_store(&checkpoint_failure_pending, true);
-    } else atomic_store(&checkpoint_failure_pending, false);
+    } else {
+        atomic_store(&checkpoint_failure_pending, false);
+        retire_legacy_checkpoint(ctx);
+    }
     queue_resume_free(&ctx->queue);
     if (atomic_load(&checkpoint_large_lazy_cleanup_pending)) {
         remove_queue_checkpoint_at(ctx->target_dirfd, ctx->target_name);
@@ -4529,8 +4541,10 @@ void gui_player_queue_checkpoint(void) {
             checkpoint_running = false;
         }
         int internal_dirfd = open_checkpoint_target_dir(QUEUE_RESUME_PATH);
-        if (internal_dirfd >= 0) { remove_queue_checkpoint_at(internal_dirfd, "open_hiby_player_queue.bin"); close(internal_dirfd); }
+        if (internal_dirfd >= 0) { remove_queue_checkpoint_at(internal_dirfd, "queue.bin"); close(internal_dirfd); }
         if (queue_sd_dirfd >= 0) remove_queue_checkpoint_at(queue_sd_dirfd, "queue.bin");
+        (void) unlink(QUEUE_RESUME_LEGACY_PATH);
+        if (queue_sd_dirfd >= 0) remove_legacy_sd_checkpoint(queue_sd_dirfd);
         checkpoint_revision_internal = 0;
         checkpoint_position_internal = -1;
         checkpoint_revision_sd = 0;
@@ -4565,7 +4579,7 @@ void gui_player_queue_checkpoint(void) {
     bool sd_mounted = sd_card_root_is_mounted() && !atomic_load(&sd_card_absent_immediate);
 
     const char * target_path = QUEUE_RESUME_PATH;
-    const char * target_name = "open_hiby_player_queue.bin";
+    const char * target_name = "queue.bin";
     int target_dirfd = open_checkpoint_target_dir(target_path);
     uint64_t * last_rev = &checkpoint_revision_internal;
     double * last_pos = &checkpoint_position_internal;
@@ -4574,6 +4588,11 @@ void gui_player_queue_checkpoint(void) {
         target_name = "queue.bin";
         target_path = SD_QUEUE_RESUME_PATH;
         if (target_dirfd >= 0) close(target_dirfd);
+        /* A restored queue.bin fills playlist[] without going through
+         * on_file_selected(), which is the only place that used to pin this
+         * directory. Leaving it at -1 made every boot checkpoint fail before
+         * any write, and the toast blamed a read-only card. */
+        if (queue_sd_dirfd < 0) queue_sd_dirfd = open_sd_queue_dir();
         target_dirfd = queue_sd_dirfd >= 0 ? dup(queue_sd_dirfd) : -1;
         last_rev = &checkpoint_revision_sd;
         last_pos = &checkpoint_position_sd;
@@ -4610,6 +4629,7 @@ void gui_player_queue_checkpoint(void) {
 
     checkpoint_ctx.target_dirfd = target_dirfd;
     snprintf(checkpoint_ctx.target_name, sizeof(checkpoint_ctx.target_name), "%s", target_name);
+    checkpoint_ctx.target_is_sd = is_sd_persistable && sd_mounted;
     checkpoint_ctx.queue = s;
     *last_rev = queue_revision;
     *last_pos = position;
@@ -4691,7 +4711,6 @@ void gui_player_handle_sd_unmount(void) {
         plugin_manager_notify_stopped();
     }
     free_playlist();
-    remote_control_sync_queue(NULL, 0);
     clear_player_source();
     set_play_button_state(false);
     if (song_title_label) lv_label_set_text(song_title_label, "No track loaded");
@@ -4705,7 +4724,8 @@ bool build_sd_card_resume_playlist(char *** out_playlist, int * out_count, int *
     queue_resume_free(&restored_queue);
     have_restored_queue = false;
 
-    if (!queue_resume_read(SD_QUEUE_RESUME_PATH, &restored_queue)) return false;
+    if (!queue_resume_read(SD_QUEUE_RESUME_PATH, &restored_queue) &&
+        !queue_resume_read(SD_QUEUE_RESUME_LEGACY_PATH, &restored_queue)) return false;
 
     if (restored_queue.count <= 0 || restored_queue.current < 0 || restored_queue.current >= restored_queue.count) {
         queue_resume_free(&restored_queue);
@@ -4834,7 +4854,6 @@ bool gui_player_queue_restart_displayed(int selected) {
     shuffle_pos = -1;
     free(pending_shuffle_order);
     pending_shuffle_order = NULL;
-    remote_control_sync_queue(NULL, 0);
     return true;
 }
 
@@ -4846,7 +4865,8 @@ bool build_saved_resume_playlist(char *** out_playlist, int * out_count, int * o
     }
     queue_resume_free(&restored_queue);
     have_restored_queue = false;
-    if (queue_resume_read(QUEUE_RESUME_PATH, &restored_queue)) {
+    if (queue_resume_read(QUEUE_RESUME_PATH, &restored_queue) ||
+        queue_resume_read(QUEUE_RESUME_LEGACY_PATH, &restored_queue)) {
         bool local = true;
         for (int i = 0; i < restored_queue.count; i++) {
             const char * path = restored_queue.paths[i];
@@ -4990,7 +5010,6 @@ bool install_saved_resume_playlist(char ** resume_playlist, int resume_count) {
         pending_shuffle_order = restored_queue.continuation; restored_queue.continuation = NULL;
         shuffle_order_count = shuffle_order ? resume_count : 0;
         shuffle_pos = restored_queue.shuffle_pos;
-        remote_control_sync_queue(queued_pending_count ? (const char * const *) &playlist[restored_queue.current + 1] : NULL, queued_pending_count);
         queue_resume_free(&restored_queue);
         have_restored_queue = false;
     }
@@ -5106,6 +5125,43 @@ bool gui_player_queue_snapshot(int ** order, int * count, int * current, uint64_
     return true;
 }
 
+/* Publish the displayed Up Next order only when the queue revision changes.
+ * The remote listener owns its own copy, so it never reads playlist state
+ * from its worker thread. This also seeds the endpoint the first time
+ * Remote Control is enabled after boot/restoration. */
+void gui_player_sync_remote_queue(void) {
+    static uint64_t published_revision = 0;
+    if (queue_revision == published_revision) return;
+    int * order = NULL, count = 0, current = -1;
+    uint64_t revision = 0;
+    if (!gui_player_queue_snapshot(&order, &count, &current, &revision)) return;
+    if (revision == published_revision) { free(order); return; }
+    int upcoming = current >= 0 && current < count ? count - current - 1 : 0;
+    const char ** paths = upcoming ? malloc(sizeof(*paths) * (size_t) upcoming) : NULL;
+    if (upcoming && !paths) { free(order); return; }
+    for (int i = 0; i < upcoming; i++) paths[i] = playlist_path_at(order[current + 1 + i]);
+    remote_control_sync_queue(paths, upcoming, revision);
+    free(paths);
+    free(order);
+    published_revision = revision;
+}
+
+bool gui_player_remote_queue_remove(int offset, uint64_t revision) {
+    if (revision != queue_revision || offset < 0) return false;
+    int * order = NULL, count = 0, current = -1;
+    uint64_t actual = 0;
+    if (!gui_player_queue_snapshot(&order, &count, &current, &actual)) return false;
+    free(order);
+    if (actual != revision || current < 0 || current + 1 + offset >= count) return false;
+    return gui_player_queue_edit(revision, current + 1 + offset, -1);
+}
+
+bool gui_player_remote_queue_clear(uint64_t revision) {
+    if (revision != queue_revision) return false;
+    gui_player_queue_clear_all();
+    return revision != queue_revision;
+}
+
 /* Materialize a displayed cycle before editing. The audio owns its decoder;
  * rearranging path slots does not restart the current track. */
 static bool queue_materialize_order(void) {
@@ -5201,9 +5257,6 @@ bool gui_player_queue_edit(uint64_t revision, int from, int to) {
         }
         queue_next_insert_index = queued_pending_count ? playlist_index + 1 + queued_pending_count : -1;
         arm_next_track_for_audio(playlist_index);
-        remote_control_sync_queue(queued_pending_count ? (const char * const *) &playlist[playlist_index + 1] : NULL,
-                                  queued_pending_count);
-        queue_revision++;
         return true;
     }
     char * path = playlist[from];
@@ -5223,7 +5276,6 @@ bool gui_player_queue_edit(uint64_t revision, int from, int to) {
     }
     queue_next_insert_index = queued_pending_count ? playlist_index + 1 + queued_pending_count : -1;
     arm_next_track_for_audio(playlist_index);
-    remote_control_sync_queue(queued_pending_count ? (const char * const *) &playlist[playlist_index + 1] : NULL, queued_pending_count);
     return true;
 }
 
@@ -5236,7 +5288,6 @@ bool gui_player_queue_select(uint64_t revision, int index) {
     else if (index != playlist_index) queued_pending_count = 0;
     queue_next_insert_index = queued_pending_count ? index + 1 + queued_pending_count : -1;
     if (shuffle_order) shuffle_pos = index;
-    remote_control_sync_queue(queued_pending_count ? (const char * const *) &playlist[index + 1] : NULL, queued_pending_count);
     play_track_at(index);
     return true;
 }
@@ -5274,7 +5325,6 @@ void gui_player_queue_clear_all(void) {
         free(shuffle_order); shuffle_order = NULL; shuffle_order_count = 0;
         free(pending_shuffle_order); pending_shuffle_order = NULL;
         queued_pending_count = 0; queue_next_insert_index = -1;
-        remote_control_sync_queue(NULL, 0);
         arm_next_track_for_audio(playlist_index);
         return;
     }
@@ -5291,7 +5341,6 @@ void gui_player_queue_clear_all(void) {
         shuffle_pos = 0;
     }
     queued_pending_count = 0; queue_next_insert_index = -1;
-    remote_control_sync_queue(NULL, 0);
     arm_next_track_for_audio(playlist_index);
 }
 
