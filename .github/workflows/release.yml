@@ -1,4 +1,4 @@
-name: Build HiBy R1 Firmware
+name: Build Compass Player Firmware
 
 on:
   push:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    name: Build HiBy R1 Firmware
+    name: Build Compass Player Firmware
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
@@ -45,8 +45,13 @@ jobs:
             ca-certificates \
             curl \
             file \
+            gcc \
+            g++ \
+            git \
             gzip \
             make \
+            patch \
+            python3 \
             tar \
             zip \
             lua5.4
@@ -66,11 +71,6 @@ jobs:
 
       # ============================================================
       # INSTALL MIPS MUSL TOOLCHAIN
-      #
-      # IMPORTANT:
-      # Do NOT use scripts/install_mips_toolchain.sh here.
-      #
-      # That script was the source of the musl.cc connection timeout.
       # ============================================================
 
       - name: Install MIPS musl toolchain
@@ -89,21 +89,18 @@ jobs:
 
           echo "Toolchain directory:"
           echo "$TOOLCHAIN_DIR"
-          echo
-
-          # --------------------------------------------------------
-          # Use cached toolchain when available
-          # --------------------------------------------------------
 
           if [[ -x "$TOOLCHAIN_DIR/bin/mipsel-linux-musl-gcc" ]]; then
 
+            echo
             echo "Toolchain cache hit."
             echo "Using cached MIPS musl toolchain."
 
           else
 
+            echo
             echo "Toolchain cache miss."
-            echo "Downloading GitHub-hosted MIPS musl toolchain..."
+            echo "Downloading MIPS musl toolchain..."
 
             ARCHIVE="$RUNNER_TEMP/mipsel-linux-musl-cross.tgz"
 
@@ -112,7 +109,6 @@ jobs:
             echo
             echo "Download URL:"
             echo "$TOOLCHAIN_URL"
-            echo
 
             rm -f "$ARCHIVE"
 
@@ -128,25 +124,18 @@ jobs:
               --output "$ARCHIVE" \
               "$TOOLCHAIN_URL"
 
-            echo
-            echo "Toolchain download completed."
-
             test -s "$ARCHIVE"
 
+            echo
             echo "Checking archive integrity..."
 
             gzip -t "$ARCHIVE"
 
             echo "Archive integrity OK."
 
-            # ------------------------------------------------------
-            # Extract to temporary directory first
-            # ------------------------------------------------------
-
             TEMP_EXTRACT="$RUNNER_TEMP/mipsel-toolchain-extract"
 
             rm -rf "$TEMP_EXTRACT"
-
             mkdir -p "$TEMP_EXTRACT"
 
             echo
@@ -156,10 +145,6 @@ jobs:
               -xzf "$ARCHIVE" \
               -C "$TEMP_EXTRACT" \
               --strip-components=1
-
-            # ------------------------------------------------------
-            # Install extracted toolchain
-            # ------------------------------------------------------
 
             rm -rf "$TOOLCHAIN_DIR"
 
@@ -179,11 +164,7 @@ jobs:
           # VERIFY TOOLCHAIN STRUCTURE
           # ========================================================
 
-          echo
-          echo "Checking toolchain layout..."
-
           if [[ ! -d "$TOOLCHAIN_DIR/bin" ]]; then
-
             echo "ERROR: Toolchain bin directory does not exist:"
             echo "$TOOLCHAIN_DIR/bin"
 
@@ -196,7 +177,6 @@ jobs:
               | head -100 || true
 
             exit 1
-
           fi
 
 
@@ -217,12 +197,9 @@ jobs:
           for binary in "${REQUIRED_BINARIES[@]}"; do
 
             if [[ ! -x "$TOOLCHAIN_DIR/bin/$binary" ]]; then
-
               echo "ERROR: Missing toolchain binary:"
               echo "$TOOLCHAIN_DIR/bin/$binary"
-
               exit 1
-
             fi
 
             echo "OK: $binary"
@@ -231,7 +208,7 @@ jobs:
 
 
           # ========================================================
-          # ADD TOOLCHAIN TO GITHUB PATH
+          # ADD TOOLCHAIN TO PATH
           # ========================================================
 
           echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
@@ -254,7 +231,6 @@ jobs:
           echo "============================================================"
 
           command -v mipsel-linux-musl-gcc
-
           mipsel-linux-musl-gcc --version | head -n 2
 
 
@@ -264,7 +240,6 @@ jobs:
           echo "============================================================"
 
           command -v mipsel-linux-musl-g++
-
           mipsel-linux-musl-g++ --version | head -n 2
 
 
@@ -274,7 +249,6 @@ jobs:
           echo "============================================================"
 
           command -v mipsel-linux-musl-strip
-
           mipsel-linux-musl-strip --version | head -n 2
 
 
@@ -284,7 +258,6 @@ jobs:
           echo "============================================================"
 
           command -v mipsel-linux-musl-readelf
-
           mipsel-linux-musl-readelf --version | head -n 2
 
 
@@ -319,19 +292,26 @@ jobs:
 
 
       # ============================================================
-      # BUILD HIBY R1 PLAYER
+      # BUILD COMPASS PLAYER
+      #
+      # Makefile:
+      #   BOARD ?= r1
+      #   TARGET_BIN = compas_player_target
+      #
+      # Explicitly use BOARD=r1 so CI cannot accidentally build
+      # another board in the future.
       # ============================================================
 
-      - name: Build HiBy R1 player
+      - name: Build Compass Player
         shell: bash
         run: |
           set -euo pipefail
 
           echo "============================================================"
-          echo "Building HiBy R1 player"
+          echo "Building Compass Player"
           echo "============================================================"
 
-          make -j2 target
+          make -j2 BOARD=r1 target
 
 
       # ============================================================
@@ -347,57 +327,42 @@ jobs:
           echo "Building HiBy R1 bootloader"
           echo "============================================================"
 
-          make -j2 bootloader
+          make -j2 BOARD=r1 bootloader
 
 
       # ============================================================
-      # NOTE:
-      #
-      # bootloader-player-selftest is intentionally NOT executed.
-      #
-      # The current Makefile references:
-      #
-      #   src/bootloader/player_selection_test.c
-      #
-      # but that source file is not present in the repository.
-      #
-      # The actual bootloader itself compiled successfully above.
+      # VERIFY COMPASS PLAYER
       # ============================================================
 
-
-      # ============================================================
-      # VERIFY PLAYER BINARY
-      # ============================================================
-
-      - name: Verify player binary
+      - name: Verify Compass Player binary
         shell: bash
         run: |
           set -euo pipefail
 
-          BINARY="open_hiby_player_target"
+          BINARY="compas_player_target"
 
           echo "============================================================"
-          echo "Verifying player binary"
+          echo "Verifying Compass Player binary"
           echo "============================================================"
 
           if [[ ! -f "$BINARY" ]]; then
-
-            echo "ERROR: Player binary was not created."
-
+            echo "ERROR: Compass Player binary was not created."
+            echo
             echo "Expected:"
             echo "  $BINARY"
+            echo
+            echo "Files in repository root:"
+            find . -maxdepth 2 -type f \
+              \( -name 'compas_player*' -o -name 'open_hiby*' \) \
+              -print || true
 
             exit 1
-
           fi
 
 
           if [[ ! -x "$BINARY" ]]; then
-
-            echo "ERROR: Player binary is not executable."
-
+            echo "ERROR: Compass Player binary is not executable."
             exit 1
-
           fi
 
 
@@ -425,11 +390,11 @@ jobs:
 
 
           echo
-          echo "Player binary verification successful."
+          echo "Compass Player binary verification successful."
 
 
       # ============================================================
-      # VERIFY BOOTLOADER BINARY
+      # VERIFY BOOTLOADER
       # ============================================================
 
       - name: Verify bootloader binary
@@ -440,27 +405,23 @@ jobs:
           BINARY="open_hiby_bootloader"
 
           echo "============================================================"
-          echo "Verifying bootloader binary"
+          echo "Verifying HiBy R1 bootloader"
           echo "============================================================"
 
           if [[ ! -f "$BINARY" ]]; then
-
             echo "ERROR: Bootloader binary was not created."
 
+            echo
             echo "Expected:"
             echo "  $BINARY"
 
             exit 1
-
           fi
 
 
           if [[ ! -x "$BINARY" ]]; then
-
             echo "ERROR: Bootloader binary is not executable."
-
             exit 1
-
           fi
 
 
@@ -501,26 +462,27 @@ jobs:
           set -euo pipefail
 
           echo "============================================================"
-          echo "Packaging HiBy R1 binaries"
+          echo "Packaging Compass Player firmware"
           echo "============================================================"
 
           rm -rf release
-
           mkdir -p release
 
 
+          # Compass Player
           cp -f \
-            open_hiby_player_target \
-            release/open_hiby_player_target
+            compas_player_target \
+            release/compas_player_target
 
 
+          # HiBy R1 bootloader
           cp -f \
             open_hiby_bootloader \
             release/open_hiby_bootloader
 
 
           chmod +x \
-            release/open_hiby_player_target \
+            release/compas_player_target \
             release/open_hiby_bootloader
 
 
@@ -528,15 +490,15 @@ jobs:
             cd release
 
             sha256sum \
-              open_hiby_player_target \
+              compas_player_target \
               open_hiby_bootloader \
               > SHA256SUMS
           )
 
 
           zip -9 \
-            hiby-r1-firmware-binaries.zip \
-            release/open_hiby_player_target \
+            hiby-r1-compass-player-binaries.zip \
+            release/compas_player_target \
             release/open_hiby_bootloader \
             release/SHA256SUMS
 
@@ -547,9 +509,9 @@ jobs:
           echo "============================================================"
 
           ls -lh \
-            open_hiby_player_target \
+            compas_player_target \
             open_hiby_bootloader \
-            hiby-r1-firmware-binaries.zip \
+            hiby-r1-compass-player-binaries.zip \
             release/SHA256SUMS
 
 
@@ -565,12 +527,12 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hiby-r1-firmware-${{ github.sha }}
+          name: hiby-r1-compass-player-${{ github.sha }}
           if-no-files-found: error
           path: |
-            open_hiby_player_target
+            compas_player_target
             open_hiby_bootloader
-            hiby-r1-firmware-binaries.zip
+            hiby-r1-compass-player-binaries.zip
             release/SHA256SUMS
 
 
@@ -593,13 +555,13 @@ jobs:
 
 
           gh release create "$TAG" \
-            open_hiby_player_target \
+            compas_player_target \
             open_hiby_bootloader \
-            hiby-r1-firmware-binaries.zip \
+            hiby-r1-compass-player-binaries.zip \
             release/SHA256SUMS \
             --target "$GITHUB_SHA" \
-            --title "Latest Build" \
-            --notes "Automatic HiBy R1 firmware build from ${GITHUB_SHA}." \
+            --title "Compass Player Latest Build" \
+            --notes "Automatic Compass Player firmware build from ${GITHUB_SHA}." \
             --latest
 
 
@@ -622,11 +584,11 @@ jobs:
 
 
           gh release create "$TAG" \
-            open_hiby_player_target \
+            compas_player_target \
             open_hiby_bootloader \
-            hiby-r1-firmware-binaries.zip \
+            hiby-r1-compass-player-binaries.zip \
             release/SHA256SUMS \
             --verify-tag \
-            --title "HiBy R1 Player ${TAG}" \
-            --notes "HiBy R1 firmware build ${TAG}." \
+            --title "Compass Player ${TAG}" \
+            --notes "Compass Player firmware build ${TAG}." \
             --latest
