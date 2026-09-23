@@ -56,14 +56,22 @@ void gui_player_queue_play_next(const char * path);
  * stale UI actions fail rather than acting on a different occurrence. */
 uint64_t gui_player_queue_revision(void);
 bool gui_player_queue_snapshot(int ** order, int * count, int * current, uint64_t * revision);
+void gui_player_sync_remote_queue(void);
+bool gui_player_remote_queue_remove(int offset, uint64_t revision);
+bool gui_player_remote_queue_clear(uint64_t revision);
 bool gui_player_queue_edit(uint64_t revision, int from, int to);
 bool gui_player_queue_select(uint64_t revision, int index);
 void gui_player_queue_clear_all(void);
+/* Reorder the current queue into its displayed order and select one row.
+ * Lazy ranks and explicit path pointers are moved, not copied. */
+bool gui_player_queue_restart_displayed(int selected_index);
 bool gui_player_queue_save_as(const char * name);
+bool gui_player_queue_save_as_poll(bool *done, bool *ok);
 void gui_player_queue_checkpoint(void);
 void gui_player_queue_checkpoint_urgent(void);
 void gui_player_queue_poll_urgent(void);
 bool gui_player_queue_write_busy(void);
+bool gui_player_queue_checkpoint_failed(void);
 void gui_player_queue_flush(void);
 void gui_player_play_at(int index);
 void gui_player_play_at_from(int index, double start_seconds);

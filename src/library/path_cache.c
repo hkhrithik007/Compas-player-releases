@@ -1,5 +1,6 @@
 #include "path_cache.h"
 #include "library_endian.h"
+#include "storage_paths.h"
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -9,12 +10,10 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <limits.h>
+#include <errno.h>
 
-#ifdef HOST_BUILD
-  #define PATH_CACHE_DIR "./.open_hiby_player"
-#else
-  #define PATH_CACHE_DIR "/data/mnt/sd_0/.open_hiby_player"
-#endif
+#define PATH_CACHE_DIR SD_COMPAS_ROOT
 
 #define PATH_CACHE_PATH_MAX 600
 
@@ -37,6 +36,31 @@ static named_list_t lists[] = {
 };
 
 static pthread_mutex_t path_cache_mu = PTHREAD_MUTEX_INITIALIZER;
+static int cache_dirfd = -1;
+static int legacy_cache_dirfd = -1;
+
+static bool ensure_cache_dirfd(void) {
+    if (cache_dirfd >= 0 || legacy_cache_dirfd >= 0) return true;
+    (void) mkdir(PATH_CACHE_DIR, 0755);
+    cache_dirfd = open(PATH_CACHE_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (cache_dirfd >= 0) {
+        /* Derive the legacy sibling from the opened directory, rather than
+         * reopening the mount path. This also covers callers that load a
+         * path cache before gui_player has had a chance to bind a root fd. */
+        int rootfd = openat(cache_dirfd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (rootfd >= 0) {
+            legacy_cache_dirfd = openat(rootfd, LEGACY_STORAGE_DIR,
+                                        O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            close(rootfd);
+        }
+        return true;
+    }
+    /* A read-only card may reject creation of .compas. Keep the legacy
+     * directory readable, while all mutation paths remain disabled because
+     * cache_dirfd stays negative. */
+    legacy_cache_dirfd = open(SD_LEGACY_ROOT, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    return legacy_cache_dirfd >= 0;
+}
 
 static int cmp_path_ptr(const void * a, const void * b) {
     const char * const * pa = a;
@@ -60,18 +84,19 @@ static bool path_list_has(const path_list_t * list, const char * path) {
     return false;
 }
 
-static void path_list_add(path_list_t * list, const char * path) {
-    if (!path || path_list_has(list, path)) return;
+static bool path_list_add(path_list_t * list, const char * path) {
+    if (!path || path_list_has(list, path)) return true;
     if (list->count >= list->cap) {
         int cap = list->cap ? list->cap * 2 : 16;
         char ** n = realloc(list->paths, sizeof(*n) * (size_t) cap);
-        if (!n) return;
+        if (!n) return false;
         list->paths = n;
         list->cap = cap;
     }
     list->paths[list->count] = strdup(path);
-    if (!list->paths[list->count]) return;
+    if (!list->paths[list->count]) return false;
     list->count++;
+    return true;
 }
 
 static void path_list_remove(path_list_t * list, const char * path) {
@@ -82,10 +107,6 @@ static void path_list_remove(path_list_t * list, const char * path) {
         list->count--;
         return;
     }
-}
-
-static void cache_path(char * out, size_t out_size, const char * name) {
-    snprintf(out, out_size, "%s/%s", PATH_CACHE_DIR, name);
 }
 
 static named_list_t * list_by_name(const char * name) {
@@ -108,12 +129,20 @@ static bool path_valid_for_list(const named_list_t * entry, const char * path) {
 
 static void list_load_file(named_list_t * entry) {
     path_list_free(&entry->list);
-    entry->loaded = true;
-    char path[640];
-    cache_path(path, sizeof(path), entry->name);
-    FILE * f = fopen(path, "r");
-    if (!f) return;
+    entry->loaded = false;
+    if (!ensure_cache_dirfd()) return;
+    int read_dirfd = cache_dirfd >= 0 ? cache_dirfd : legacy_cache_dirfd;
+    int fd = openat(read_dirfd, entry->name, O_RDONLY | O_CLOEXEC);
+    int open_errno = fd < 0 ? errno : 0;
+    if (fd < 0 && open_errno == ENOENT && legacy_cache_dirfd >= 0 && read_dirfd != legacy_cache_dirfd) {
+        fd = openat(legacy_cache_dirfd, entry->name, O_RDONLY | O_CLOEXEC);
+        open_errno = fd < 0 ? errno : 0;
+    }
+    FILE * f = fd >= 0 ? fdopen(fd, "r") : NULL;
+    if (!f && fd >= 0) close(fd);
+    if (!f) { if (open_errno == ENOENT) entry->loaded = true; return; }
     char line[PATH_CACHE_PATH_MAX];
+    bool ok = true;
     while (fgets(line, sizeof(line), f)) {
         size_t raw_len = strlen(line);
         /* A record longer than the fixed reader would otherwise be split
@@ -127,24 +156,33 @@ static void list_load_file(named_list_t * entry) {
         }
         size_t n = library_trim_eol(line);
         if (n == 0 || !path_valid_for_list(entry, line)) continue;
-        path_list_add(&entry->list, line);
+        if (!path_list_add(&entry->list, line)) { ok = false; break; }
     }
+    if (ferror(f)) ok = false;
     fclose(f);
+    if (!ok) { path_list_free(&entry->list); entry->loaded = false; return; }
+    entry->loaded = true;
 }
 
 static named_list_t * ensure_loaded(const char * name) {
     named_list_t * entry = list_by_name(name);
     if (!entry) return NULL;
-    if (!entry->loaded) list_load_file(entry);
+    if (!entry->loaded) {
+        if (!ensure_cache_dirfd()) return NULL;
+        list_load_file(entry);
+        if (!entry->loaded) return NULL;
+    }
     return entry;
 }
 
 static void list_save_file(const named_list_t * entry) {
-    mkdir(PATH_CACHE_DIR, 0755);
-    char path[640], tmp[640];
-    cache_path(path, sizeof(path), entry->name);
-    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int) sizeof(tmp)) return;
-    FILE * f = fopen(tmp, "w");
+    if (!ensure_cache_dirfd()) return;
+    if (cache_dirfd < 0) return;
+    char tmp[NAME_MAX];
+    if (snprintf(tmp, sizeof(tmp), ".%s.tmp", entry->name) >= (int) sizeof(tmp)) return;
+    int fd = openat(cache_dirfd, tmp, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    FILE * f = fd >= 0 ? fdopen(fd, "w") : NULL;
+    if (!f && fd >= 0) close(fd);
     if (!f) return;
     bool ok = true;
     for (int i = 0; i < entry->list.count; i++) {
@@ -157,14 +195,14 @@ static void list_save_file(const named_list_t * entry) {
     if (ok && fsync(fileno(f)) != 0) ok = false;
     if (fclose(f) != 0) ok = false;
     if (!ok) {
-        unlink(tmp);
+        unlinkat(cache_dirfd, tmp, 0);
         return;
     }
-    if (rename(tmp, path) != 0) {
-        unlink(tmp);
+    if (renameat(cache_dirfd, tmp, cache_dirfd, entry->name) != 0) {
+        unlinkat(cache_dirfd, tmp, 0);
         return;
     }
-    (void) library_fsync_dir(PATH_CACHE_DIR);
+    (void) fsync(cache_dirfd);
 }
 
 static void dup_sorted(const path_list_t * list, const path_list_t * filter, char *** out_paths, int * out_count) {
@@ -200,7 +238,77 @@ void path_cache_drop(void) {
         path_list_free(&lists[i].list);
         lists[i].loaded = false;
     }
+    if (cache_dirfd >= 0) { close(cache_dirfd); cache_dirfd = -1; }
+    if (legacy_cache_dirfd >= 0) { close(legacy_cache_dirfd); legacy_cache_dirfd = -1; }
     pthread_mutex_unlock(&path_cache_mu);
+}
+
+bool path_cache_bind_directory_fd(int dirfd) {
+    if (dirfd < 0) return false;
+    pthread_mutex_lock(&path_cache_mu);
+    bool any_loaded = false;
+    for (size_t i = 0; i < sizeof(lists) / sizeof(lists[0]); i++) {
+        if (lists[i].loaded) {
+            any_loaded = true;
+            break;
+        }
+    }
+
+    /* Once a list has been loaded, its descriptor is the cache's identity.
+     * Do not create or bind a directory for a later card: a failed identity
+     * check must leave that card completely untouched. */
+    if (any_loaded) {
+        int requested = openat(dirfd, COMPAS_STORAGE_DIR,
+                               O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (requested < 0) requested = openat(dirfd, LEGACY_STORAGE_DIR,
+                                               O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (requested < 0) {
+            pthread_mutex_unlock(&path_cache_mu);
+            return false;
+        }
+        struct stat a, b;
+        int current_dirfd = cache_dirfd >= 0 ? cache_dirfd : legacy_cache_dirfd;
+        bool same = current_dirfd >= 0 && fstat(current_dirfd, &a) == 0 &&
+                    fstat(requested, &b) == 0 && a.st_dev == b.st_dev &&
+                    a.st_ino == b.st_ino;
+        close(requested);
+        pthread_mutex_unlock(&path_cache_mu);
+        return same;
+    }
+
+    /* No list has been loaded yet, so this is the only point where creating
+     * the per-card cache directory is allowed. */
+    (void) mkdirat(dirfd, COMPAS_STORAGE_DIR, 0755);
+    int requested = openat(dirfd, COMPAS_STORAGE_DIR,
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    bool legacy_requested = false;
+    if (requested < 0) {
+        requested = openat(dirfd, LEGACY_STORAGE_DIR,
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        legacy_requested = requested >= 0;
+    }
+    if (requested < 0) { pthread_mutex_unlock(&path_cache_mu); return false; }
+    int current_dirfd = cache_dirfd >= 0 ? cache_dirfd : legacy_cache_dirfd;
+    if (current_dirfd >= 0) {
+        struct stat a, b;
+        bool same = fstat(current_dirfd, &a) == 0 && fstat(requested, &b) == 0 &&
+                    a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+        if (!same) {
+            close(requested);
+            pthread_mutex_unlock(&path_cache_mu);
+            return false;
+        }
+    }
+    int copy = requested;
+    int legacy_copy = openat(dirfd, LEGACY_STORAGE_DIR,
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (cache_dirfd >= 0) close(cache_dirfd);
+    if (legacy_cache_dirfd >= 0) close(legacy_cache_dirfd);
+    if (legacy_requested && legacy_copy >= 0) close(legacy_copy);
+    cache_dirfd = legacy_requested ? -1 : copy;
+    legacy_cache_dirfd = legacy_requested ? copy : legacy_copy;
+    pthread_mutex_unlock(&path_cache_mu);
+    return true;
 }
 
 void path_cache_replace(const char * name, char * const * paths, int count) {
