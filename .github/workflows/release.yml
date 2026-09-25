@@ -12,6 +12,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: compass-player-firmware-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build Compass Player Firmware
@@ -27,14 +31,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
+          submodules: recursive
+          fetch-depth: 1
 
       # ============================================================
-      # BUILD DEPENDENCIES
+      # MIPS TOOLCHAIN
       # ============================================================
 
-      - name: Install build dependencies
+      - name: Install repository-cached MIPS musl toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -x scripts/install_mips_toolchain.sh
+
+          toolchain_dir="$(scripts/install_mips_toolchain.sh "$RUNNER_TEMP")"
+
+          test -d "$toolchain_dir/bin"
+
+          echo "$toolchain_dir/bin" >> "$GITHUB_PATH"
+
+          echo "MIPS toolchain:"
+          "$toolchain_dir/bin/mipsel-linux-musl-gcc" --version | head -n 1
+          "$toolchain_dir/bin/mipsel-linux-musl-g++" --version | head -n 1
+          "$toolchain_dir/bin/mipsel-linux-musl-strip" --version | head -n 1
+
+      # ============================================================
+      # HOST VALIDATION TOOLS
+      # ============================================================
+
+      - name: Install validation tools
         shell: bash
         run: |
           set -euo pipefail
@@ -42,264 +68,27 @@ jobs:
           sudo apt-get update
 
           sudo apt-get install --yes --no-install-recommends \
-            ca-certificates \
-            curl \
             file \
-            gcc \
-            g++ \
-            git \
-            gzip \
-            make \
-            patch \
-            python3 \
-            tar \
-            zip \
-            lua5.4
-
-
-      # ============================================================
-      # MIPS MUSL TOOLCHAIN CACHE
-      # ============================================================
-
-      - name: Restore MIPS musl toolchain cache
-        id: toolchain-cache
-        uses: actions/cache@v4
-        with:
-          path: .toolchains/mipsel-linux-musl-cross
-          key: mipsel-musl-toolchain-2025-06-12-${{ runner.os }}-v1
-
-
-      # ============================================================
-      # INSTALL MIPS MUSL TOOLCHAIN
-      # ============================================================
-
-      - name: Install MIPS musl toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          TOOLCHAIN_ROOT="$GITHUB_WORKSPACE/.toolchains"
-          TOOLCHAIN_DIR="$TOOLCHAIN_ROOT/mipsel-linux-musl-cross"
-
-          mkdir -p "$TOOLCHAIN_ROOT"
-
-          echo "============================================================"
-          echo "MIPS musl toolchain"
-          echo "============================================================"
-
-          echo "Toolchain directory:"
-          echo "$TOOLCHAIN_DIR"
-
-          if [[ -x "$TOOLCHAIN_DIR/bin/mipsel-linux-musl-gcc" ]]; then
-
-            echo
-            echo "Toolchain cache hit."
-            echo "Using cached MIPS musl toolchain."
-
-          else
-
-            echo
-            echo "Toolchain cache miss."
-            echo "Downloading MIPS musl toolchain..."
-
-            ARCHIVE="$RUNNER_TEMP/mipsel-linux-musl-cross.tgz"
-
-            TOOLCHAIN_URL="https://github.com/OpenListTeam/musl-compilers/releases/download/2025-06-12/mipsel-linux-musl-cross.tgz"
-
-            echo
-            echo "Download URL:"
-            echo "$TOOLCHAIN_URL"
-
-            rm -f "$ARCHIVE"
-
-            curl \
-              --fail \
-              --location \
-              --show-error \
-              --retry 5 \
-              --retry-delay 5 \
-              --retry-all-errors \
-              --connect-timeout 20 \
-              --max-time 600 \
-              --output "$ARCHIVE" \
-              "$TOOLCHAIN_URL"
-
-            test -s "$ARCHIVE"
-
-            echo
-            echo "Checking archive integrity..."
-
-            gzip -t "$ARCHIVE"
-
-            echo "Archive integrity OK."
-
-            TEMP_EXTRACT="$RUNNER_TEMP/mipsel-toolchain-extract"
-
-            rm -rf "$TEMP_EXTRACT"
-            mkdir -p "$TEMP_EXTRACT"
-
-            echo
-            echo "Extracting toolchain..."
-
-            tar \
-              -xzf "$ARCHIVE" \
-              -C "$TEMP_EXTRACT" \
-              --strip-components=1
-
-            rm -rf "$TOOLCHAIN_DIR"
-
-            mkdir -p "$TOOLCHAIN_DIR"
-
-            cp -a "$TEMP_EXTRACT"/. "$TOOLCHAIN_DIR"/
-
-            rm -rf "$TEMP_EXTRACT"
-            rm -f "$ARCHIVE"
-
-            echo "Toolchain extracted."
-
-          fi
-
-
-          # ========================================================
-          # VERIFY TOOLCHAIN STRUCTURE
-          # ========================================================
-
-          if [[ ! -d "$TOOLCHAIN_DIR/bin" ]]; then
-            echo "ERROR: Toolchain bin directory does not exist:"
-            echo "$TOOLCHAIN_DIR/bin"
-
-            echo
-            echo "Toolchain contents:"
-
-            find "$TOOLCHAIN_DIR" \
-              -maxdepth 3 \
-              -type f \
-              | head -100 || true
-
-            exit 1
-          fi
-
-
-          # ========================================================
-          # REQUIRED MIPS BINARIES
-          # ========================================================
-
-          REQUIRED_BINARIES=(
-            mipsel-linux-musl-gcc
-            mipsel-linux-musl-g++
-            mipsel-linux-musl-strip
-            mipsel-linux-musl-readelf
-          )
-
-          echo
-          echo "Checking required MIPS binaries..."
-
-          for binary in "${REQUIRED_BINARIES[@]}"; do
-
-            if [[ ! -x "$TOOLCHAIN_DIR/bin/$binary" ]]; then
-              echo "ERROR: Missing toolchain binary:"
-              echo "$TOOLCHAIN_DIR/bin/$binary"
-              exit 1
-            fi
-
-            echo "OK: $binary"
-
-          done
-
-
-          # ========================================================
-          # ADD TOOLCHAIN TO PATH
-          # ========================================================
-
-          echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
-
-          echo
-          echo "MIPS musl toolchain installed successfully."
-
-
-      # ============================================================
-      # VERIFY MIPS TOOLCHAIN
-      # ============================================================
-
-      - name: Verify MIPS toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "============================================================"
-          echo "MIPS GCC"
-          echo "============================================================"
-
-          command -v mipsel-linux-musl-gcc
-          mipsel-linux-musl-gcc --version | head -n 2
-
-
-          echo
-          echo "============================================================"
-          echo "MIPS G++"
-          echo "============================================================"
-
-          command -v mipsel-linux-musl-g++
-          mipsel-linux-musl-g++ --version | head -n 2
-
-
-          echo
-          echo "============================================================"
-          echo "MIPS STRIP"
-          echo "============================================================"
-
-          command -v mipsel-linux-musl-strip
-          mipsel-linux-musl-strip --version | head -n 2
-
-
-          echo
-          echo "============================================================"
-          echo "MIPS READELF"
-          echo "============================================================"
-
-          command -v mipsel-linux-musl-readelf
-          mipsel-linux-musl-readelf --version | head -n 2
-
-
-          echo
-          echo "============================================================"
-          echo "TARGET TRIPLE"
-          echo "============================================================"
-
-          TARGET_TRIPLE="$(mipsel-linux-musl-gcc -dumpmachine)"
-
-          echo "$TARGET_TRIPLE"
-
-          if [[ "$TARGET_TRIPLE" != "mipsel-linux-musl" ]]; then
-            echo "ERROR: Wrong compiler target."
-            exit 1
-          fi
-
-          echo
-          echo "MIPS musl toolchain verification successful."
-
+            lua5.4 \
+            zip
 
       # ============================================================
       # CLEAN BUILD
       # ============================================================
 
-      - name: Clean build
+      - name: Clean previous build artifacts
         shell: bash
         run: |
           set -euo pipefail
 
           make clean || true
 
+          rm -f compas_player_target
+          rm -f compas_player_host
+          rm -f open_hiby_bootloader
 
       # ============================================================
       # BUILD COMPASS PLAYER
-      #
-      # Makefile:
-      #   BOARD ?= r1
-      #   TARGET_BIN = compas_player_target
-      #
-      # Explicitly use BOARD=r1 so CI cannot accidentally build
-      # another board in the future.
       # ============================================================
 
       - name: Build Compass Player
@@ -307,12 +96,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "============================================================"
+          echo "=============================================="
           echo "Building Compass Player"
-          echo "============================================================"
+          echo "=============================================="
 
           make -j2 BOARD=r1 target
 
+          echo
+          echo "Compass Player build completed."
+
+          test -f compas_player_target
+          test -s compas_player_target
+
+          ls -lh compas_player_target
 
       # ============================================================
       # BUILD HIBY R1 BOOTLOADER
@@ -323,12 +119,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "============================================================"
+          echo "=============================================="
           echo "Building HiBy R1 bootloader"
-          echo "============================================================"
+          echo "=============================================="
 
           make -j2 BOARD=r1 bootloader
 
+          echo
+          echo "Bootloader build completed."
+
+          test -f open_hiby_bootloader
+          test -s open_hiby_bootloader
+
+          ls -lh open_hiby_bootloader
 
       # ============================================================
       # VERIFY COMPASS PLAYER
@@ -341,57 +144,33 @@ jobs:
 
           BINARY="compas_player_target"
 
-          echo "============================================================"
-          echo "Verifying Compass Player binary"
-          echo "============================================================"
+          echo "=============================================="
+          echo "Verifying Compass Player"
+          echo "=============================================="
 
-          if [[ ! -f "$BINARY" ]]; then
-            echo "ERROR: Compass Player binary was not created."
-            echo
-            echo "Expected:"
-            echo "  $BINARY"
-            echo
-            echo "Files in repository root:"
-            find . -maxdepth 2 -type f \
-              \( -name 'compas_player*' -o -name 'open_hiby*' \) \
-              -print || true
-
-            exit 1
-          fi
-
-
-          if [[ ! -x "$BINARY" ]]; then
-            echo "ERROR: Compass Player binary is not executable."
-            exit 1
-          fi
-
+          test -f "$BINARY"
+          test -s "$BINARY"
 
           echo
-          echo "File:"
-          ls -lh "$BINARY"
-
-
-          echo
-          echo "file:"
+          echo "File information:"
           file "$BINARY"
-
 
           echo
           echo "ELF header:"
-
           mipsel-linux-musl-readelf -h "$BINARY"
 
-
           echo
-          echo "Architecture check:"
+          echo "Checking architecture..."
 
-          mipsel-linux-musl-readelf -h "$BINARY" |
-            grep -E 'Class:|Data:|Machine:.*MIPS'
-
+          mipsel-linux-musl-readelf -h "$BINARY" \
+            | grep -E "Machine:.*MIPS" >/dev/null
 
           echo
           echo "Compass Player binary verification successful."
 
+          echo
+          echo "Binary:"
+          ls -lh "$BINARY"
 
       # ============================================================
       # VERIFY BOOTLOADER
@@ -404,144 +183,142 @@ jobs:
 
           BINARY="open_hiby_bootloader"
 
-          echo "============================================================"
+          echo "=============================================="
           echo "Verifying HiBy R1 bootloader"
-          echo "============================================================"
+          echo "=============================================="
 
-          if [[ ! -f "$BINARY" ]]; then
+          if [ ! -f "$BINARY" ]; then
             echo "ERROR: Bootloader binary was not created."
-
             echo
             echo "Expected:"
             echo "  $BINARY"
-
+            echo
+            echo "Current directory:"
+            pwd
+            echo
+            echo "Root directory contents:"
+            ls -lah
+            echo
+            echo "Build directory contents:"
+            find build_target -maxdepth 2 -type f -print 2>/dev/null || true
             exit 1
           fi
 
-
-          if [[ ! -x "$BINARY" ]]; then
-            echo "ERROR: Bootloader binary is not executable."
-            exit 1
-          fi
-
+          test -s "$BINARY"
 
           echo
-          echo "File:"
-          ls -lh "$BINARY"
-
-
-          echo
-          echo "file:"
+          echo "File information:"
           file "$BINARY"
-
 
           echo
           echo "ELF header:"
-
           mipsel-linux-musl-readelf -h "$BINARY"
 
+          echo
+          echo "Checking architecture..."
+
+          mipsel-linux-musl-readelf -h "$BINARY" \
+            | grep -E "Machine:.*MIPS" >/dev/null
 
           echo
-          echo "Architecture check:"
-
-          mipsel-linux-musl-readelf -h "$BINARY" |
-            grep -E 'Class:|Data:|Machine:.*MIPS'
-
+          echo "Bootloader binary verification successful."
 
           echo
-          echo "Bootloader verification successful."
-
+          echo "Binary:"
+          ls -lh "$BINARY"
 
       # ============================================================
-      # PACKAGE FIRMWARE BINARIES
+      # VERIFY BOTH BINARIES TOGETHER
       # ============================================================
 
-      - name: Package firmware binaries
+      - name: Verify final build outputs
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "Packaging Compass Player firmware"
-          echo "============================================================"
+          echo "=============================================="
+          echo "Final build outputs"
+          echo "=============================================="
 
-          rm -rf release
-          mkdir -p release
+          test -f compas_player_target
+          test -f open_hiby_bootloader
 
-
-          # Compass Player
-          cp -f \
-            compas_player_target \
-            release/compas_player_target
-
-
-          # HiBy R1 bootloader
-          cp -f \
-            open_hiby_bootloader \
-            release/open_hiby_bootloader
-
-
-          chmod +x \
-            release/compas_player_target \
-            release/open_hiby_bootloader
-
-
-          (
-            cd release
-
-            sha256sum \
-              compas_player_target \
-              open_hiby_bootloader \
-              > SHA256SUMS
-          )
-
-
-          zip -9 \
-            hiby-r1-compass-player-binaries.zip \
-            release/compas_player_target \
-            release/open_hiby_bootloader \
-            release/SHA256SUMS
-
+          test -s compas_player_target
+          test -s open_hiby_bootloader
 
           echo
-          echo "============================================================"
-          echo "Release files"
-          echo "============================================================"
-
           ls -lh \
             compas_player_target \
-            open_hiby_bootloader \
-            hiby-r1-compass-player-binaries.zip \
-            release/SHA256SUMS
-
+            open_hiby_bootloader
 
           echo
-          echo "SHA256SUMS:"
-          cat release/SHA256SUMS
-
+          echo "Checksums:"
+          sha256sum \
+            compas_player_target \
+            open_hiby_bootloader
 
       # ============================================================
-      # UPLOAD GITHUB ACTIONS ARTIFACT
+      # PACKAGE ARTIFACT
       # ============================================================
 
-      - name: Upload build artifact
+      - name: Create firmware package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release
+
+          cp compas_player_target \
+            release/compas_player_target
+
+          cp open_hiby_bootloader \
+            release/open_hiby_bootloader
+
+          sha256sum \
+            release/compas_player_target \
+            release/open_hiby_bootloader \
+            > release/SHA256SUMS
+
+          cat > release/BUILD_INFO.txt <<EOF
+          Compass Player Firmware
+
+          Repository: ${GITHUB_REPOSITORY}
+          Commit: ${GITHUB_SHA}
+          Ref: ${GITHUB_REF}
+          Run: ${GITHUB_RUN_NUMBER}
+
+          Player:
+          compas_player_target
+
+          Bootloader:
+          open_hiby_bootloader
+          EOF
+
+          echo "Release package:"
+          find release -maxdepth 1 -type f -print -exec ls -lh {} \;
+
+      # ============================================================
+      # UPLOAD GITHUB ACTION ARTIFACT
+      # ============================================================
+
+      - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: hiby-r1-compass-player-${{ github.sha }}
-          if-no-files-found: error
+          name: compass-player-firmware-${{ github.run_number }}
           path: |
-            compas_player_target
-            open_hiby_bootloader
-            hiby-r1-compass-player-binaries.zip
+            release/compas_player_target
+            release/open_hiby_bootloader
             release/SHA256SUMS
-
+            release/BUILD_INFO.txt
+          if-no-files-found: error
+          retention-days: 30
 
       # ============================================================
-      # MAIN BRANCH RELEASE
+      # AUTOMATIC MAIN BUILD RELEASE
       # ============================================================
 
-      - name: Create main branch release
-        if: github.ref == 'refs/heads/main'
+      - name: Create automatic main build release
+        if: ${{ github.ref == 'refs/heads/main' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -550,27 +327,36 @@ jobs:
 
           TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
 
-          echo "Creating release:"
-          echo "$TAG"
+          cat > release-notes.txt <<EOF
+          Automatic Compass Player firmware build
 
+          Commit: ${GITHUB_SHA}
+          Build: ${GITHUB_RUN_NUMBER}
+
+          Included binaries:
+
+          - compas_player_target
+          - open_hiby_bootloader
+
+          SHA256 checksums are included in SHA256SUMS.
+          EOF
 
           gh release create "$TAG" \
-            compas_player_target \
-            open_hiby_bootloader \
-            hiby-r1-compass-player-binaries.zip \
+            release/compas_player_target \
+            release/open_hiby_bootloader \
             release/SHA256SUMS \
+            release/BUILD_INFO.txt \
             --target "$GITHUB_SHA" \
-            --title "Compass Player Latest Build" \
-            --notes "Automatic Compass Player firmware build from ${GITHUB_SHA}." \
+            --title "Compass Player Build ${GITHUB_RUN_NUMBER}" \
+            --notes-file release-notes.txt \
             --latest
-
 
       # ============================================================
       # VERSION TAG RELEASE
       # ============================================================
 
       - name: Create version release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -579,16 +365,25 @@ jobs:
 
           TAG="${GITHUB_REF_NAME}"
 
-          echo "Creating release:"
-          echo "$TAG"
+          cat > release-notes.txt <<EOF
+          Compass Player Firmware ${TAG}
 
+          Commit: ${GITHUB_SHA}
+
+          Included binaries:
+
+          - compas_player_target
+          - open_hiby_bootloader
+
+          SHA256 checksums are included in SHA256SUMS.
+          EOF
 
           gh release create "$TAG" \
-            compas_player_target \
-            open_hiby_bootloader \
-            hiby-r1-compass-player-binaries.zip \
+            release/compas_player_target \
+            release/open_hiby_bootloader \
             release/SHA256SUMS \
+            release/BUILD_INFO.txt \
             --verify-tag \
-            --title "Compass Player ${TAG}" \
-            --notes "Compass Player firmware build ${TAG}." \
+            --title "Compass Player Firmware ${TAG}" \
+            --notes-file release-notes.txt \
             --latest
