@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build Compass Player Firmware
+    name: Build Compass Player
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
@@ -35,10 +35,10 @@ jobs:
           fetch-depth: 1
 
       # ============================================================
-      # MIPS TOOLCHAIN
+      # INSTALL MIPS TOOLCHAIN
       # ============================================================
 
-      - name: Install repository-cached MIPS musl toolchain
+      - name: Install MIPS musl toolchain
         shell: bash
         run: |
           set -euo pipefail
@@ -51,13 +51,12 @@ jobs:
 
           echo "$toolchain_dir/bin" >> "$GITHUB_PATH"
 
-          echo "MIPS toolchain:"
+          echo "Toolchain installed:"
           "$toolchain_dir/bin/mipsel-linux-musl-gcc" --version | head -n 1
           "$toolchain_dir/bin/mipsel-linux-musl-g++" --version | head -n 1
-          "$toolchain_dir/bin/mipsel-linux-musl-strip" --version | head -n 1
 
       # ============================================================
-      # HOST VALIDATION TOOLS
+      # INSTALL VALIDATION TOOLS
       # ============================================================
 
       - name: Install validation tools
@@ -67,7 +66,7 @@ jobs:
 
           sudo apt-get update
 
-          sudo apt-get install --yes --no-install-recommends \
+          sudo apt-get install -y --no-install-recommends \
             file \
             lua5.4 \
             zip
@@ -76,7 +75,7 @@ jobs:
       # CLEAN BUILD
       # ============================================================
 
-      - name: Clean previous build artifacts
+      - name: Clean build
         shell: bash
         run: |
           set -euo pipefail
@@ -84,11 +83,11 @@ jobs:
           make clean || true
 
           rm -f compas_player_target
-          rm -f compas_player_host
+          rm -f compas_bootloader
           rm -f open_hiby_bootloader
 
       # ============================================================
-      # BUILD COMPASS PLAYER
+      # BUILD PLAYER
       # ============================================================
 
       - name: Build Compass Player
@@ -96,14 +95,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "=============================================="
+          echo "=========================================="
           echo "Building Compass Player"
-          echo "=============================================="
+          echo "=========================================="
 
           make -j2 BOARD=r1 target
 
           echo
-          echo "Compass Player build completed."
+          echo "Player build completed."
 
           test -f compas_player_target
           test -s compas_player_target
@@ -111,7 +110,7 @@ jobs:
           ls -lh compas_player_target
 
       # ============================================================
-      # BUILD HIBY R1 BOOTLOADER
+      # BUILD BOOTLOADER
       # ============================================================
 
       - name: Build HiBy R1 bootloader
@@ -119,164 +118,129 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "=============================================="
+          echo "=========================================="
           echo "Building HiBy R1 bootloader"
-          echo "=============================================="
+          echo "=========================================="
 
           make -j2 BOARD=r1 bootloader
 
           echo
           echo "Bootloader build completed."
 
-          test -f open_hiby_bootloader
-          test -s open_hiby_bootloader
+          # IMPORTANT:
+          # The current Makefile generates compas_bootloader.
+          test -f compas_bootloader
+          test -s compas_bootloader
 
-          ls -lh open_hiby_bootloader
+          ls -lh compas_bootloader
 
       # ============================================================
-      # VERIFY COMPASS PLAYER
+      # VERIFY PLAYER
       # ============================================================
 
-      - name: Verify Compass Player binary
+      - name: Verify Compass Player
         shell: bash
         run: |
           set -euo pipefail
 
           BINARY="compas_player_target"
 
-          echo "=============================================="
+          echo "=========================================="
           echo "Verifying Compass Player"
-          echo "=============================================="
+          echo "=========================================="
 
           test -f "$BINARY"
           test -s "$BINARY"
 
-          echo
-          echo "File information:"
           file "$BINARY"
-
-          echo
-          echo "ELF header:"
-          mipsel-linux-musl-readelf -h "$BINARY"
-
-          echo
-          echo "Checking architecture..."
 
           mipsel-linux-musl-readelf -h "$BINARY" \
             | grep -E "Machine:.*MIPS" >/dev/null
 
           echo
-          echo "Compass Player binary verification successful."
+          echo "Compass Player verification successful."
 
-          echo
-          echo "Binary:"
           ls -lh "$BINARY"
 
       # ============================================================
       # VERIFY BOOTLOADER
       # ============================================================
 
-      - name: Verify bootloader binary
+      - name: Verify bootloader
         shell: bash
         run: |
           set -euo pipefail
 
-          BINARY="open_hiby_bootloader"
+          BINARY="compas_bootloader"
 
-          echo "=============================================="
+          echo "=========================================="
           echo "Verifying HiBy R1 bootloader"
-          echo "=============================================="
+          echo "=========================================="
 
-          if [ ! -f "$BINARY" ]; then
-            echo "ERROR: Bootloader binary was not created."
-            echo
-            echo "Expected:"
-            echo "  $BINARY"
-            echo
-            echo "Current directory:"
-            pwd
-            echo
-            echo "Root directory contents:"
-            ls -lah
-            echo
-            echo "Build directory contents:"
-            find build_target -maxdepth 2 -type f -print 2>/dev/null || true
-            exit 1
-          fi
-
+          test -f "$BINARY"
           test -s "$BINARY"
 
-          echo
-          echo "File information:"
           file "$BINARY"
-
-          echo
-          echo "ELF header:"
-          mipsel-linux-musl-readelf -h "$BINARY"
-
-          echo
-          echo "Checking architecture..."
 
           mipsel-linux-musl-readelf -h "$BINARY" \
             | grep -E "Machine:.*MIPS" >/dev/null
 
           echo
-          echo "Bootloader binary verification successful."
+          echo "Bootloader verification successful."
 
-          echo
-          echo "Binary:"
           ls -lh "$BINARY"
 
       # ============================================================
-      # VERIFY BOTH BINARIES TOGETHER
+      # FINAL VALIDATION
       # ============================================================
 
-      - name: Verify final build outputs
+      - name: Validate final binaries
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=============================================="
-          echo "Final build outputs"
-          echo "=============================================="
-
-          test -f compas_player_target
-          test -f open_hiby_bootloader
+          echo "=========================================="
+          echo "Final binaries"
+          echo "=========================================="
 
           test -s compas_player_target
-          test -s open_hiby_bootloader
+          test -s compas_bootloader
 
           echo
-          ls -lh \
-            compas_player_target \
-            open_hiby_bootloader
+          echo "Player:"
+          ls -lh compas_player_target
 
           echo
-          echo "Checksums:"
+          echo "Bootloader:"
+          ls -lh compas_bootloader
+
+          echo
+          echo "SHA256:"
           sha256sum \
             compas_player_target \
-            open_hiby_bootloader
+            compas_bootloader
 
       # ============================================================
-      # PACKAGE ARTIFACT
+      # PACKAGE
       # ============================================================
 
-      - name: Create firmware package
+      - name: Package firmware
         shell: bash
         run: |
           set -euo pipefail
 
+          rm -rf release
           mkdir -p release
 
           cp compas_player_target \
             release/compas_player_target
 
-          cp open_hiby_bootloader \
-            release/open_hiby_bootloader
+          cp compas_bootloader \
+            release/compas_bootloader
 
           sha256sum \
             release/compas_player_target \
-            release/open_hiby_bootloader \
+            release/compas_bootloader \
             > release/SHA256SUMS
 
           cat > release/BUILD_INFO.txt <<EOF
@@ -291,33 +255,34 @@ jobs:
           compas_player_target
 
           Bootloader:
-          open_hiby_bootloader
+          compas_bootloader
           EOF
 
+          echo
           echo "Release package:"
-          find release -maxdepth 1 -type f -print -exec ls -lh {} \;
+          find release -maxdepth 1 -type f -print
 
       # ============================================================
-      # UPLOAD GITHUB ACTION ARTIFACT
+      # GITHUB ACTION ARTIFACT
       # ============================================================
 
-      - name: Upload firmware artifacts
+      - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: compass-player-firmware-${{ github.run_number }}
           path: |
             release/compas_player_target
-            release/open_hiby_bootloader
+            release/compas_bootloader
             release/SHA256SUMS
             release/BUILD_INFO.txt
           if-no-files-found: error
           retention-days: 30
 
       # ============================================================
-      # AUTOMATIC MAIN BUILD RELEASE
+      # MAIN BRANCH RELEASE
       # ============================================================
 
-      - name: Create automatic main build release
+      - name: Create main build release
         if: ${{ github.ref == 'refs/heads/main' }}
         shell: bash
         env:
@@ -333,17 +298,17 @@ jobs:
           Commit: ${GITHUB_SHA}
           Build: ${GITHUB_RUN_NUMBER}
 
-          Included binaries:
+          Included:
 
           - compas_player_target
-          - open_hiby_bootloader
-
-          SHA256 checksums are included in SHA256SUMS.
+          - compas_bootloader
+          - SHA256SUMS
+          - BUILD_INFO.txt
           EOF
 
           gh release create "$TAG" \
             release/compas_player_target \
-            release/open_hiby_bootloader \
+            release/compas_bootloader \
             release/SHA256SUMS \
             release/BUILD_INFO.txt \
             --target "$GITHUB_SHA" \
@@ -370,17 +335,17 @@ jobs:
 
           Commit: ${GITHUB_SHA}
 
-          Included binaries:
+          Included:
 
           - compas_player_target
-          - open_hiby_bootloader
-
-          SHA256 checksums are included in SHA256SUMS.
+          - compas_bootloader
+          - SHA256SUMS
+          - BUILD_INFO.txt
           EOF
 
           gh release create "$TAG" \
             release/compas_player_target \
-            release/open_hiby_bootloader \
+            release/compas_bootloader \
             release/SHA256SUMS \
             release/BUILD_INFO.txt \
             --verify-tag \
