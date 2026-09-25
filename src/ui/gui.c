@@ -69,6 +69,7 @@
 #include "timezone_data.h"
 #include "timezone_apply.h"
 #include "hostname_apply.h"
+#include "../core/screenshot.h"
 
 /* --- Theme API (gui_theme.h) --- */
 
@@ -284,7 +285,8 @@ static bool shutdown_background_work_active(void) {
     return gui_library_has_background_work() || gui_subsonic_has_background_work() ||
            gui_network_has_background_work() || gui_lyrics_has_background_work() ||
            gui_player_has_background_work() || gui_shell_has_background_work() ||
-           plugin_manager_has_background_work() || playlist_files_has_active_write() || gui_player_queue_write_busy();
+           plugin_manager_has_background_work() || playlist_files_has_active_write() ||
+           gui_player_queue_write_busy() || screenshot_is_busy();
 }
 
 /* Grace window after resuming from suspend. hw_buttons sets its short-tap flag
@@ -502,6 +504,7 @@ static void update_timer_cb(lv_timer_t * timer) {
     if (next_seek_steps > 0) {
         gui_player_hw_next_seek_steps(next_seek_steps, next_seek_is_first);
     }
+    bool screenshot_request_pending = hw_buttons_consume_screenshot();
 
 #ifndef HOST_BUILD
     /* Bluetooth accessory controls dispatch to UI/player state on this thread. */
@@ -519,6 +522,13 @@ static void update_timer_cb(lv_timer_t * timer) {
      * safe to do unconditionally every tick rather than hunting down every
      * call site that can change play state. */
     bt_media_player_notify_playback_state(audio_is_playing());
+    bool has_track = gui_player_has_active_track();
+    bt_media_player_notify_track(has_track ? gui_player_get_now_playing_title() : "",
+                                 has_track ? gui_player_get_now_playing_folder() : "",
+                                 has_track ? gui_player_get_now_playing_album() : "",
+                                 has_track ? gui_player_get_now_playing_genre() : "",
+                                 has_track ? gui_player_get_now_playing_track_number() : 0,
+                                 audio_get_position_seconds(), audio_get_duration_seconds());
 #endif
 
     /* Accessory-originated AVRCP volume changes arrive on bluealsa's
@@ -553,6 +563,22 @@ static void update_timer_cb(lv_timer_t * timer) {
      * audio state" pattern as hw_buttons/bt_media_player just above --
      * reuses the exact same shuffle-aware stepping and volume-persistence
      * shape as those, rather than a separate implementation. */
+    screenshot_request_pending = remote_control_consume_screenshot() || screenshot_request_pending;
+    if (screenshot_request_pending) (void) screenshot_start();
+    screenshot_completion_t screenshot_result;
+    if (screenshot_poll_completion(&screenshot_result)) {
+        if (screenshot_result.saved) {
+            show_info_toast("Screenshot saved");
+            plugin_manager_notify_screenshot_saved(screenshot_result.path);
+        } else {
+            char failed_msg[64];
+            snprintf(failed_msg, sizeof(failed_msg), "Screenshot failed (%s)",
+                     screenshot_result.reason[0] ? screenshot_result.reason : "unknown");
+            show_error_toast(failed_msg);
+            plugin_manager_notify_screenshot_failed(screenshot_result.reason);
+        }
+    }
+
     if (remote_control_consume_play_pause()) {
         toggle_play_pause();
     }
@@ -564,6 +590,10 @@ static void update_timer_cb(lv_timer_t * timer) {
     }
     if (remote_control_consume_mode_cycle()) {
         cycle_play_mode();
+    }
+    int remote_play_mode;
+    if (remote_control_consume_play_mode(&remote_play_mode)) {
+        gui_player_set_play_mode(remote_play_mode);
     }
     int remote_seek_seconds;
     if (remote_control_consume_seek(&remote_seek_seconds)) {
@@ -580,9 +610,15 @@ static void update_timer_cb(lv_timer_t * timer) {
         refresh_volume_topbar(remote_volume_percent);
     }
     int64_t remote_queue_id;
-    if (remote_control_consume_queue_index(&remote_queue_id)) {
+    char remote_queue_catalog_revision[METADATA_DB_CATALOG_REVISION_SIZE] = {0};
+    if (remote_control_consume_queue_index(&remote_queue_id, remote_queue_catalog_revision,
+                                            sizeof(remote_queue_catalog_revision))) {
         song_row_t remote_queue_row;
-        if (metadata_db_get_song_by_id(remote_queue_id, &remote_queue_row)) queue_add_song(remote_queue_row.path);
+        bool found = remote_queue_catalog_revision[0]
+            ? metadata_db_catalog_get_song_revision(remote_queue_catalog_revision, remote_queue_id,
+                                                    &remote_queue_row) == METADATA_DB_CATALOG_OK
+            : metadata_db_get_song_by_id(remote_queue_id, &remote_queue_row);
+        if (found) queue_add_song(remote_queue_row.path);
     }
     int remote_queue_remove_offset;
     uint64_t remote_queue_revision;
@@ -592,10 +628,12 @@ static void update_timer_cb(lv_timer_t * timer) {
         gui_player_remote_queue_clear(remote_queue_revision);
     int64_t remote_play_id;
     char remote_play_playlist[128], remote_play_artist[128], remote_play_album_artist[128], remote_play_album[128];
+    char remote_play_catalog_revision[METADATA_DB_CATALOG_REVISION_SIZE] = {0};
     if (remote_control_consume_play_index(&remote_play_id, remote_play_playlist, sizeof(remote_play_playlist),
                                            remote_play_artist, sizeof(remote_play_artist), remote_play_album_artist,
                                            sizeof(remote_play_album_artist), remote_play_album,
-                                           sizeof(remote_play_album))) {
+                                           sizeof(remote_play_album), remote_play_catalog_revision,
+                                           sizeof(remote_play_catalog_revision))) {
         /* remote_play_id is a song id (metadata_db.c's rowid-based
          * song_row_t.id) -- resolve it to a path, then hand that straight to
          * play_remote_control_song() (defined with the rest of the
@@ -603,9 +641,13 @@ static void update_timer_cb(lv_timer_t * timer) {
          * resolves the path plus the playlist/artist/album context into the
          * right playlist and position via its own DB queries, falling back
          * to the whole library (All Songs, by title offset) when no scope
-         * applies. */
+        * applies. */
         song_row_t remote_play_row;
-        if (metadata_db_get_song_by_id(remote_play_id, &remote_play_row)) {
+        bool found = remote_play_catalog_revision[0]
+            ? metadata_db_catalog_get_song_revision(remote_play_catalog_revision, remote_play_id,
+                                                    &remote_play_row) == METADATA_DB_CATALOG_OK
+            : metadata_db_get_song_by_id(remote_play_id, &remote_play_row);
+        if (found) {
             play_remote_control_song(remote_play_row.path, remote_play_playlist, remote_play_artist,
                                       remote_play_album_artist, remote_play_album);
         }
@@ -908,11 +950,15 @@ static void update_timer_cb(lv_timer_t * timer) {
             !audio_is_playing() && !battery_is_charging() && !shutdown_background_work_active() &&
             lv_tick_elaps(screen_off_since_tick) >= (uint32_t) current_settings.idle_shutdown_minutes * 60 * 1000) {
             if (current_settings.idle_suspend_enabled) {
+                plugin_manager_notify_suspending();
+                led_control_suspend();
                 power_suspend_now();
+                led_control_resume(current_settings.led_indicator_enabled);
 
                 /* Restore UI state and reset inactivity timers on resume so the
                  * display does not immediately time out again. */
                 resume_from_suspend_fixups();
+                plugin_manager_notify_system_resumed();
 
                 /* Unlike idle_shutdown_now() (which never returns --
                  * poweroff ends the process), this call CAN legitimately
@@ -943,6 +989,11 @@ static void update_timer_cb(lv_timer_t * timer) {
     charge_limiter_poll(current_settings.charge_limiter_enabled, false);
     safe_charging_poll(current_settings.safe_charging_enabled, false);
     led_control_poll(current_settings.led_indicator_enabled);
+    int volume_percent = (int) (audio_get_volume() * 100.0f + 0.5f);
+    if (volume_percent < 0) volume_percent = 0;
+    if (volume_percent > 100) volume_percent = 100;
+    plugin_manager_notify_volume_changed(volume_percent);
+    plugin_manager_poll_battery();
     headphone_status_refresh_earpods_adc();
 
     if (current_settings.remote_control_enabled) {
@@ -952,14 +1003,12 @@ static void update_timer_cb(lv_timer_t * timer) {
          * are this app's own single source of truth for title/artist (see
          * apply_track_metadata_to_ui()), so read them back rather than
          * standing up a second copy of the same state just for this.
-         * Album isn't tracked anywhere after the initial metadata_read()
-         * call, so it's left blank here -- a real gap, not an oversight,
-         * see remote_control.h's own Phase 1 scope note. */
+         * album_label is read back the same way below. */
         const char * now_playing_path = gui_player_has_active_track()
                 ? gui_player_get_current_track_path()
                 : NULL;
         remote_control_notify_status(audio_is_playing(), audio_is_paused(), gui_player_get_now_playing_title(),
-                                      gui_player_get_now_playing_folder(), "", now_playing_path,
+                                      gui_player_get_now_playing_folder(), gui_player_get_now_playing_album(), now_playing_path,
                                       (int) audio_get_position_seconds(), (int) audio_get_duration_seconds(),
                                       audio_get_volume(), current_settings.play_mode);
     }
@@ -1026,6 +1075,7 @@ static void update_timer_cb(lv_timer_t * timer) {
     gui_queue_poll();
     gui_network_poll_airplay_overlay();
     gui_track_info_poll();
+    gui_library_poll_boot_prompt();
 
     /* All correctness-critical work above (buttons, queue transitions and
      * completion of requested background operations) still runs at 500 ms.
@@ -1365,20 +1415,17 @@ void gui_stream_media_refresh(void) {
     if (old) lv_obj_delete(old);
 }
 
-/* One-shot deferred trigger for a fresh-SD-card/first-run auto rescan --
- * see this timer's own scheduling call site (gui_init(), right after
- * library_load_from_cache_only()) for why this can't just call
- * start_library_rescan() synchronously there. Same pattern as fallback_
- * font.c's fallback_font_load_deferred()/fallback_font_schedule_deferred_
- * load(). */
-static void fresh_database_rescan_timer_cb(lv_timer_t * timer) {
+/* Keep migration's first scan deferred until screen setup has completed.
+ * This uses the same one-shot timer shape as fallback_font.c's deferred
+ * load because it cannot start synchronously during the cache load. */
+static void migration_rescan_timer_cb(lv_timer_t * timer) {
     lv_timer_delete(timer);
     start_library_auto_rescan();
 }
 
-#define FRESH_DATABASE_RESCAN_DELAY_MS 500
-static void fresh_database_schedule_deferred_rescan(void) {
-    lv_timer_create(fresh_database_rescan_timer_cb, FRESH_DATABASE_RESCAN_DELAY_MS, NULL);
+#define MIGRATION_RESCAN_DELAY_MS 500
+static void migration_schedule_deferred_rescan(void) {
+    lv_timer_create(migration_rescan_timer_cb, MIGRATION_RESCAN_DELAY_MS, NULL);
 }
 
 void gui_init(uint32_t screen_width, uint32_t screen_height) {
@@ -1390,6 +1437,7 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
     bt_control_set_speexrate_enabled(current_settings.bt_speexrate_enabled);
     bt_control_set_sample_rate(current_settings.bt_sample_rate);
     db_log_set_enabled(current_settings.db_logging_enabled);
+    hw_buttons_set_screenshot_combo_enabled(current_settings.screenshot_combo_enabled);
     usb_dac_bridge_set_debug_log_enabled(current_settings.db_logging_enabled);
     headphone_status_refresh_earpods_adc();
     app_clock_init(current_settings.clock_automatic, current_settings.clock_manual_epoch,
@@ -1510,9 +1558,11 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
 #ifndef HOST_BUILD
     boot_checkpoint("library_load_from_cache_only done");
 #endif
-    /* A fresh database schedules its first scan after UI initialization. */
-    if ((metadata_db_get_load_outcome() == METADATA_DB_LOAD_SUCCESS_FRESH || metadata_db_migration_needed()) &&
-        gui_library_auto_rescan_enabled()) fresh_database_schedule_deferred_rescan();
+    /* Migration keeps its automatic first scan, even if the destination
+     * cache reports FRESH. A non-migration FRESH result is handled by the
+     * library's settled build prompt. */
+    if (metadata_db_migration_needed() && gui_library_auto_rescan_enabled())
+        migration_schedule_deferred_rescan();
     /* No whole-library load anywhere in this boot path, on purpose --
      * remote_control.c queries metadata_db.c directly (its own METADATA_DB_
      * GUARD) rather than needing a synced copy of the library, and each of
@@ -1602,6 +1652,7 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
      * unconditionally, splash included). */
     lv_obj_remove_flag(lv_layer_top(), LV_OBJ_FLAG_HIDDEN);
 #endif
+    gui_library_boot_ready(lv_tick_get());
 
     /* gui_shell_get_home_screen() is the permanent root of the nav stack -- nav_pop() never
      * goes past it. Load it first so there's always something valid on
@@ -1683,6 +1734,14 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
      * pre-first-frame call site that hung boot on the previous attempt at
      * this). */
     fallback_font_schedule_deferred_load();
+#ifdef TEST_BOOT_RC
+    /* The production startup path above deliberately resets session-only
+     * modes and persists them as disabled. Re-enable only in memory for this
+     * test build; never change the user's saved setting. The service startup
+     * does blocking Bluetooth work on its own worker thread. */
+    current_settings.remote_control_enabled = true;
+    gui_network_start_test_boot_services();
+#endif
 }
 
 
