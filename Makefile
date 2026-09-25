@@ -36,6 +36,20 @@ HOST_BIN = compas_player_host_$(BOARD)
 TARGET_BIN = compas_player_target_$(BOARD)
 endif
 
+# Test-only boot behavior gets its own object directory and executable. Make
+# does not notice CFLAGS changes, so sharing build_target/ could silently keep
+# TEST_BOOT_RC objects in a later normal build (or vice versa).
+ifeq ($(TEST_BOOT_RC),1)
+ifeq ($(BOARD),r1)
+BUILD_TARGET_DIR := build_target_test_boot_rc
+TARGET_BIN := compas_player_target_test_boot_rc
+else
+BUILD_TARGET_DIR := build_target_$(BOARD)_test_boot_rc
+TARGET_BIN := compas_player_target_test_boot_rc_$(BOARD)
+endif
+TEST_BOOT_RC_DEFINE = -DTEST_BOOT_RC=1
+endif
+
 # Compiler and Linker configuration
 CC = gcc
 CXX = g++
@@ -249,6 +263,19 @@ LVGL_FBDEV_SYMBOLS := lv_linux_fbdev_get_active_page lv_linux_fbdev_get_inactive
 ifeq ($(wildcard $(DR_LIBS_DIR)),)
 $(info Cloning dr_libs (dr_flac)...)
 $(shell git clone --depth 1 https://github.com/mackron/dr_libs.git)
+# dr_libs is a fresh upstream clone (gitignored, not tracked), so vendored
+# fixes to it must be reapplied here rather than committed. This patch bounds
+# dr_wav's metadata chunk seek so a crafted WAV/AIFC chunk size cannot spin
+# drwav__seek_forward forever -- reachable in-process on the UI thread via
+# read_wav_metadata() when a malformed file is played. Applied right after the
+# clone (pristine tree, so it always applies cleanly); a loud warning rather
+# than a silent build if upstream ever drifts, since the miss is a security
+# hardening regression, not a compile error.
+$(info Hardening dr_libs metadata parser...)
+DR_LIBS_PATCH_RESULT := $(shell patch -p1 --forward --fuzz=0 -i patches/dr_libs_metadata_hardening.patch >/dev/null 2>&1 && echo ok || echo FAILED)
+ifneq ($(DR_LIBS_PATCH_RESULT),ok)
+$(warning dr_libs metadata-hardening patch did not apply -- WAV/AIFF metadata DoS hardening is NOT in effect; check patches/dr_libs_metadata_hardening.patch against the current upstream dr_wav.h)
+endif
 endif
 
 # tinyalsa (minimal ALSA userspace library, used on target only for audio output)
@@ -418,7 +445,14 @@ endif
 # *.d files near the bottom of this Makefile is what actually feeds these
 # back in on the next invocation -- this flag alone does nothing without
 # that companion include.
-CFLAGS = -O3 -g -Wall -MMD -MP -I. -Isrc/audio -Isrc/network -Isrc/library -Isrc/hardware -Isrc/ui -Isrc/core -Isrc/plugins -I$(LVGL_DIR) -I$(DR_LIBS_DIR) -I$(FAAD2_DIR)/include -I$(ALAC_DIR)/codec -I$(MBEDTLS_DIR)/include -I$(CJSON_DIR) -I$(OPUS_DIR)/include -I$(LUA_DIR)/src -I$(STB_VORBIS_DIR) -Ijpeg_vendor_config -I$(JPEG_DIR) -DLV_CONF_INCLUDE_SIMPLE=1
+# -fwrapv: define signed integer overflow as two's-complement wraparound
+# instead of undefined behavior. The vendored single-header media decoders
+# (stb_vorbis, dr_flac, ...) assemble little-endian integers with expressions
+# like `byte << 24` that technically overflow a signed int; they are correct on
+# the target but are UB by the letter of the standard, which a future optimizer
+# could exploit. This makes that whole class defined for every file we build,
+# at negligible cost, rather than patching each vendored decoder.
+CFLAGS = -O3 -g -Wall -fwrapv -MMD -MP -I. -Isrc/audio -Isrc/network -Isrc/library -Isrc/hardware -Isrc/ui -Isrc/core -Isrc/plugins -I$(LVGL_DIR) -I$(DR_LIBS_DIR) -I$(FAAD2_DIR)/include -I$(ALAC_DIR)/codec -I$(MBEDTLS_DIR)/include -I$(CJSON_DIR) -I$(OPUS_DIR)/include -I$(LUA_DIR)/src -I$(STB_VORBIS_DIR) -Ijpeg_vendor_config -I$(JPEG_DIR) -DLV_CONF_INCLUDE_SIMPLE=1
 CXXFLAGS = $(filter-out -Wall,$(CFLAGS)) -std=c++11
 HOST_CFLAGS = $(CFLAGS) -DHOST_BUILD=1 $(BOARD_DEFINE) $(shell sdl2-config --cflags) -I$(TINFL_DIR) -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ARCHIVE_APIS
 HOST_CXXFLAGS = $(CXXFLAGS) -DHOST_BUILD=1 $(BOARD_DEFINE) $(shell sdl2-config --cflags) -I$(TINFL_DIR) -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ARCHIVE_APIS
@@ -471,8 +505,8 @@ BUILD_STAMP_DEFINE = -DBUILD_STAMP=\"$(shell date +%Y-%m-%d_%H:%M)\"
 # #include <execinfo.h> resolves to on target: musl (unlike host's glibc)
 # ships no execinfo.h/backtrace() of its own, which is what main.c's SIGSEGV
 # handler needs. Host build doesn't need this -- glibc already provides it.
-TARGET_CFLAGS = $(CFLAGS) -I$(LIBEXECINFO_DIR) -I$(LVGL_DIR)/src -I$(TINYALSA_DIR)/include -Idbus_vendor_config -I$(DBUS_DIR) $(BOARD_DEFINE) $(TEST_BUILD_TAG_DEFINE) $(RELEASE_LABEL_DEFINE) $(UI_PERF_TRACE_DEFINE) $(UI_GESTURE_TRACE_DEFINE) $(UI_HITBOX_DEBUG_DEFINE) $(BUILD_STAMP_DEFINE) -I$(TINFL_DIR) -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ARCHIVE_APIS
-TARGET_CXXFLAGS = $(CXXFLAGS) -I$(LIBEXECINFO_DIR) -I$(LVGL_DIR)/src -I$(TINYALSA_DIR)/include -Idbus_vendor_config -I$(DBUS_DIR) $(BOARD_DEFINE) $(TEST_BUILD_TAG_DEFINE) $(RELEASE_LABEL_DEFINE) $(UI_PERF_TRACE_DEFINE) $(UI_GESTURE_TRACE_DEFINE) $(UI_HITBOX_DEBUG_DEFINE) $(BUILD_STAMP_DEFINE) -I$(TINFL_DIR) -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ARCHIVE_APIS
+TARGET_CFLAGS = $(CFLAGS) -I$(LIBEXECINFO_DIR) -I$(LVGL_DIR)/src -I$(TINYALSA_DIR)/include -Idbus_vendor_config -I$(DBUS_DIR) $(BOARD_DEFINE) $(TEST_BOOT_RC_DEFINE) $(TEST_BUILD_TAG_DEFINE) $(RELEASE_LABEL_DEFINE) $(UI_PERF_TRACE_DEFINE) $(UI_GESTURE_TRACE_DEFINE) $(UI_HITBOX_DEBUG_DEFINE) $(BUILD_STAMP_DEFINE) -I$(TINFL_DIR) -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ARCHIVE_APIS
+TARGET_CXXFLAGS = $(CXXFLAGS) -I$(LIBEXECINFO_DIR) -I$(LVGL_DIR)/src -I$(TINYALSA_DIR)/include -Idbus_vendor_config -I$(DBUS_DIR) $(BOARD_DEFINE) $(TEST_BOOT_RC_DEFINE) $(TEST_BUILD_TAG_DEFINE) $(RELEASE_LABEL_DEFINE) $(UI_PERF_TRACE_DEFINE) $(UI_GESTURE_TRACE_DEFINE) $(UI_HITBOX_DEBUG_DEFINE) $(BUILD_STAMP_DEFINE) -I$(TINFL_DIR) -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ARCHIVE_APIS
 TINYALSA_CFLAGS = -O3 -g -Wall -I$(TINYALSA_DIR)/include -I$(TINYALSA_DIR)/src
 # DBUS_COMPILATION/DBUS_STATIC_BUILD: libdbus's own headers gate some
 # declarations on these (matching how its own build always defines them
@@ -537,8 +571,8 @@ TARGET_LDFLAGS = -static -no-pie -lpthread -lm
 # streaming), library/ (metadata/file browsing/playlists), hardware/ (device
 # control), ui/ (gui/screens/assets/fonts), core/ (settings, subprocess,
 # misc). main.c stays at src/ root as the entry point.
-APP_SRCS = src/main.c src/ui/gui.c src/ui/gui_subsonic.c src/ui/gui_settings.c src/ui/gui_network.c src/ui/gui_theme.c src/ui/gui_notifications.c src/ui/gui_library.c src/ui/gui_queue.c src/ui/gui_player.c src/ui/gui_track_info.c src/ui/gui_plugins.c src/ui/gui_shell.c src/ui/gui_navigation.c src/ui/gui_books.c src/ui/gui_text_input.c src/ui/gui_lyrics.c src/ui/gui_reload.c src/audio/audio.c src/library/file_browser.c src/hardware/hw_buttons.c src/hardware/input_device_utils.c src/library/metadata.c src/library/metadata_db.c src/core/settings.c src/core/app_version.c src/audio/aiff_decoder.c src/audio/dsd_filter.c src/audio/dsd_decoder.c src/audio/aac_decoder.c src/audio/mp4_demux.c src/audio/ape_demux.c src/audio/ape_decoder.c src/audio/peq.c src/ui/assets.c src/ui/screen_builders.c src/hardware/battery.c src/network/wifi_status.c src/network/ca_bundle.c src/network/http_conn.c src/network/http_client.c src/network/http_stream.c src/network/subsonic_client.c src/library/cover_decode.c src/library/lyrics.c src/audio/asf_demux.c src/audio/wma_decoder.c src/audio/ogg_demux.c src/audio/opus_decoder.c src/audio/vorbis_decoder.c src/library/cue_parser.c src/ui/fallback_font.c \
-src/core/subprocess.c src/network/wifi_control.c src/network/bluetooth_control.c src/network/hiby_sys_server.c src/hardware/backlight.c src/network/import_web.c src/network/airplay_control.c src/network/airplay_bridge.c src/network/airplay_metadata.c src/hardware/headphone_status.c src/hardware/device_config.c src/hardware/led_control.c src/hardware/charge_limiter.c src/core/idle_shutdown.c src/hardware/power_suspend.c src/core/text_reader.c src/hardware/usb_mode_control.c src/hardware/usb_dac_bridge.c src/hardware/usb_audio_output.c src/core/firmware_update.c src/library/playlist_files.c src/core/timezone_data.c src/core/timezone_apply.c src/core/hostname_apply.c src/network/dlna_control.c src/network/remote_control.c src/plugins/plugin_manager.c
+APP_SRCS = src/main.c src/ui/gui.c src/ui/gui_subsonic.c src/ui/gui_settings.c src/ui/gui_network.c src/ui/gui_theme.c src/ui/gui_notifications.c src/ui/gui_library.c src/ui/gui_queue.c src/ui/gui_player.c src/ui/gui_track_info.c src/ui/gui_plugins.c src/ui/gui_shell.c src/ui/gui_navigation.c src/ui/gui_books.c src/ui/gui_text_input.c src/ui/gui_lyrics.c src/ui/gui_reload.c src/audio/audio.c src/library/file_browser.c src/hardware/hw_buttons.c src/hardware/input_device_utils.c src/library/metadata.c src/library/metadata_db.c src/core/settings.c src/core/screenshot.c src/core/app_version.c src/audio/aiff_decoder.c src/audio/dsd_filter.c src/audio/dsd_decoder.c src/audio/aac_decoder.c src/audio/mp4_demux.c src/audio/ape_demux.c src/audio/ape_decoder.c src/audio/peq.c src/ui/assets.c src/ui/screen_builders.c src/hardware/battery.c src/network/wifi_status.c src/network/ca_bundle.c src/network/http_conn.c src/network/http_client.c src/network/http_stream.c src/network/subsonic_client.c src/library/cover_decode.c src/library/lyrics.c src/audio/asf_demux.c src/audio/wma_decoder.c src/audio/ogg_demux.c src/audio/opus_decoder.c src/audio/vorbis_decoder.c src/library/cue_parser.c src/ui/fallback_font.c \
+src/core/subprocess.c src/network/wifi_control.c src/network/bluetooth_control.c src/network/hiby_sys_server.c src/hardware/backlight.c src/network/import_web.c src/network/airplay_control.c src/network/airplay_bridge.c src/network/airplay_metadata.c src/hardware/headphone_status.c src/hardware/device_config.c src/hardware/led_control.c src/hardware/charge_limiter.c src/core/idle_shutdown.c src/hardware/power_suspend.c src/core/text_reader.c src/hardware/usb_mode_control.c src/hardware/usb_dac_bridge.c src/hardware/usb_audio_output.c src/core/firmware_update.c src/library/playlist_files.c src/core/timezone_data.c src/core/timezone_apply.c src/core/hostname_apply.c src/network/dlna_control.c src/network/remote_control.c src/network/catalog_source_cache.c src/network/remote_control_mdns.c src/plugins/plugin_manager.c
 APP_SRCS += src/ui/lyrics_layout.c src/ui/transition_compositor.c src/ui/frosted_glass.c src/ui/hw_volume_coalesce.c
 APP_SRCS += src/core/storage_migration.c src/core/sd_fsck.c src/core/sd_fsck_run.c
 APP_SRCS += src/plugins/plugin_json.c src/plugins/plugin_storage.c src/plugins/plugin_disabled_list.c
@@ -806,40 +840,43 @@ $(BUILD_HOST_DIR)/lua/%.o: $(LUA_DIR)/src/%.c
 # Build for target (MIPS HiBy Device)
 target: $(TARGET_BIN) compile_commands.json
 
+# Clearly named, isolated test binary: powers Bluetooth and enables both
+# Remote Control transports on boot. Normal `make target` is unchanged.
+.PHONY: target-test-boot-rc
+target-test-boot-rc:
+	$(MAKE) target TEST_BOOT_RC=1
+
 $(TARGET_BIN): $(TARGET_OBJS)
 	$(CROSS_CXX) -o $(BUILD_TARGET_DIR)/$(TARGET_BIN)_unstripped $(TARGET_OBJS) $(TARGET_LDFLAGS)
 	$(CROSS_STRIP) -s -o $@ $(BUILD_TARGET_DIR)/$(TARGET_BIN)_unstripped
 	@echo "Target build complete: File ready at '$(TARGET_BIN)'"
 
-# Standalone boot selector -- see src/bootloader/main.c's own top comment.
+# Standalone bootloader -- see src/bootloader/main.c's own top comment.
 # Deliberately its own tiny static binary, not linked against LVGL/the main
-# TARGET_OBJS: input_device_utils.c, subprocess.c, and tjpgd.c (for the
-# /etc/logo1.jpeg background -- see fb_draw.c's own doc comment) are pulled
-# in directly (all already dependency-free -- see their own files) rather
-# than reusing TARGET_OBJS's build rule, so this never accidentally drags
-# in the rest of the player/LVGL.
+# TARGET_OBJS: subprocess.c and tjpgd.c (for the boot splash -- see fb_draw.c's
+# own doc comment) are pulled in directly (both already dependency-free) rather
+# than reusing TARGET_OBJS's build rule, so this never accidentally drags in
+# the rest of the player/LVGL.
 # Same r1-stays-bare reasoning as HOST_BIN/TARGET_BIN (below the BOARD
 # selector block near the top of this file) -- without this, `make
 # bootloader BOARD=r3proii` would silently overwrite the R1 bootloader
 # sitting in the working directory, since (unlike the player binary and its
 # object directory) this target's own output name was never suffixed.
 ifeq ($(BOARD),r1)
-BOOTLOADER_BIN = open_hiby_bootloader
+BOOTLOADER_BIN = compas_bootloader
 else
-BOOTLOADER_BIN = open_hiby_bootloader_$(BOARD)
+BOOTLOADER_BIN = compas_bootloader_$(BOARD)
 endif
-BOOTLOADER_SRCS = src/bootloader/main.c src/bootloader/fb_draw.c src/bootloader/input.c \
+BOOTLOADER_SRCS = src/bootloader/main.c src/bootloader/fb_draw.c \
                   src/bootloader/scanner.c src/bootloader/installer.c src/bootloader/sd_ready.c \
                   src/bootloader/sd_ready_real.c \
-                  src/hardware/input_device_utils.c src/core/subprocess.c \
+                  src/core/subprocess.c \
                   lvgl/src/libs/tjpgd/tjpgd.c
 # -ffunction-sections/-fdata-sections + -Wl,--gc-sections: standard, safe
 # combination that lets the linker drop unused functions/data at the
-# granularity of individual symbols instead of whole .o files -- the only
-# thing this bootloader intentionally over-links (subprocess.c, for the
-# mount helper calls; input_device_utils.c) is small, but neither is used
-# in full, so this actually earns its keep here rather than being cargo-cult.
-BOOTLOADER_CFLAGS = -O2 -Wall -I. -Isrc/bootloader -Isrc/hardware -Isrc/core $(BOARD_DEFINE) -ffunction-sections -fdata-sections
+# granularity of individual symbols instead of whole .o files, which keeps
+# the statically linked mount helpers and JPEG decoder small.
+BOOTLOADER_CFLAGS = -O2 -Wall -I. -Isrc/bootloader -Isrc/core $(BOARD_DEFINE) -ffunction-sections -fdata-sections
 
 .PHONY: bootloader-player-selftest
 bootloader-player-selftest:
@@ -879,6 +916,28 @@ wifi-status-selftest:
 	@mkdir -p $(BUILD_TARGET_DIR)
 	$(CC) -O0 -g -Wall -Wextra -Isrc/network -Isrc/core src/network/wifi_status.c src/network/wifi_status_test.c -o $(BUILD_TARGET_DIR)/wifi_status_test
 	./$(BUILD_TARGET_DIR)/wifi_status_test
+
+# Unit check for DNS-SD query parsing and the responder's emitted RR wire data.
+.PHONY: remote-control-mdns-selftest
+remote-control-mdns-selftest:
+	@mkdir -p $(BUILD_TARGET_DIR)
+	$(CC) -O0 -g -Wall -Wextra -Isrc/network src/network/remote_control_mdns_test.c -pthread \
+	    -o $(BUILD_TARGET_DIR)/remote_control_mdns_test
+	./$(BUILD_TARGET_DIR)/remote_control_mdns_test
+
+# Remote Control PIN lifecycle: random 6-digit PIN generated once and reused,
+# "0000" placeholder migration, Generate New PIN clearing a lockout. Includes
+# the real remote_control.c; section GC discards the unreached server code.
+.PHONY: remote-control-pin-selftest
+remote-control-pin-selftest:
+	@mkdir -p $(BUILD_TARGET_DIR)
+	$(CC) -O0 -g -Wall -Wextra -ffunction-sections -fdata-sections -DHOST_BUILD=1 \
+	    -I. -Isrc/network -Isrc/core -Isrc/audio -Isrc/library -Isrc/ui \
+	    -Ilvgl -Idr_libs -Ifaad2/include -Ialac/codec -Imbedtls/include -IcJSON -Iopus/include \
+	    -Ilua/src -Istb_vorbis -Ijpeg_vendor_config -Ijpeg -Itinfl -DLV_CONF_INCLUDE_SIMPLE=1 \
+	    src/network/remote_control_pin_test.c -Wl,--gc-sections -lpthread \
+	    -o $(BUILD_TARGET_DIR)/remote_control_pin_test
+	./$(BUILD_TARGET_DIR)/remote_control_pin_test
 
 subprocess-timeout-selftest:
 	@mkdir -p $(BUILD_TARGET_DIR)
@@ -992,6 +1051,17 @@ metadata-migration-retry-selftest:
 	    src/library/metadata_migration_retry_test.c src/library/metadata_db.c src/library/tagcache.c src/core/db_log.c \
 	    -Wl,--gc-sections -lpthread -lm -o $(BUILD_TARGET_DIR)/metadata_migration_retry_test
 	./$(BUILD_TARGET_DIR)/metadata_migration_retry_test
+
+# Bounded catalog snapshot identity, revision, album-key grouping, and cover-source validation.
+.PHONY: metadata-catalog-selftest
+metadata-catalog-selftest:
+	@mkdir -p $(BUILD_TARGET_DIR)
+	$(CC) -std=gnu11 -O0 -g -Wall -Wextra -DHOST_BUILD=1 -ffunction-sections -fdata-sections \
+	    -I. -Isrc -Isrc/library -Isrc/network -Isrc/core -Isrc/ui -Ilvgl \
+	    src/library/metadata_catalog_test.c src/library/metadata_db.c src/library/tagcache.c \
+	    src/library/albumart.c src/network/catalog_source_cache.c src/core/db_log.c \
+	    -Wl,--gc-sections -lpthread -lm -o $(BUILD_TARGET_DIR)/metadata_catalog_test
+	./$(BUILD_TARGET_DIR)/metadata_catalog_test
 
 # End-to-end tagcache generation, snapshot, remap, numeric and WAV coverage.
 .PHONY: tagcache-storage-selftest

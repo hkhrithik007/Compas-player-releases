@@ -196,7 +196,7 @@ static void real_wait_ms(void * ctx_v, int ms) {
 
 /* Logs SD readiness result and diagnostics to stderr. */
 static void log_sd_ready_outcome(const sd_ready_result_t * r) {
-    const char * prefix = "open_hiby_bootloader: SD readiness";
+    const char * prefix = "compas_bootloader: SD readiness";
 
     if (r->elapsed_ms < 0) {
         fprintf(stderr, "%s: monotonic clock unavailable -- proceeded with a single best-effort check "
@@ -261,11 +261,10 @@ void mount_sd_card_if_needed(void) {
         .wait_ms = real_wait_ms,
     };
 
-    const char * exec_candidates[] = { SD_STOCK_PLAYER_PATH, SD_UPDATE_PLAYER_PATH,
-                                       LEGACY_SD_STOCK_PLAYER_PATH, LEGACY_SD_UPDATE_PLAYER_PATH };
+    const char * exec_candidates[] = { SD_UPDATE_PLAYER_PATH, LEGACY_SD_UPDATE_PLAYER_PATH };
 
     sd_ready_result_t result =
-        wait_for_sd_ready(&probes, SD_DEVICE_NODE_PARTITION, SD_DEVICE_NODE_WHOLE_DISK, exec_candidates, 4,
+        wait_for_sd_ready(&probes, SD_DEVICE_NODE_PARTITION, SD_DEVICE_NODE_WHOLE_DISK, exec_candidates, 2,
                           SD_READY_SHORT_DEADLINE_MS, SD_READY_EXTENDED_DEADLINE_MS, SD_READY_HARD_DEADLINE_MS,
                           SD_READY_POLL_INTERVAL_MS, SD_READY_EXEC_GRACE_MS);
 

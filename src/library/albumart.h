@@ -38,6 +38,12 @@ typedef struct {
 
 bool albumart_search_files(const albumart_info_t * info, const char * size_string, char * buf, size_t buflen);
 
+/* Same source-sidecar search order as albumart_search_files(), but skips the
+ * player-generated RGB565-derived BMP caches. Remote catalog sync uses this
+ * to serve the original compressed sidecar bytes instead of a resized cache. */
+bool albumart_search_source_files(const albumart_info_t * info, const char * size_string,
+                                  char * buf, size_t buflen);
+
 /* Writes <musicroot>/.compas/albumart/<artist>-<album>.WxH.bmp from RGB565.
  * Source cover/audio mtime is stored in the BMP reserved field so a later
  * load can detect a replaced cover. */
@@ -47,6 +53,8 @@ bool albumart_store_rgb565(const albumart_info_t * info, int width, int height, 
  * cover (or audio file) mtime. User-supplied sized files next to the track
  * are accepted as-is. */
 bool albumart_sized_thumb_fresh(const albumart_info_t * info, int width, int height, char * found, size_t found_size);
+bool albumart_sized_thumb_fresh_with_source_mtime(const albumart_info_t * info, int width, int height,
+                                                   uint32_t source_mtime, char * found, size_t found_size);
 
 /* Strict variant for consumers that need the player-generated cache rather
  * than an arbitrary user-supplied .WxH image beside the track.  It only
@@ -54,10 +62,41 @@ bool albumart_sized_thumb_fresh(const albumart_info_t * info, int width, int hei
 bool albumart_generated_cache_fresh(const albumart_info_t * info, int width, int height,
                                     char * found, size_t found_size);
 
-/* Exposes the internal v2-<hash> filename key for diagnostics only (e.g.
- * logging the exact key a lookup computed, to compare against what's
- * actually on disk). Not for constructing paths outside this file. */
+/* Shared case-insensitive (album, effective album artist) identity used by
+ * tagcache album grouping, catalog album keys, and artwork thumbnail keys. */
+uint64_t albumart_thumbnail_key(const albumart_info_t * info);
+
+/* Exposes the shared thumbnail key for diagnostics only. Not for constructing
+ * paths outside this file. */
 uint64_t albumart_debug_thumbnail_key(const albumart_info_t * info);
+
+/* Artist identity for the local library's shared thumbnail LRU (album
+ * entries use albumart_thumbnail_key() above). Case folded, with its own
+ * on-disk namespace. */
+uint64_t albumart_artist_thumbnail_key(const char * artist);
+bool albumart_is_disc_folder(const char * name);
+bool albumart_find_artist_sidecar(const char * directory, char * found, size_t found_size);
+uint32_t albumart_source_mtime(const albumart_info_t * info);
+uint32_t albumart_source_mtime_with_path(const albumart_info_t * info, char * sidecar_path,
+                                         size_t sidecar_path_size, bool * out_has_sidecar);
+
+/* Artist thumbnails share the albumart cache directory, with a separate
+ * filename namespace and a source mtime in the BMP header. Negative markers
+ * store a caller-computed signature of the artist and album directories. */
+bool albumart_artist_sized_thumb_fresh(const char * artist, uint32_t source_mtime,
+                                       int width, int height, char * found, size_t found_size);
+bool albumart_artist_store_rgb565(const char * artist, uint32_t source_mtime,
+                                  int width, int height, const uint16_t * pixels);
+/* Cheap existence check, so callers only compute the (stat-heavy) directory
+ * signature when a marker is actually present. */
+bool albumart_artist_negative_exists(const char * artist);
+bool albumart_artist_negative_fresh(const char * artist, uint64_t source_signature);
+bool albumart_artist_store_negative(const char * artist, uint64_t source_signature);
+bool albumart_artist_alias_load(const char * artist, unsigned int scope, uint64_t * album_key,
+                                int64_t * representative_song_id);
+bool albumart_artist_alias_store(const char * artist, unsigned int scope, uint64_t album_key,
+                                 int64_t representative_song_id);
+void albumart_artist_alias_remove(const char * artist, unsigned int scope);
 
 typedef enum {
     ALBUMART_LOAD_OK,

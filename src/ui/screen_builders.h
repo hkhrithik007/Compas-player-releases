@@ -225,6 +225,10 @@ lv_obj_t * build_header_back_button(lv_obj_t * scr, lv_event_cb_t cb);
 /* Align existing text actions/switches by their actual height, not an
  * assumed font or asset size. Position remains centered when size changes. */
 void align_screen_header_action(lv_obj_t * action, int32_t right_inset);
+/* Top-right refresh glyph (LV_SYMBOL_REFRESH, accent color) for list screens
+ * whose contents come from a cached scan; busy greys it out and blocks taps. */
+lv_obj_t * build_header_refresh_action(lv_obj_t * scr, lv_event_cb_t click_cb);
+void set_header_refresh_action_busy(lv_obj_t * icon, bool busy);
 /* Returns the title label. Optional trailing action reserves its hitbox. */
 lv_obj_t * build_screen_header(lv_obj_t * scr, const char * title, lv_event_cb_t back_cb,
                               const char * trailing_asset, lv_event_cb_t trailing_cb);
@@ -432,6 +436,8 @@ typedef struct {
     const char * trailing_asset;   /* optional theme-relative badge asset */
     const char * subtitle;         /* optional; same borrowed lifetime as label */
     bool is_action;                /* explicit action affordance, not a song */
+    uint64_t artwork_key;           /* optional stable thumbnail key, separate from row identity */
+    const char * artwork_name;      /* optional artist name for artist-image resolution */
 } compact_list_item_t;
 
 /* Fixed size of a paged-mode row label buffer (compact_list_fetch_page_cb_t
@@ -445,6 +451,8 @@ typedef struct {
     char trailing_asset[64];
     char subtitle[256];
     bool is_action;
+    uint64_t artwork_key;
+    char artwork_name[128];
 } compact_list_page_row_t;
 
 /* Fired when a row is tapped, with the index into the `items` array passed
@@ -556,8 +564,12 @@ typedef int (*compact_list_fetch_page_cb_t)(void * ctx, int offset, int count,
  * exceeds the assignment. */
 typedef void (*compact_list_row_decorator_cb_t)(lv_obj_t * list, lv_obj_t * row,
                                                 lv_obj_t * leading_image, int logical_index,
-                                                int pool_slot, int64_t identity, void * ctx);
+                                                int pool_slot, int64_t identity, uint64_t artwork_key,
+                                                const char * artwork_name, void * ctx);
 void compact_list_set_row_decorator(lv_obj_t * list, compact_list_row_decorator_cb_t cb, void * ctx);
+/* Clears every leading image currently showing `src` (pointer compare only,
+ * no decorator run). For owners about to free a borrowed image descriptor. */
+void compact_list_detach_image_src(lv_obj_t * list, const void * src);
 /* Makes each visible trailing_asset a separate tappable accessory. The
  * callback receives the row's current logical index, including after the
  * virtual row has been recycled during scrolling. NULL disables it. */
@@ -604,15 +616,26 @@ lv_obj_t * build_confirm_popup(const char * title_text, lv_label_long_mode_t tit
                                lv_color_t confirm_color, lv_event_cb_t confirm_cb, lv_obj_t ** out_confirm_row,
                                const char * cancel_text, lv_color_t cancel_color, lv_event_cb_t cancel_cb,
                                lv_obj_t ** out_cancel_row, lv_event_cb_t backdrop_cb, lv_obj_t ** out_backdrop);
+lv_obj_t * build_confirm_popup_with_labels(const char * title_text, lv_label_long_mode_t title_long_mode,
+                                           lv_obj_t ** out_title, const char * body_text, lv_obj_t ** out_body,
+                                           const char * confirm_text, lv_obj_t ** out_confirm_label,
+                                           lv_color_t confirm_color, lv_event_cb_t confirm_cb,
+                                           lv_obj_t ** out_confirm_row, const char * cancel_text,
+                                           lv_color_t cancel_color, lv_event_cb_t cancel_cb,
+                                           lv_obj_t ** out_cancel_row, lv_event_cb_t backdrop_cb,
+                                           lv_obj_t ** out_backdrop);
 
 typedef struct {
     lv_obj_t * popup;
     lv_obj_t * backdrop;
+    bool visible;
 } gui_popup_t;
 
 void gui_popup_show(gui_popup_t * p);
 void gui_popup_hide(gui_popup_t * p);
 void gui_popup_teardown(gui_popup_t * p);
+bool gui_popup_is_visible(const gui_popup_t * p);
+unsigned gui_popup_visible_count(void);
 
 lv_obj_t * add_pill_row_base(lv_obj_t * parent, const char * label_text);
 lv_obj_t * add_pill_toggle_row(lv_obj_t * parent, const char * label_text, bool checked, lv_event_cb_t on_click);

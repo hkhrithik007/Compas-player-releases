@@ -1,6 +1,9 @@
 #include "gui_navigation.h"
 #include "gui_library.h"
 #include "gui_network.h"
+#include "gui_shell.h"
+#include "gui_lock_screen.h"
+#include "gui_queue.h"
 #include "assets.h"
 #include "idle_shutdown.h"
 #include "backlight.h"
@@ -83,13 +86,42 @@ void refresh_artist_albums_now_playing_indicator(void);
 /* STATUS_BAR_CLEARANCE is provided by screen_builders.h. */
 #define EXTERNAL_COVER_MAX_BYTES (4U * 1024U * 1024U)
 
+typedef enum {
+    THUMBNAIL_KEY_ALBUM,
+    THUMBNAIL_KEY_ARTIST
+} thumbnail_key_kind_t;
+
+typedef struct {
+    thumbnail_key_kind_t key_kind;
+    metadata_db_group_kind_t artist_group_kind;
+} thumbnail_decorator_context_t;
+
+static const thumbnail_decorator_context_t album_thumbnail_context = {
+    .key_kind = THUMBNAIL_KEY_ALBUM,
+    .artist_group_kind = METADATA_DB_GROUP_ARTIST
+};
+static const thumbnail_decorator_context_t artist_thumbnail_context = {
+    .key_kind = THUMBNAIL_KEY_ARTIST,
+    .artist_group_kind = METADATA_DB_GROUP_ARTIST
+};
+static const thumbnail_decorator_context_t album_artist_thumbnail_context = {
+    .key_kind = THUMBNAIL_KEY_ARTIST,
+    .artist_group_kind = METADATA_DB_GROUP_ALBUM_ARTIST
+};
+
 static lv_obj_t * album_thumbnail_active_list = NULL;
 static atomic_int album_thumbnail_generation = 0;
+static int album_thumbnail_queue_count;
 static bool group_songs_source_is_album = false;
 static gui_busy_handle_t library_rescan_token = 0;
 static gui_busy_handle_t sd_format_token = 0;
 static atomic_int library_scan_progress_total = 0;
 static atomic_int library_scan_progress_done = 0;
+/* Directory entries visited so far by the discovery walk (before _total is known). */
+static atomic_int library_scan_walk_items = 0;
+/* Which step the busy screen describes; set by the scan worker. */
+enum { LIBRARY_SCAN_PHASE_WALK, LIBRARY_SCAN_PHASE_TAGS, LIBRARY_SCAN_PHASE_SAVE };
+static atomic_int library_scan_phase = LIBRARY_SCAN_PHASE_WALK;
 static atomic_bool library_scan_cancel_requested = false;
 void gui_library_cancel_scan(void);
 
@@ -103,6 +135,13 @@ static unsigned album_lazy_stale;
 static void album_thumbnail_screen_loaded_cb(lv_event_t * e);
 static void album_thumbnail_screen_unloaded_cb(lv_event_t * e);
 static void album_thumbnail_scroll_cb(lv_event_t * e);
+static void thumbnail_row_decorator(lv_obj_t * list, lv_obj_t * row, lv_obj_t * image,
+                                    int logical_index, int pool_slot, int64_t representative_song_id,
+                                    uint64_t artwork_key, const char * artwork_name, void * ctx);
+static void refresh_thumbnail_list_visible(lv_obj_t * list);
+static void refresh_all_thumbnail_lists(void);
+static void release_thumbnail_dsc(const lv_image_dsc_t * dsc);
+static void refresh_group_song_thumbnails(void);
 static int artists_fetch_page(void * ctx, int offset, int count, compact_list_page_row_t out_rows[]);
 static int albums_fetch_page(void * ctx, int offset, int count, compact_list_page_row_t out_rows[]);
 static int album_artists_fetch_page(void * ctx, int offset, int count, compact_list_page_row_t out_rows[]);
@@ -142,6 +181,8 @@ static lv_obj_t * artist_albums_title_label = NULL;
 
 static lv_obj_t * playlists_screen = NULL;
 static lv_obj_t * playlists_list = NULL;
+static lv_obj_t * playlists_refresh_icon = NULL;
+static bool playlists_manual_refresh = false;
 
 static lv_obj_t * cue_tracks_screen = NULL;
 static lv_obj_t * cue_tracks_list = NULL;
@@ -330,6 +371,8 @@ bool copy_group_song_entries(group_song_entry_t ** out, const group_song_entry_t
         copy[i].title = strdup(entries[i].title ? entries[i].title : "");
         copy[i].disc_number = entries[i].disc_number;
         copy[i].show_disc_header = entries[i].show_disc_header;
+        copy[i].song_id = entries[i].song_id;
+        copy[i].artwork_key = entries[i].artwork_key;
         if (!copy[i].path || !copy[i].title) {
             free_group_song_entries(copy, count);
             return false;
@@ -419,7 +462,7 @@ static void set_album_disc_headers(const song_row_t * songs, int count,
     int previous_disc = effective_disc_number(&songs[0]);
     for (int i = 0; i < count; i++) {
         entries[i].disc_number = effective_disc_number(&songs[i]);
-        entries[i].show_disc_header = multi_disc && i > 0 && entries[i].disc_number != previous_disc;
+        entries[i].show_disc_header = multi_disc && (i == 0 || entries[i].disc_number != previous_disc);
         previous_disc = entries[i].disc_number;
     }
 }
@@ -434,17 +477,41 @@ void gui_library_format_song_identity(const song_row_t * row,
     snprintf(subtitle, subtitle_size, "%s · %s", artist, album);
 }
 
+static uint64_t song_album_thumbnail_key(const song_row_t * row) {
+    albumart_info_t info = {0};
+    albumart_info_from_song_row(row, &info);
+    if (info.album[0] && (info.albumartist[0] || info.artist[0]))
+        return albumart_thumbnail_key(&info);
+
+    /* Untagged tracks cannot use albumart.c's persistent artist/album name
+     * key. Group them by their containing album directory in RAM, skipping a
+     * Rockbox-style disc folder when the track is stored one level below it. */
+    char directory[sizeof(row->path)];
+    snprintf(directory, sizeof(directory), "%s", row->path);
+    char * slash = strrchr(directory, '/');
+    if (!slash) return albumart_artist_thumbnail_key(row->path);
+    *slash = '\0';
+    char * base = strrchr(directory, '/');
+    base = base ? base + 1 : directory;
+    if (albumart_is_disc_folder(base)) {
+        slash = strrchr(directory, '/');
+        if (slash) *slash = '\0';
+    }
+    return albumart_artist_thumbnail_key(directory);
+}
+
 static void fill_song_page_visual(compact_list_page_row_t * out, const song_row_t * row) {
     gui_library_format_song_identity(row, out->label, sizeof(out->label),
                                      out->subtitle, sizeof(out->subtitle));
     out->identity = row->id;
+    out->artwork_key = song_album_thumbnail_key(row);
     snprintf(out->trailing_asset, sizeof(out->trailing_asset), "%s", song_quality_asset_for_path(row->path));
 }
 
 static int all_songs_fetch_page(void * ctx, int offset, int count, compact_list_page_row_t out_rows[]) {
     (void) ctx;
     song_row_t * rows = malloc(sizeof(song_row_t) * (size_t) count);
-    int n = rows ? metadata_db_get_songs_filtered_page(NULL, NULL, NULL, NULL, offset, count, rows) : 0;
+    int n = rows ? metadata_db_get_songs_filtered_page(NULL, NULL, NULL, NULL, NULL, offset, count, rows) : 0;
     for (int i = 0; i < n; i++) fill_song_page_visual(&out_rows[i], &rows[i]);
     free(rows);
     return n;
@@ -458,7 +525,7 @@ static int all_songs_fetch_page(void * ctx, int offset, int count, compact_list_
  * same stale-reference tolerance as playlist_path_at()'s own comment). */
 static bool all_songs_resolve_path_at(int display_index, char * out, size_t out_size) {
     song_row_t row;
-    if (metadata_db_get_songs_filtered_page(NULL, NULL, NULL, NULL, display_index, 1, &row) != 1) return false;
+    if (metadata_db_get_songs_filtered_page(NULL, NULL, NULL, NULL, NULL, display_index, 1, &row) != 1) return false;
     snprintf(out, out_size, "%s", row.path);
     return true;
 }
@@ -489,6 +556,12 @@ static lv_obj_t * build_all_songs_screen(void) {
                                                 LIST_ROW_WIDTH_WIDE, true, accent_lv_color());
     compact_list_set_row_height(all_songs_list, MUSIC_LIST_ROW_HEIGHT);
     compact_list_set_paged_provider(all_songs_list, all_songs_fetch_page, NULL, (int) metadata_db_get_song_count());
+    compact_list_set_row_decorator(all_songs_list, thumbnail_row_decorator,
+                                    (void *) &album_thumbnail_context);
+    lv_obj_add_event_cb(scr, album_thumbnail_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, all_songs_list);
+    lv_obj_add_event_cb(scr, album_thumbnail_screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, all_songs_list);
+    lv_obj_add_event_cb(all_songs_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(all_songs_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_END, NULL);
     finalize_screen_navigation(scr);
     return scr;
 }
@@ -564,6 +637,12 @@ static lv_obj_t * build_recently_added_screen(void) {
     compact_list_set_row_height(recently_added_list, MUSIC_LIST_ROW_HEIGHT);
     compact_list_set_paged_provider(recently_added_list, recently_added_fetch_page, NULL,
                                      (int) metadata_db_get_song_count() + 1);
+    compact_list_set_row_decorator(recently_added_list, thumbnail_row_decorator,
+                                    (void *) &album_thumbnail_context);
+    lv_obj_add_event_cb(scr, album_thumbnail_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, recently_added_list);
+    lv_obj_add_event_cb(scr, album_thumbnail_screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, recently_added_list);
+    lv_obj_add_event_cb(recently_added_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(recently_added_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_END, NULL);
     finalize_screen_navigation(scr);
     return scr;
 }
@@ -636,6 +715,7 @@ static void cancel_group_song_probes(void) {
  * one -- see refresh_group_songs_now_playing_indicator()'s own comment. */
 static lv_obj_t * group_songs_now_playing_bar;
 static lv_obj_t * group_songs_visible_rows[GROUP_SONGS_PAGE_SIZE];
+static lv_obj_t * group_songs_thumbnail_images[GROUP_SONGS_PAGE_SIZE];
 static bool group_songs_music_submenu;
 
 /* Forward-declared here (defined after on_file_selected()) because
@@ -946,9 +1026,14 @@ static void refresh_group_songs_now_playing_indicator(void) {
  * remove callback and the Edit/Done toggle can both redraw in place without
  * re-deriving the group or nav_push()ing a second copy of this screen. */
 static void populate_group_songs_rows(void) {
+    if (album_thumbnail_active_list == group_songs_list) {
+        album_thumbnail_generation++;
+        album_thumbnail_queue_count = 0;
+    }
     cancel_group_song_probes();
     lv_obj_clean(group_songs_list);
     memset(group_songs_visible_rows, 0, sizeof(group_songs_visible_rows));
+    memset(group_songs_thumbnail_images, 0, sizeof(group_songs_thumbnail_images));
 
     bool editable = group_songs_edit_m3u_path != NULL;
     if (editable) {
@@ -1057,6 +1142,7 @@ static void populate_group_songs_rows(void) {
     lv_obj_remove_flag(group_songs_now_playing_bar, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(group_songs_now_playing_bar, LV_OBJ_FLAG_HIDDEN);
     refresh_group_songs_now_playing_indicator();
+    refresh_group_song_thumbnails();
 }
 
 /* Every screen's back button is a fixed 64x64 at the screen's own left
@@ -1187,6 +1273,11 @@ static lv_obj_t * build_group_songs_screen(void) {
     lv_obj_set_style_pad_gap(group_songs_list, GUI_ROW_GAP, 0);
     lv_obj_set_style_pad_top(group_songs_list, GUI_ROW_GAP, 0);
 
+    lv_obj_add_event_cb(scr, album_thumbnail_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, group_songs_list);
+    lv_obj_add_event_cb(scr, album_thumbnail_screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, group_songs_list);
+    lv_obj_add_event_cb(group_songs_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(group_songs_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_END, NULL);
+
     finalize_screen_navigation(scr);
     return scr;
 }
@@ -1240,9 +1331,11 @@ static lv_obj_t * build_group_songs_screen(void) {
 #define ALBUM_THUMBNAIL_PX ALBUMART_THUMBNAIL_SIZE
 #define ALBUM_PLAYER_CACHE_PX ALBUMART_PLAYER_CACHE_SIZE
 #define ALBUM_THUMBNAIL_CACHE_SIZE 250
+#define ARTIST_THUMBNAIL_ALIAS_CACHE_SIZE 250
 
 typedef struct {
-    int64_t song_id;
+    uint64_t key;
+    thumbnail_key_kind_t key_kind;
     bool known; /* true even when pixels==NULL: negative cache for albums without art */
     uint8_t * pixels;
     lv_image_dsc_t dsc;
@@ -1250,7 +1343,22 @@ typedef struct {
 } album_thumbnail_cache_entry_t;
 
 typedef struct {
+    uint64_t artist_key;
+    metadata_db_group_kind_t artist_group_kind;
+    uint64_t album_key;
+    thumbnail_key_kind_t album_key_kind;
+    int64_t representative_song_id;
+    bool known;
+    bool has_album;
+    uint32_t last_use;
+} artist_thumbnail_alias_entry_t;
+
+typedef struct {
     int64_t song_id;
+    uint64_t key;
+    thumbnail_key_kind_t key_kind;
+    metadata_db_group_kind_t artist_group_kind;
+    char artist_name[128];
     int generation;
     int logical_index;
     lv_obj_t * list;
@@ -1259,11 +1367,21 @@ typedef struct {
 #define ALBUM_THUMBNAIL_QUEUE_SIZE 20
 
 static album_thumbnail_cache_entry_t album_thumbnail_cache[ALBUM_THUMBNAIL_CACHE_SIZE];
+/* Aliases are small lookup records, not decoded images, so they have their
+ * own bounded table and do not consume the 250 RGB565 cache entries. */
+static artist_thumbnail_alias_entry_t artist_thumbnail_alias_cache[ARTIST_THUMBNAIL_ALIAS_CACHE_SIZE];
 static uint32_t album_thumbnail_use_counter;
 static pthread_t album_thumbnail_thread;
 bool album_thumbnail_active = false;
+static bool album_thumbnail_active_key_valid;
+static uint64_t album_thumbnail_active_key;
+static thumbnail_key_kind_t album_thumbnail_active_key_kind;
+static int album_thumbnail_active_generation;
 static atomic_bool album_thumbnail_done;
 static int64_t album_thumbnail_result_song_id;
+static uint64_t album_thumbnail_result_key;
+static thumbnail_key_kind_t album_thumbnail_result_key_kind;
+static thumbnail_key_kind_t album_thumbnail_result_request_key_kind;
 static int album_thumbnail_result_generation;
 static int album_thumbnail_result_logical_index;
 static lv_obj_t * album_thumbnail_result_list;
@@ -1276,10 +1394,16 @@ static uint8_t * album_thumbnail_result_pixels;
  * a permanent "no art" the way an unconditional `known = true` used to. */
 static time_t album_thumbnail_result_source_mtime;
 static bool album_thumbnail_result_have_source_mtime;
+static bool album_thumbnail_result_negative_confirmed;
+static bool album_thumbnail_result_has_alias;
+static bool album_thumbnail_result_artist_negative_confirmed;
+static uint64_t album_thumbnail_result_artist_key;
+static metadata_db_group_kind_t album_thumbnail_result_artist_group_kind;
+static uint64_t album_thumbnail_result_alias_album_key;
+static int64_t album_thumbnail_result_alias_song_id;
 static lv_timer_t * album_thumbnail_poll_timer;
 static album_thumbnail_request_t album_thumbnail_queue[ALBUM_THUMBNAIL_QUEUE_SIZE];
 static atomic_bool album_thumbnail_screen_active;
-static int album_thumbnail_queue_count;
 static bool album_thumbnail_scrolling;
     /* Boot-time RAM cache preload: piggybacks on the existing persistent
      * warmer thread (album_thumb_gen_thread_func) to also hand its first
@@ -1291,6 +1415,8 @@ static bool album_thumbnail_scrolling;
      * one pending buffer ever exists and the cache array is still only ever
      * written from the main thread. */
     static int album_thumb_gen_ram_filled;
+    static uint64_t album_thumb_gen_cached_keys[ALBUM_THUMBNAIL_CACHE_SIZE];
+    static int album_thumb_gen_cached_key_count;
     /* EMPTY: slot free, warmer may stage the next result into it.
      * PENDING: warmer has staged a result and is waiting.
      * CLAIMED: album_thumbnail_poll_cb() has taken ownership and is still
@@ -1302,6 +1428,8 @@ static bool album_thumbnail_scrolling;
      * was still using. The CAS transitions below close that window. */
     enum { ALBUM_BOOT_PRELOAD_EMPTY = 0, ALBUM_BOOT_PRELOAD_PENDING, ALBUM_BOOT_PRELOAD_CLAIMED };
     static atomic_int album_boot_preload_state;
+    static uint64_t album_boot_preload_result_key;
+    static thumbnail_key_kind_t album_boot_preload_result_key_kind;
     static int64_t album_boot_preload_result_song_id;
     static uint8_t * album_boot_preload_result_pixels;
     static bool album_boot_preload_result_have_source_mtime;
@@ -1309,13 +1437,22 @@ static bool album_thumbnail_scrolling;
 static bool album_thumbnail_list_is_visible(lv_obj_t * list) {
     if (!list) return false;
     lv_obj_t * active = lv_screen_active();
-    return (list == albums_list && active == albums_screen) ||
-           (list == artist_albums_list && active == artist_albums_screen);
+    if ((list == albums_list && active == albums_screen) ||
+        (list == artist_albums_list && active == artist_albums_screen) ||
+        (list == artists_list && active == artists_screen) ||
+        (list == album_artist_list && active == album_artist_screen) ||
+        (list == all_songs_list && active == all_songs_screen) ||
+        (list == recently_added_list && active == recently_added_screen) ||
+        (list == group_songs_list && active == group_songs_screen))
+        return true;
+    return list == files_search_list && active == files_screen &&
+           !lv_obj_has_flag(files_search_list, LV_OBJ_FLAG_HIDDEN);
 }
 
-static album_thumbnail_cache_entry_t * album_thumbnail_cache_find(int64_t song_id) {
+static album_thumbnail_cache_entry_t * album_thumbnail_cache_find(thumbnail_key_kind_t key_kind, uint64_t key) {
     for (int i = 0; i < ALBUM_THUMBNAIL_CACHE_SIZE; i++) {
-        if (album_thumbnail_cache[i].known && album_thumbnail_cache[i].song_id == song_id) {
+        if (album_thumbnail_cache[i].known && album_thumbnail_cache[i].key_kind == key_kind &&
+            album_thumbnail_cache[i].key == key) {
             album_thumbnail_cache[i].last_use = ++album_thumbnail_use_counter;
             return &album_thumbnail_cache[i];
         }
@@ -1323,11 +1460,108 @@ static album_thumbnail_cache_entry_t * album_thumbnail_cache_find(int64_t song_i
     return NULL;
 }
 
-static void album_thumbnail_cache_clear(void) {
+static artist_thumbnail_alias_entry_t * artist_thumbnail_alias_find(
+        uint64_t artist_key, metadata_db_group_kind_t artist_group_kind) {
+    for (int i = 0; i < ARTIST_THUMBNAIL_ALIAS_CACHE_SIZE; i++) {
+        if (artist_thumbnail_alias_cache[i].known &&
+            artist_thumbnail_alias_cache[i].artist_key == artist_key &&
+            artist_thumbnail_alias_cache[i].artist_group_kind == artist_group_kind) {
+            artist_thumbnail_alias_cache[i].last_use = ++album_thumbnail_use_counter;
+            return &artist_thumbnail_alias_cache[i];
+        }
+    }
+    return NULL;
+}
+
+static void artist_thumbnail_alias_cache_commit(uint64_t artist_key,
+                                                 metadata_db_group_kind_t artist_group_kind,
+                                                 bool has_album,
+                                                 uint64_t album_key, int64_t representative_song_id) {
+    int victim = -1;
+    for (int i = 0; i < ARTIST_THUMBNAIL_ALIAS_CACHE_SIZE; i++) {
+        if (artist_thumbnail_alias_cache[i].known &&
+            artist_thumbnail_alias_cache[i].artist_key == artist_key &&
+            artist_thumbnail_alias_cache[i].artist_group_kind == artist_group_kind) {
+            victim = i;
+            break;
+        }
+    }
+    if (victim < 0) {
+        uint32_t oldest = UINT32_MAX;
+        for (int i = 0; i < ARTIST_THUMBNAIL_ALIAS_CACHE_SIZE; i++) {
+            if (!artist_thumbnail_alias_cache[i].known) {
+                victim = i;
+                break;
+            }
+            if (artist_thumbnail_alias_cache[i].last_use < oldest) {
+                oldest = artist_thumbnail_alias_cache[i].last_use;
+                victim = i;
+            }
+        }
+    }
+    artist_thumbnail_alias_cache[victim] = (artist_thumbnail_alias_entry_t) {
+        .artist_key = artist_key,
+        .artist_group_kind = artist_group_kind,
+        .album_key = album_key,
+        .album_key_kind = THUMBNAIL_KEY_ALBUM,
+        .representative_song_id = representative_song_id,
+        .known = true,
+        .has_album = has_album,
+        .last_use = ++album_thumbnail_use_counter
+    };
+}
+
+static void artist_thumbnail_alias_cache_clear(void) {
+    memset(artist_thumbnail_alias_cache, 0, sizeof(artist_thumbnail_alias_cache));
+}
+
+static void artist_thumbnail_alias_cache_remove(uint64_t artist_key,
+                                                 metadata_db_group_kind_t artist_group_kind) {
+    artist_thumbnail_alias_entry_t * entry = artist_thumbnail_alias_find(artist_key, artist_group_kind);
+    if (entry) memset(entry, 0, sizeof(*entry));
+}
+
+static void album_thumbnail_queue_remove(thumbnail_key_kind_t key_kind, uint64_t key) {
+    for (int i = 0; i < album_thumbnail_queue_count; ) {
+        if (album_thumbnail_queue[i].key_kind != key_kind || album_thumbnail_queue[i].key != key) {
+            i++;
+            continue;
+        }
+        memmove(&album_thumbnail_queue[i], &album_thumbnail_queue[i + 1],
+                sizeof(album_thumbnail_queue[0]) * (size_t) (album_thumbnail_queue_count - i - 1));
+        album_thumbnail_queue_count--;
+    }
+}
+
+static void album_thumbnail_cache_remove(thumbnail_key_kind_t key_kind, uint64_t key) {
     for (int i = 0; i < ALBUM_THUMBNAIL_CACHE_SIZE; i++) {
-        free(album_thumbnail_cache[i].pixels);
+        album_thumbnail_cache_entry_t * e = &album_thumbnail_cache[i];
+        if (!e->known || e->key_kind != key_kind || e->key != key) continue;
+        uint8_t * retired_pixels = e->pixels;
+        if (retired_pixels) {
+            e->pixels = NULL;
+            e->dsc.data = NULL;
+            release_thumbnail_dsc(&e->dsc); /* after clearing, so a re-decorate cannot re-attach it */
+            free(retired_pixels);
+        }
+        memset(e, 0, sizeof(*e));
+        return;
+    }
+}
+
+static void album_thumbnail_cache_clear(void) {
+    uint8_t * retired_pixels[ALBUM_THUMBNAIL_CACHE_SIZE];
+    for (int i = 0; i < ALBUM_THUMBNAIL_CACHE_SIZE; i++) {
+        retired_pixels[i] = album_thumbnail_cache[i].pixels;
+        album_thumbnail_cache[i].pixels = NULL;
+        album_thumbnail_cache[i].dsc.data = NULL;
+    }
+    refresh_all_thumbnail_lists();
+    for (int i = 0; i < ALBUM_THUMBNAIL_CACHE_SIZE; i++) {
+        free(retired_pixels[i]);
         memset(&album_thumbnail_cache[i], 0, sizeof(album_thumbnail_cache[i]));
     }
+    artist_thumbnail_alias_cache_clear();
     album_thumbnail_use_counter = 0;
     artwork_failure_cache_clear();
 }
@@ -1338,8 +1572,10 @@ static void album_thumbnail_cache_clear(void) {
      * preload hand-off further below -- both only ever run on the main/LVGL
      * thread, the only thread allowed to touch album_thumbnail_cache[].
      * Takes ownership of `pixels`: either stores it or frees it, never both. */
-    static void album_thumbnail_cache_commit(int64_t song_id, uint8_t * pixels,
-                                              bool have_source_mtime, time_t source_mtime) {
+static void album_thumbnail_cache_commit(thumbnail_key_kind_t key_kind, uint64_t key,
+                                         int64_t source_song_id, uint8_t * pixels,
+                                         bool have_source_mtime, time_t source_mtime,
+                                         bool negative_confirmed) {
         /* A failed decode (pixels == NULL) is only worth caching as a durable
          * "known, no art" entry if album_thumbnail_load_or_decode_ex() itself
          * already recorded it as PERMANENT (corrupt/oversized/genuinely
@@ -1349,10 +1585,10 @@ static void album_thumbnail_cache_clear(void) {
          * song for the rest of this cache slot's lifetime. Leaving the slot
          * at its just-memset "unused" state (known=false) instead lets a
          * future request legitimately retry this song. */
-        bool commit_known = pixels != NULL;
-        if (!commit_known && have_source_mtime) {
+        bool commit_known = pixels != NULL || negative_confirmed;
+        if (!commit_known && key_kind == THUMBNAIL_KEY_ALBUM && have_source_mtime) {
             artwork_fail_reason_t fail_reason = ARTWORK_FAIL_NONE;
-            if (artwork_failure_cache_is_blocked(song_id, source_mtime, &fail_reason) &&
+            if (artwork_failure_cache_is_blocked(source_song_id, source_mtime, &fail_reason) &&
                 fail_reason == ARTWORK_FAIL_PERMANENT) {
                 commit_known = true;
             }
@@ -1368,7 +1604,8 @@ static void album_thumbnail_cache_clear(void) {
          * below, which stops at the first unused slot -- a duplicate further
          * down the array would otherwise never be seen. */
         for (int i = 0; i < ALBUM_THUMBNAIL_CACHE_SIZE; i++) {
-            if (album_thumbnail_cache[i].known && album_thumbnail_cache[i].song_id == song_id) {
+            if (album_thumbnail_cache[i].known && album_thumbnail_cache[i].key_kind == key_kind &&
+                album_thumbnail_cache[i].key == key) {
                 victim = i;
                 break;
             }
@@ -1401,13 +1638,13 @@ static void album_thumbnail_cache_clear(void) {
              * releasing/reusing the slot. */
             e->pixels = NULL;
             e->dsc.data = NULL;
-            if (album_thumbnail_active_list)
-                compact_list_refresh_visible(album_thumbnail_active_list);
+            release_thumbnail_dsc(&e->dsc); /* after clearing, so a re-decorate cannot re-attach it */
             free(retired_pixels);
         }
         memset(e, 0, sizeof(*e));
         if (commit_known) {
-            e->song_id = song_id;
+            e->key = key;
+            e->key_kind = key_kind;
             e->known = true;
             e->pixels = pixels;
             e->last_use = ++album_thumbnail_use_counter;
@@ -1423,7 +1660,39 @@ static void album_thumbnail_cache_clear(void) {
         } else {
             free(pixels);
         }
-    }
+        album_thumbnail_queue_remove(key_kind, key);
+}
+
+static bool album_thumbnail_commit_boot_preload(void) {
+    int expected = ALBUM_BOOT_PRELOAD_PENDING;
+    if (!atomic_compare_exchange_strong(&album_boot_preload_state, &expected,
+                                         ALBUM_BOOT_PRELOAD_CLAIMED))
+        return false;
+    album_thumbnail_cache_commit(album_boot_preload_result_key_kind, album_boot_preload_result_key,
+                                  album_boot_preload_result_song_id, album_boot_preload_result_pixels,
+                                  album_boot_preload_result_have_source_mtime,
+                                  album_boot_preload_result_source_mtime, false);
+    album_boot_preload_result_pixels = NULL;
+    if (album_thumbnail_active_list) refresh_thumbnail_list_visible(album_thumbnail_active_list);
+    atomic_store(&album_boot_preload_state, ALBUM_BOOT_PRELOAD_EMPTY);
+    return true;
+}
+
+static void album_thumbnail_discard_boot_preload(void) {
+    int expected = ALBUM_BOOT_PRELOAD_PENDING;
+    if (!atomic_compare_exchange_strong(&album_boot_preload_state, &expected,
+                                         ALBUM_BOOT_PRELOAD_CLAIMED))
+        return;
+    free(album_boot_preload_result_pixels);
+    album_boot_preload_result_pixels = NULL;
+    atomic_store(&album_boot_preload_state, ALBUM_BOOT_PRELOAD_EMPTY);
+}
+
+static bool album_thumb_gen_cached_key(uint64_t key) {
+    for (int i = 0; i < album_thumb_gen_cached_key_count; i++)
+        if (album_thumb_gen_cached_keys[i] == key) return true;
+    return false;
+}
 
 static bool album_thumbnail_sized_cache_hit(const albumart_info_t * info, char * found, size_t found_size) {
     return albumart_sized_thumb_fresh(info, ALBUM_THUMBNAIL_PX, ALBUM_THUMBNAIL_PX, found, found_size);
@@ -1491,8 +1760,8 @@ static bool album_thumbnail_cancel_cb(void * user_data) {
     return (gen != album_thumbnail_generation);
 }
 
-static time_t album_source_mtime(const song_row_t * song, const albumart_info_t * info) {
-    time_t max_mtime = 0;
+static time_t album_source_mtime_with_art_mtime(const song_row_t * song, uint32_t art_mtime) {
+    time_t max_mtime = (time_t) art_mtime;
     struct stat st;
     if (song && song->path[0] && stat(song->path, &st) == 0) {
         if (st.st_mtime > max_mtime) max_mtime = st.st_mtime;
@@ -1505,13 +1774,11 @@ static time_t album_source_mtime(const song_row_t * song, const albumart_info_t 
             if (stat(dir, &st) == 0 && st.st_mtime > max_mtime) max_mtime = st.st_mtime;
         }
     }
-    if (info) {
-        char found[PATH_MAX];
-        if (albumart_search_files(info, "", found, sizeof(found))) {
-            if (stat(found, &st) == 0 && st.st_mtime > max_mtime) max_mtime = st.st_mtime;
-        }
-    }
     return max_mtime;
+}
+
+static time_t album_source_mtime(const song_row_t * song, const albumart_info_t * info) {
+    return album_source_mtime_with_art_mtime(song, albumart_source_mtime(info));
 }
 
 /* The warmer builds the player-sized cache from the original compressed art
@@ -1677,7 +1944,8 @@ bool gui_library_generate_player_cover(const char * track_path, const char * art
          * already means embedded extraction had its chance regardless of
          * whether a sidecar file existed or how it failed. */
         if (out_no_art_confirmed && (artwork_result == METADATA_ARTWORK_NOT_FOUND ||
-                                     artwork_result == METADATA_ARTWORK_INVALID))
+                                     artwork_result == METADATA_ARTWORK_INVALID ||
+                                     artwork_result == METADATA_ARTWORK_TOO_LARGE))
             *out_no_art_confirmed = true;
         return false;
     }
@@ -1762,9 +2030,11 @@ static sibling_art_result_t album_thumbnail_try_embedded_art_from_path(
  * Albums without artist+album tags still decode, but cannot be stored.
  * Checks the negative failure cache first to prevent repeated failed decodes.
  * If sized thumbnail or sidecar is invalid/unreadable, falls through to embedded art. */
-static bool album_thumbnail_load_or_decode_ex(const song_row_t * song, artwork_priority_t prio,
-                                              artwork_cancel_fn cancel_cb, void * user_data,
-                                              uint16_t ** out_pixels) {
+static bool album_thumbnail_load_or_decode_with_mtime(const song_row_t * song, artwork_priority_t prio,
+                                                       artwork_cancel_fn cancel_cb, void * user_data,
+                                                       time_t source_mtime, bool sized_cache_checked,
+                                                       const char * sidecar_path, bool sidecar_checked,
+                                                       uint16_t ** out_pixels) {
     *out_pixels = NULL;
     if (!song || !song->path[0]) return false;
 
@@ -1772,7 +2042,6 @@ static bool album_thumbnail_load_or_decode_ex(const song_row_t * song, artwork_p
     albumart_info_from_song_row(song, &info);
 
     uint64_t mtime_t0 = db_log_now_ms();
-    time_t source_mtime = album_source_mtime(song, &info);
     DB_LOG("ART_LAZY", "source_mtime_ms=%llu song=%lld", (unsigned long long) (db_log_now_ms() - mtime_t0),
            (long long) song->id);
 
@@ -1783,9 +2052,11 @@ static bool album_thumbnail_load_or_decode_ex(const song_row_t * song, artwork_p
     char thumbnail_found[PATH_MAX];
     uint8_t * data = NULL;
     uint32_t size = 0;
+    bool have_cached_thumbnail = false;
 
     /* Step 1: Try sized Rockbox thumbnail cache (.72x72.bmp) */
-    bool step1_hit = album_thumbnail_sized_cache_hit(&info, thumbnail_found, sizeof(thumbnail_found));
+    bool step1_hit = !sized_cache_checked &&
+                     album_thumbnail_sized_cache_hit(&info, thumbnail_found, sizeof(thumbnail_found));
     DB_LOG("ART_LAZY", "step1 song=%lld artist=%s albumartist=%s album=%s key=%016llx hit=%d found=%s",
            (long long) song->id, info.artist, info.albumartist, info.album,
            (unsigned long long) albumart_debug_thumbnail_key(&info), step1_hit,
@@ -1805,13 +2076,11 @@ static bool album_thumbnail_load_or_decode_ex(const song_row_t * song, artwork_p
             if (res == COVER_DECODE_OK && *out_pixels) {
                 /* A warmer pass must continue to the original source when
                  * only the 72px cache exists, so it can materialize 480px.
-                 * Visible thumbnail requests can return immediately. */
+                 * Keep the fresh 72px pixels while doing that work; do not
+                 * decode or rewrite the thumbnail a second time. */
                 if (prio != ARTWORK_PRIO_WARMER || album_player_cache_hit(&info, found, sizeof(found)))
                     return true;
-                /* Keep the valid 72px cache intact while the warmer obtains
-                 * the original source for the missing player-sized cache. */
-                free(*out_pixels);
-                *out_pixels = NULL;
+                have_cached_thumbnail = true;
             }
             if (res == COVER_DECODE_FAIL_CANCELLED) return false;
             if (cover_decode_result_is_temporary(res)) {
@@ -1826,10 +2095,19 @@ static bool album_thumbnail_load_or_decode_ex(const song_row_t * song, artwork_p
     }
 
     /* Step 2: Try external sidecar file (cover.jpg, folder.jpg, etc.) */
-    bool sidecar_searched = albumart_search_files(&info, "", found, sizeof(found));
+    bool sidecar_searched = false;
+    if (sidecar_checked) {
+        if (sidecar_path && sidecar_path[0]) {
+            int sidecar_len = snprintf(found, sizeof(found), "%s", sidecar_path);
+            sidecar_searched = sidecar_len > 0 && (size_t) sidecar_len < sizeof(found);
+        }
+    } else {
+        sidecar_searched = albumart_search_files(&info, "", found, sizeof(found));
+    }
     if (sidecar_searched) {
         albumart_load_result_t load = albumart_load_file_ex(found, &data, &size, THUMBNAIL_SIDECAR_MAX_BYTES, prio);
         if (load == ALBUMART_LOAD_TEMPORARY) {
+            if (have_cached_thumbnail) return true;
             artwork_failure_cache_record(song->id, source_mtime, ARTWORK_FAIL_TEMPORARY);
             return false;
         }
@@ -1840,7 +2118,16 @@ static bool album_thumbnail_load_or_decode_ex(const song_row_t * song, artwork_p
             if (player_res == COVER_DECODE_FAIL_CANCELLED) {
                 free(player_pixels);
                 free(data);
+                if (have_cached_thumbnail) {
+                    free(*out_pixels);
+                    *out_pixels = NULL;
+                }
                 return false;
+            }
+            if (have_cached_thumbnail) {
+                free(player_pixels);
+                free(data);
+                return true;
             }
             /* Any OTHER temporary player-cache failure (memory admission,
              * coordinator busy) must not abort the whole attempt --
@@ -1899,7 +2186,16 @@ static bool album_thumbnail_load_or_decode_ex(const song_row_t * song, artwork_p
         if (player_res == COVER_DECODE_FAIL_CANCELLED) {
             free(player_pixels);
             free(data);
+            if (have_cached_thumbnail) {
+                free(*out_pixels);
+                *out_pixels = NULL;
+            }
             return false;
+        }
+        if (have_cached_thumbnail) {
+            free(player_pixels);
+            free(data);
+            return true;
         }
         /* See the mirrored sidecar-path comment above (Step 2) -- any OTHER
          * temporary player-cache failure falls through to the smaller
@@ -1922,9 +2218,12 @@ static bool album_thumbnail_load_or_decode_ex(const song_row_t * song, artwork_p
     }
 
     if (metadata_result == METADATA_ARTWORK_TEMPORARY_FAILURE) {
+        if (have_cached_thumbnail) return true;
         artwork_failure_cache_record(song->id, source_mtime, ARTWORK_FAIL_TEMPORARY);
         return false;
     }
+
+    if (have_cached_thumbnail) return true;
 
     /* Step 3b: the representative song for this album may simply be a track
      * with no embedded picture of its own (e.g. a short intro/interlude or
@@ -1960,10 +2259,348 @@ static bool album_thumbnail_load_or_decode_ex(const song_row_t * song, artwork_p
     return false;
 }
 
-static bool album_thumbnail_load_or_decode(const song_row_t * song, int generation, uint16_t ** out_pixels) {
-    return album_thumbnail_load_or_decode_ex(song, ARTWORK_PRIO_THUMBNAIL,
-                                            album_thumbnail_cancel_cb, (void *) (intptr_t) generation,
-                                            out_pixels);
+static bool album_thumbnail_load_or_decode_ex(const song_row_t * song, artwork_priority_t prio,
+                                              artwork_cancel_fn cancel_cb, void * user_data,
+                                              uint16_t ** out_pixels) {
+    if (!song || !song->path[0]) {
+        *out_pixels = NULL;
+        return false;
+    }
+    albumart_info_t info;
+    albumart_info_from_song_row(song, &info);
+    time_t source_mtime = album_source_mtime(song, &info);
+    return album_thumbnail_load_or_decode_with_mtime(song, prio, cancel_cb, user_data,
+                                                      source_mtime, false, NULL, false, out_pixels);
+}
+
+typedef enum {
+    ARTIST_THUMB_FOUND,
+    ARTIST_THUMB_MISSING,
+    ARTIST_THUMB_TEMPORARY,
+    ARTIST_THUMB_CANCELLED
+} artist_thumbnail_result_t;
+
+static bool thumbnail_directory_of(const char * path, char * out, size_t out_size) {
+    if (!path || !path[0] || !out || out_size == 0) return false;
+    snprintf(out, out_size, "%s", path);
+    char * slash = strrchr(out, '/');
+    if (!slash) return false;
+    if (slash == out) slash[1] = '\0';
+    else *slash = '\0';
+    return true;
+}
+
+static bool thumbnail_parent_directory(const char * directory, char * out, size_t out_size) {
+    if (!directory || !directory[0] || !out || out_size == 0) return false;
+    snprintf(out, out_size, "%s", directory);
+    size_t len = strlen(out);
+    while (len > 1 && out[len - 1] == '/') out[--len] = '\0';
+    char * slash = strrchr(out, '/');
+    if (!slash) return false;
+    if (slash == out) slash[1] = '\0';
+    else *slash = '\0';
+    return true;
+}
+
+static const char * thumbnail_directory_name(const char * path) {
+    const char * slash = strrchr(path ? path : "", '/');
+    return slash ? slash + 1 : (path ? path : "");
+}
+
+static bool artist_thumbnail_folder_for_song(const song_row_t * song, const char * artist,
+                                              char * artist_dir, size_t artist_dir_size,
+                                              char * album_dir, size_t album_dir_size) {
+    char track_dir[PATH_MAX];
+    if (!song || !thumbnail_directory_of(song->path, track_dir, sizeof(track_dir))) return false;
+    snprintf(album_dir, album_dir_size, "%s", track_dir);
+    if (albumart_is_disc_folder(thumbnail_directory_name(track_dir))) {
+        if (!thumbnail_parent_directory(track_dir, album_dir, album_dir_size)) return false;
+    }
+    if (!thumbnail_parent_directory(album_dir, artist_dir, artist_dir_size)) return false;
+
+    /* A library with tracks directly in each artist directory has no album
+     * subdirectory to step through. Accept that layout only when the folder
+     * itself matches the artist tag and its parent is the music root. */
+    if (!strcmp(artist_dir, MUSIC_ROOT_DIR) && artist[0] &&
+        strcasecmp(thumbnail_directory_name(album_dir), artist) == 0) {
+        snprintf(artist_dir, artist_dir_size, "%s", album_dir);
+        album_dir[0] = '\0';
+    }
+
+    if (!artist_dir[0] || strcmp(artist_dir, MUSIC_ROOT_DIR) == 0 ||
+        (album_dir[0] && strcmp(artist_dir, album_dir) == 0))
+        return false;
+    struct stat st;
+    return stat(artist_dir, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static uint64_t artist_directory_signature(const char * artist, metadata_db_group_kind_t group_kind,
+                                           const song_row_t * representative,
+                                           const char * artist_dir) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    const unsigned char * name = (const unsigned char *) (artist ? artist : "");
+    while (*name) hash = (hash ^ *name++) * UINT64_C(1099511628211);
+    hash = (hash ^ (unsigned char) group_kind) * UINT64_C(1099511628211);
+    const char * paths[] = { artist_dir, representative ? representative->path : NULL };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        const char * path = paths[i];
+        if (!path || !path[0]) continue;
+        for (const unsigned char * p = (const unsigned char *) path; *p; p++)
+            hash = (hash ^ *p) * UINT64_C(1099511628211);
+        struct stat st;
+        uint64_t mtime = stat(path, &st) == 0 ? (uint64_t) st.st_mtime : 0;
+        for (int b = 0; b < 8; b++) hash = (hash ^ (unsigned char) (mtime >> (b * 8))) * UINT64_C(1099511628211);
+    }
+
+    int64_t album_count = metadata_db_count_albums_for_group(group_kind, artist);
+    int album_total = album_count > INT_MAX ? INT_MAX : (int) album_count;
+    group_row_t albums[16];
+    for (int offset = 0; offset < album_total; ) {
+        int want = album_total - offset;
+        if (want > 16) want = 16;
+        int got = metadata_db_get_albums_for_group(group_kind, artist, offset, want, albums);
+        if (got <= 0) break;
+        for (int i = 0; i < got; i++) {
+            song_row_t song;
+            if (!metadata_db_get_song_by_id(albums[i].first_song_id, &song)) continue;
+            for (const unsigned char * p = (const unsigned char *) song.path; *p; p++)
+                hash = (hash ^ *p) * UINT64_C(1099511628211);
+            struct stat st;
+            uint64_t mtime = stat(song.path, &st) == 0 ? (uint64_t) st.st_mtime : 0;
+            for (int b = 0; b < 8; b++) hash = (hash ^ (unsigned char) (mtime >> (b * 8))) * UINT64_C(1099511628211);
+            char directory[PATH_MAX], album_directory[PATH_MAX];
+            if (thumbnail_directory_of(song.path, directory, sizeof(directory))) {
+                struct stat dir_st;
+                uint64_t dir_mtime = stat(directory, &dir_st) == 0 ? (uint64_t) dir_st.st_mtime : 0;
+                for (int b = 0; b < 8; b++) hash = (hash ^ (unsigned char) (dir_mtime >> (b * 8))) * UINT64_C(1099511628211);
+                if (albumart_is_disc_folder(thumbnail_directory_name(directory)) &&
+                    thumbnail_parent_directory(directory, album_directory, sizeof(album_directory)) &&
+                    stat(album_directory, &dir_st) == 0) {
+                    dir_mtime = (uint64_t) dir_st.st_mtime;
+                    for (int b = 0; b < 8; b++)
+                        hash = (hash ^ (unsigned char) (dir_mtime >> (b * 8))) * UINT64_C(1099511628211);
+                }
+            }
+        }
+        offset += got;
+        if (got < want) break;
+    }
+    return hash ? hash : 1;
+}
+
+static bool artist_thumbnail_load_persistent(const char * artist, uint32_t source_mtime,
+                                             artwork_cancel_fn cancel_cb, void * user_data,
+                                             uint16_t ** out_pixels, bool * out_temporary) {
+    *out_temporary = false;
+    char found[PATH_MAX];
+    if (!albumart_artist_sized_thumb_fresh(artist, source_mtime, ALBUM_THUMBNAIL_PX,
+                                           ALBUM_THUMBNAIL_PX, found, sizeof(found)))
+        return false;
+    uint8_t * data = NULL;
+    uint32_t size = 0;
+    albumart_load_result_t load = albumart_load_file_ex(found, &data, &size,
+                                                         THUMBNAIL_SIDECAR_MAX_BYTES,
+                                                         ARTWORK_PRIO_THUMBNAIL);
+    if (load == ALBUMART_LOAD_TEMPORARY) {
+        *out_temporary = true;
+        return false;
+    }
+    if (load != ALBUMART_LOAD_OK) {
+        unlink(found);
+        return false;
+    }
+    cover_decode_result_t res = cover_decode_to_rgb565_ex(data, size, ALBUM_THUMBNAIL_PX,
+                                                           ALBUM_THUMBNAIL_PX,
+                                                           ARTWORK_PRIO_THUMBNAIL,
+                                                           cancel_cb, user_data, out_pixels);
+    free(data);
+    if (res == COVER_DECODE_OK && *out_pixels) return true;
+    if (res == COVER_DECODE_FAIL_CANCELLED) return false;
+    if (cover_decode_result_is_temporary(res)) *out_temporary = true;
+    else unlink(found);
+    return false;
+}
+
+typedef struct {
+    uint16_t * pixels;
+    thumbnail_key_kind_t pixel_key_kind;
+    uint64_t pixel_key;
+    int64_t pixel_song_id;
+    time_t pixel_source_mtime;
+    bool pixel_have_source_mtime;
+    bool has_alias;
+    uint64_t alias_album_key;
+    int64_t alias_song_id;
+    bool negative_confirmed;
+} artist_thumbnail_resolution_t;
+
+static void artist_thumbnail_set_alias(uint64_t album_key, int64_t song_id,
+                                       artist_thumbnail_resolution_t * resolution) {
+    resolution->has_alias = true;
+    resolution->alias_album_key = album_key;
+    resolution->alias_song_id = song_id;
+}
+
+static artist_thumbnail_result_t artist_thumbnail_from_album_group(
+        const char * artist, metadata_db_group_kind_t group_kind, int generation,
+        artist_thumbnail_resolution_t * resolution) {
+    int64_t album_count = metadata_db_count_albums_for_group(group_kind, artist);
+    int total = album_count > INT_MAX ? INT_MAX : (int) album_count;
+    group_row_t albums[16];
+    for (int offset = 0; offset < total; ) {
+        if (album_thumbnail_cancel_cb((void *) (intptr_t) generation)) return ARTIST_THUMB_CANCELLED;
+        int want = total - offset;
+        if (want > 16) want = 16;
+        int n = metadata_db_get_albums_for_group(group_kind, artist, offset, want, albums);
+        if (n <= 0) break;
+        for (int i = 0; i < n; i++) {
+            if (album_thumbnail_cancel_cb((void *) (intptr_t) generation)) return ARTIST_THUMB_CANCELLED;
+            song_row_t song;
+            if (!metadata_db_get_song_by_id(albums[i].first_song_id, &song)) continue;
+            albumart_info_t info;
+            albumart_info_from_song_row(&song, &info);
+            uint64_t album_key = song_album_thumbnail_key(&song);
+            char sidecar_path[PATH_MAX];
+            bool have_sidecar = false;
+            uint32_t thumb_source_mtime = albumart_source_mtime_with_path(&info, sidecar_path,
+                                                 sizeof(sidecar_path), &have_sidecar);
+            time_t failure_mtime = album_source_mtime_with_art_mtime(&song, thumb_source_mtime);
+            char cache_path[PATH_MAX];
+            if (albumart_sized_thumb_fresh_with_source_mtime(&info, ALBUM_THUMBNAIL_PX,
+                    ALBUM_THUMBNAIL_PX, thumb_source_mtime, cache_path, sizeof(cache_path))) {
+                artist_thumbnail_set_alias(album_key, song.id, resolution);
+                albumart_artist_alias_store(artist, (unsigned int) group_kind, album_key, song.id);
+                return ARTIST_THUMB_FOUND;
+            }
+
+            artwork_fail_reason_t reason = ARTWORK_FAIL_NONE;
+            if (artwork_failure_cache_is_blocked(song.id, failure_mtime, &reason) &&
+                reason == ARTWORK_FAIL_PERMANENT)
+                continue;
+
+            uint16_t * pixels = NULL;
+            bool found = album_thumbnail_load_or_decode_with_mtime(&song, ARTWORK_PRIO_THUMBNAIL,
+                            album_thumbnail_cancel_cb, (void *) (intptr_t) generation,
+                            failure_mtime, true, sidecar_path, true, &pixels);
+            if (!found || !pixels) {
+                free(pixels);
+                if (album_thumbnail_cancel_cb((void *) (intptr_t) generation)) return ARTIST_THUMB_CANCELLED;
+                if (artwork_failure_cache_is_blocked(song.id, failure_mtime, &reason) &&
+                    reason == ARTWORK_FAIL_PERMANENT)
+                    continue;
+                return ARTIST_THUMB_TEMPORARY;
+            }
+            artwork_failure_cache_note_success(song.id);
+            artist_thumbnail_set_alias(album_key, song.id, resolution);
+            if (albumart_sized_thumb_fresh_with_source_mtime(&info, ALBUM_THUMBNAIL_PX,
+                    ALBUM_THUMBNAIL_PX, thumb_source_mtime, cache_path, sizeof(cache_path)))
+                albumart_artist_alias_store(artist, (unsigned int) group_kind, album_key, song.id);
+            resolution->pixels = pixels;
+            resolution->pixel_key_kind = THUMBNAIL_KEY_ALBUM;
+            resolution->pixel_key = album_key;
+            resolution->pixel_song_id = song.id;
+            return ARTIST_THUMB_FOUND;
+        }
+        offset += n;
+        if (n < want) break;
+    }
+    return ARTIST_THUMB_MISSING;
+}
+
+static artist_thumbnail_result_t artist_thumbnail_load_or_decode(
+        int64_t representative_song_id, metadata_db_group_kind_t group_kind, const char * artist_name,
+        uint64_t artist_key, int generation, artist_thumbnail_resolution_t * resolution) {
+    memset(resolution, 0, sizeof(*resolution));
+    resolution->pixel_key_kind = THUMBNAIL_KEY_ARTIST;
+    resolution->pixel_key = artist_key;
+    song_row_t representative;
+    if (!metadata_db_get_song_by_id(representative_song_id, &representative)) return ARTIST_THUMB_TEMPORARY;
+    const char * artist = artist_name && artist_name[0] ? artist_name :
+                          group_kind == METADATA_DB_GROUP_ALBUM_ARTIST
+                              ? representative.tags.album_artist : representative.tags.artist;
+    if (!artist || !artist[0]) return ARTIST_THUMB_MISSING;
+
+    char artist_dir[PATH_MAX] = "", album_dir[PATH_MAX] = "";
+    bool have_artist_dir = artist_thumbnail_folder_for_song(&representative, artist,
+                            artist_dir, sizeof(artist_dir), album_dir, sizeof(album_dir));
+    char source_path[PATH_MAX];
+    bool have_artist_source = have_artist_dir &&
+        albumart_find_artist_sidecar(artist_dir, source_path, sizeof(source_path));
+    if (have_artist_source) {
+        struct stat source_st;
+        uint32_t source_mtime = stat(source_path, &source_st) == 0
+                                    ? (uint32_t) source_st.st_mtime : 0;
+        bool cache_temporary = false;
+        if (artist_thumbnail_load_persistent(artist, source_mtime,
+                album_thumbnail_cancel_cb, (void *) (intptr_t) generation,
+                &resolution->pixels, &cache_temporary))
+            return ARTIST_THUMB_FOUND;
+        if (cache_temporary) return ARTIST_THUMB_TEMPORARY;
+
+        uint8_t * data = NULL;
+        uint32_t size = 0;
+        albumart_load_result_t load = albumart_load_file_ex(source_path, &data, &size,
+                                THUMBNAIL_SIDECAR_MAX_BYTES, ARTWORK_PRIO_THUMBNAIL);
+        if (load == ALBUMART_LOAD_TEMPORARY) return ARTIST_THUMB_TEMPORARY;
+        if (load == ALBUMART_LOAD_OK) {
+            cover_decode_result_t decoded = cover_decode_to_rgb565_ex(data, size,
+                    ALBUM_THUMBNAIL_PX, ALBUM_THUMBNAIL_PX, ARTWORK_PRIO_THUMBNAIL,
+                    album_thumbnail_cancel_cb, (void *) (intptr_t) generation, &resolution->pixels);
+            free(data);
+            if (decoded == COVER_DECODE_OK && resolution->pixels) {
+                albumart_artist_store_rgb565(artist, source_mtime, ALBUM_THUMBNAIL_PX,
+                                             ALBUM_THUMBNAIL_PX, resolution->pixels);
+                return ARTIST_THUMB_FOUND;
+            }
+            if (decoded == COVER_DECODE_FAIL_CANCELLED) return ARTIST_THUMB_CANCELLED;
+            if (cover_decode_result_is_temporary(decoded)) return ARTIST_THUMB_TEMPORARY;
+        }
+        free(data);
+    }
+
+    uint64_t stored_album_key = 0;
+    int64_t stored_album_song_id = 0;
+    if (albumart_artist_alias_load(artist, (unsigned int) group_kind,
+                                   &stored_album_key, &stored_album_song_id)) {
+        song_row_t stored_album_song;
+        albumart_info_t stored_album_info;
+        char found[PATH_MAX];
+        bool valid = metadata_db_get_song_by_id(stored_album_song_id, &stored_album_song) &&
+                     song_album_thumbnail_key(&stored_album_song) == stored_album_key;
+        if (valid) {
+            albumart_info_from_song_row(&stored_album_song, &stored_album_info);
+            uint32_t source_mtime = albumart_source_mtime(&stored_album_info);
+            valid = albumart_sized_thumb_fresh_with_source_mtime(&stored_album_info,
+                         ALBUM_THUMBNAIL_PX, ALBUM_THUMBNAIL_PX, source_mtime,
+                         found, sizeof(found));
+        }
+        if (valid) {
+            artist_thumbnail_set_alias(stored_album_key, stored_album_song_id, resolution);
+            return ARTIST_THUMB_FOUND;
+        }
+        albumart_artist_alias_remove(artist, (unsigned int) group_kind);
+    }
+
+    /* The signature stats every album of this artist, so compute it only
+     * when a no-art marker exists to validate or is about to be written;
+     * artists whose cover resolves never pay for it. */
+    const char * signature_dir = have_artist_dir ? artist_dir : "";
+    if (albumart_artist_negative_exists(artist) &&
+        albumart_artist_negative_fresh(artist, artist_directory_signature(
+            artist, group_kind, &representative, signature_dir))) {
+        resolution->negative_confirmed = true;
+        return ARTIST_THUMB_MISSING;
+    }
+
+    artist_thumbnail_result_t result = artist_thumbnail_from_album_group(
+        artist, group_kind, generation, resolution);
+    if (result == ARTIST_THUMB_FOUND) return result;
+    if (result == ARTIST_THUMB_MISSING) {
+        albumart_artist_store_negative(artist, artist_directory_signature(
+            artist, group_kind, &representative, signature_dir));
+        resolution->negative_confirmed = true;
+    }
+    return result;
 }
 
 static void * album_thumbnail_thread_func(void * arg) {
@@ -1977,37 +2614,72 @@ static void * album_thumbnail_thread_func(void * arg) {
      * every lazy-loaded thumbnail even with logging disabled. */
     bool db_logging = db_log_enabled();
     uint64_t started_ms = db_logging ? db_log_now_ms() : 0;
-    if (db_logging)
+    thumbnail_key_kind_t key_kind = req->key_kind;
+    if (db_logging && key_kind == THUMBNAIL_KEY_ALBUM)
         DB_LOG("ART_LAZY", "decode_begin song=%lld row=%d generation=%d rss_kb=%ld",
                (long long) req->song_id, req->logical_index, req->generation, db_log_rss_kb());
+    else if (db_logging)
+        DB_LOG("ART_ARTIST", "decode_begin song=%lld row=%d generation=%d key=%016llx rss_kb=%ld",
+               (long long) req->song_id, req->logical_index, req->generation,
+               (unsigned long long) req->key, db_log_rss_kb());
     uint16_t * pixels = NULL;
-    song_row_t song;
     album_thumbnail_result_have_source_mtime = false;
-    if (metadata_db_get_song_by_id(req->song_id, &song)) {
-        album_thumbnail_load_or_decode(&song, req->generation, &pixels);
-        if (!pixels) {
-            /* Only needed to look up the failure this decode already
-             * recorded (see result_source_mtime's own comment) -- skip the
-             * work entirely on success. */
+    album_thumbnail_result_negative_confirmed = false;
+    album_thumbnail_result_has_alias = false;
+    album_thumbnail_result_artist_negative_confirmed = false;
+    album_thumbnail_result_artist_key = 0;
+    album_thumbnail_result_alias_album_key = 0;
+    album_thumbnail_result_alias_song_id = 0;
+    uint64_t pixel_key = req->key;
+    thumbnail_key_kind_t pixel_key_kind = req->key_kind;
+    if (req->key_kind == THUMBNAIL_KEY_ALBUM) {
+        song_row_t song;
+        if (metadata_db_get_song_by_id(req->song_id, &song)) {
             albumart_info_t info;
             albumart_info_from_song_row(&song, &info);
             album_thumbnail_result_source_mtime = album_source_mtime(&song, &info);
             album_thumbnail_result_have_source_mtime = true;
-        } else {
-            artwork_failure_cache_note_success(req->song_id);
+            album_thumbnail_load_or_decode_with_mtime(&song, ARTWORK_PRIO_THUMBNAIL,
+                    album_thumbnail_cancel_cb, (void *) (intptr_t) req->generation,
+                    album_thumbnail_result_source_mtime, false, NULL, false, &pixels);
+            if (pixels) {
+                album_thumbnail_result_have_source_mtime = false;
+                artwork_failure_cache_note_success(req->song_id);
+            }
         }
+    } else {
+        artist_thumbnail_resolution_t resolution;
+        (void) artist_thumbnail_load_or_decode(req->song_id, req->artist_group_kind, req->artist_name,
+                    req->key, req->generation, &resolution);
+        pixels = resolution.pixels;
+        pixel_key = resolution.pixel_key;
+        pixel_key_kind = resolution.pixel_key_kind;
+        album_thumbnail_result_has_alias = resolution.has_alias;
+        album_thumbnail_result_artist_negative_confirmed = resolution.negative_confirmed;
+        album_thumbnail_result_artist_key = req->key;
+        album_thumbnail_result_artist_group_kind = req->artist_group_kind;
+        album_thumbnail_result_alias_album_key = resolution.alias_album_key;
+        album_thumbnail_result_alias_song_id = resolution.alias_song_id;
     }
     album_thumbnail_result_song_id = req->song_id;
+    album_thumbnail_result_key = pixel_key;
+    album_thumbnail_result_key_kind = pixel_key_kind;
+    album_thumbnail_result_request_key_kind = req->key_kind;
     album_thumbnail_result_generation = req->generation;
     album_thumbnail_result_logical_index = req->logical_index;
     album_thumbnail_result_list = req->list;
     album_thumbnail_result_pixels = (uint8_t *) pixels;
     free(req);
     album_thumbnail_done = true;
-    if (db_logging)
+    if (db_logging && key_kind == THUMBNAIL_KEY_ALBUM)
         DB_LOG("ART_LAZY", "decode_end song=%lld row=%d art=%d elapsed_ms=%llu rss_kb=%ld",
                (long long) album_thumbnail_result_song_id, album_thumbnail_result_logical_index,
                album_thumbnail_result_pixels != NULL,
+               (unsigned long long) (db_log_now_ms() - started_ms), db_log_rss_kb());
+    else if (db_logging)
+        DB_LOG("ART_ARTIST", "decode_end song=%lld row=%d art=%d negative=%d elapsed_ms=%llu rss_kb=%ld",
+               (long long) album_thumbnail_result_song_id, album_thumbnail_result_logical_index,
+               album_thumbnail_result_pixels != NULL, album_thumbnail_result_negative_confirmed,
                (unsigned long long) (db_log_now_ms() - started_ms), db_log_rss_kb());
 #ifdef UI_PERF_TRACE
     printf("PERF album_thumb song=%lld total_us=%llu pixels=%d\n",
@@ -2069,6 +2741,16 @@ static void * album_thumb_gen_thread_func(void * arg) {
                 missing++;
 #ifdef UI_PERF_TRACE
                 perf_missing++;
+#endif
+                atomic_fetch_add(&album_thumb_gen_done_count, 1);
+                continue;
+            }
+
+            uint64_t album_key = song_album_thumbnail_key(&song);
+            if (album_thumb_gen_cached_key(album_key)) {
+                cached++;
+#ifdef UI_PERF_TRACE
+                perf_skipped++;
 #endif
                 atomic_fetch_add(&album_thumb_gen_done_count, 1);
                 continue;
@@ -2136,10 +2818,12 @@ static void * album_thumb_gen_thread_func(void * arg) {
 #endif
                 if (album_thumb_gen_ram_filled < ALBUM_THUMBNAIL_CACHE_SIZE) {
                     album_thumb_gen_ram_filled++;
-                    if (album_thumb_gen_should_cancel(my_generation)) {
+                    if (album_thumb_gen_should_cancel(my_generation) && !pixels) {
                         free(pixels);
                     } else {
                         album_boot_preload_result_song_id = song.id;
+                        album_boot_preload_result_key = song_album_thumbnail_key(&song);
+                        album_boot_preload_result_key_kind = THUMBNAIL_KEY_ALBUM;
                         album_boot_preload_result_pixels = (uint8_t *) pixels;
                         album_boot_preload_result_have_source_mtime = (pixels == NULL);
                         album_boot_preload_result_source_mtime = source_mtime;
@@ -2158,6 +2842,11 @@ static void * album_thumb_gen_thread_func(void * arg) {
                         while (atomic_load(&album_boot_preload_state) != ALBUM_BOOT_PRELOAD_EMPTY &&
                                !album_thumb_gen_should_cancel(my_generation)) {
                             usleep(5000);
+                        }
+                        if (album_thumb_gen_should_cancel(my_generation) &&
+                            atomic_load(&album_boot_preload_state) == ALBUM_BOOT_PRELOAD_PENDING) {
+                            atomic_fetch_add(&album_thumb_gen_done_count, 1);
+                            goto done;
                         }
                         /* CAS (not a plain load+store) so exactly one of "we reclaim
                          * it here because nobody has claimed it yet" and the poll
@@ -2238,8 +2927,16 @@ done:
 static void start_album_thumbnail_generation(void) {
     cancel_album_thumbnail_generation();
     reap_album_thumbnail_generation();
+    (void) album_thumbnail_commit_boot_preload();
     atomic_store(&album_thumb_gen_retry_pending, false);
     album_thumb_gen_ram_filled = 0;
+    album_thumb_gen_cached_key_count = 0;
+    for (int i = 0; i < ALBUM_THUMBNAIL_CACHE_SIZE; i++) {
+        album_thumbnail_cache_entry_t * entry = &album_thumbnail_cache[i];
+        if (!entry->known || !entry->pixels || entry->key_kind != THUMBNAIL_KEY_ALBUM) continue;
+        album_thumb_gen_cached_keys[album_thumb_gen_cached_key_count++] = entry->key;
+        album_thumb_gen_ram_filled++;
+    }
     album_thumb_gen_retry_tick = lv_tick_get();
 
     int artist_count = 0, album_artist_count = 0, album_count = 0;
@@ -2293,6 +2990,10 @@ static void start_next_album_thumbnail(void) {
     *req = album_thumbnail_queue[0];
     memmove(&album_thumbnail_queue[0], &album_thumbnail_queue[1],
             sizeof(album_thumbnail_queue[0]) * (size_t) (--album_thumbnail_queue_count));
+    album_thumbnail_active_key = req->key;
+    album_thumbnail_active_key_kind = req->key_kind;
+    album_thumbnail_active_generation = req->generation;
+    album_thumbnail_active_key_valid = true;
     album_thumbnail_done = false;
     album_thumbnail_active = true;
     album_lazy_job_started_ms = db_log_enabled() ? db_log_now_ms() : 0;
@@ -2307,28 +3008,64 @@ static void start_next_album_thumbnail(void) {
     if (attr_ptr) pthread_attr_destroy(&attr);
     if (!created) {
         album_thumbnail_active = false;
+        album_thumbnail_active_key_valid = false;
         free(req);
         return;
     }
     if (album_thumbnail_poll_timer) lv_timer_resume(album_thumbnail_poll_timer);
 }
 
-static void queue_album_thumbnail(lv_obj_t * list, int logical_index, int64_t song_id) {
-    if (song_id <= 0 || album_thumbnail_scrolling || list != album_thumbnail_active_list ||
-        !album_thumbnail_list_is_visible(list) || album_thumbnail_cache_find(song_id)) return;
+static void queue_thumbnail(lv_obj_t * list, int logical_index, thumbnail_key_kind_t key_kind,
+                            uint64_t key, int64_t representative_song_id,
+                            metadata_db_group_kind_t artist_group_kind, const char * artist_name) {
+    if (representative_song_id <= 0 || key == 0 || album_thumbnail_scrolling ||
+        list != album_thumbnail_active_list || !album_thumbnail_list_is_visible(list) ||
+        album_thumbnail_cache_find(key_kind, key)) return;
+    if (album_thumbnail_active && album_thumbnail_active_key_valid &&
+        album_thumbnail_active_generation == album_thumbnail_generation &&
+        album_thumbnail_active_key_kind == key_kind && album_thumbnail_active_key == key)
+        return;
     for (int i = 0; i < album_thumbnail_queue_count; i++)
-        if (album_thumbnail_queue[i].song_id == song_id) return;
+        if (album_thumbnail_queue[i].key_kind == key_kind && album_thumbnail_queue[i].key == key) return;
     if (album_thumbnail_queue_count >= ALBUM_THUMBNAIL_QUEUE_SIZE) return;
     album_thumbnail_queue[album_thumbnail_queue_count++] = (album_thumbnail_request_t) {
-        .song_id = song_id,
+        .song_id = representative_song_id,
+        .key = key,
+        .key_kind = key_kind,
+        .artist_group_kind = artist_group_kind,
         .generation = album_thumbnail_generation,
         .logical_index = logical_index,
         .list = list
     };
+    if (key_kind == THUMBNAIL_KEY_ARTIST)
+        snprintf(album_thumbnail_queue[album_thumbnail_queue_count - 1].artist_name,
+                 sizeof(album_thumbnail_queue[album_thumbnail_queue_count - 1].artist_name),
+                 "%s", artist_name ? artist_name : "");
     album_lazy_queued++;
-    DB_LOG("ART_LAZY", "queued song=%lld row=%d queue_depth=%d generation=%d",
-           (long long) song_id, logical_index, album_thumbnail_queue_count, album_thumbnail_generation);
+    if (key_kind == THUMBNAIL_KEY_ALBUM)
+        DB_LOG("ART_LAZY", "queued song=%lld row=%d queue_depth=%d generation=%d",
+               (long long) representative_song_id, logical_index,
+               album_thumbnail_queue_count, album_thumbnail_generation);
+    else
+        DB_LOG("ART_ARTIST", "queued song=%lld row=%d key=%016llx queue_depth=%d generation=%d",
+               (long long) representative_song_id, logical_index, (unsigned long long) key,
+               album_thumbnail_queue_count, album_thumbnail_generation);
     start_next_album_thumbnail();
+}
+
+static const thumbnail_decorator_context_t * thumbnail_context_for_list(lv_obj_t * list) {
+    if (list == artists_list) return &artist_thumbnail_context;
+    if (list == album_artist_list) return &album_artist_thumbnail_context;
+    if (list == albums_list || list == artist_albums_list || list == all_songs_list ||
+        list == recently_added_list || list == files_search_list || list == group_songs_list)
+        return &album_thumbnail_context;
+    return NULL;
+}
+
+static void refresh_thumbnail_list_visible(lv_obj_t * list) {
+    if (!list) return;
+    if (list == group_songs_list) refresh_group_song_thumbnails();
+    else compact_list_refresh_visible(list);
 }
 
 static void album_thumbnail_scroll_cb(lv_event_t * e) {
@@ -2340,11 +3077,12 @@ static void album_thumbnail_scroll_cb(lv_event_t * e) {
         album_thumbnail_generation++; /* discard a decode that was already in flight */
     } else if (lv_event_get_code(e) == LV_EVENT_SCROLL_END) {
         album_thumbnail_scrolling = false;
-        compact_list_refresh_visible(list); /* queues the newly settled visible window */
+        refresh_thumbnail_list_visible(list); /* queues the newly settled visible window */
     }
 }
 
-static void album_thumbnail_begin_screen(lv_obj_t * list) {
+static void thumbnail_begin_screen(lv_obj_t * list) {
+    if (!thumbnail_context_for_list(list)) return;
     /* Visible rows are latency-sensitive and the lazy path already writes
      * the identical persistent entries. Stop warming after its current
      * decode, then let start_next_album_thumbnail() service this screen. */
@@ -2356,23 +3094,44 @@ static void album_thumbnail_begin_screen(lv_obj_t * list) {
     album_thumbnail_scrolling = false;
     album_thumbnail_queue_count = 0;
     album_lazy_queued = album_lazy_completed = album_lazy_with_art = album_lazy_stale = 0;
-    const char * diag_page = list == albums_list ? "albums" : "artist_albums";
-    DB_LOG("ALBUMS_PAGE", "loaded page=%s request_to_loaded_ms=%llu rss_kb=%ld", diag_page,
-           albums_page_open_requested_ms ? (unsigned long long) (db_log_now_ms() - albums_page_open_requested_ms) : 0ULL,
-           db_log_rss_kb());
+    if (list == albums_list || list == artist_albums_list) {
+        const char * diag_page = list == albums_list ? "albums" : "artist_albums";
+        DB_LOG("ALBUMS_PAGE", "loaded page=%s request_to_loaded_ms=%llu rss_kb=%ld", diag_page,
+               albums_page_open_requested_ms ? (unsigned long long) (db_log_now_ms() - albums_page_open_requested_ms) : 0ULL,
+               db_log_rss_kb());
+    } else {
+        const char * page = list == artists_list ? "artists" :
+                            list == album_artist_list ? "album_artists" :
+                            list == all_songs_list ? "all_songs" :
+                            list == recently_added_list ? "recently_added" :
+                            list == group_songs_list ? "group_songs" : "files_search";
+        DB_LOG("ART_LIST_PAGE", "loaded page=%s rss_kb=%ld", page, db_log_rss_kb());
+    }
     albums_page_open_requested_ms = 0;
-    if (list) compact_list_refresh_visible(list);
+    if (list == group_songs_list) refresh_group_song_thumbnails();
+    else if (list) compact_list_refresh_visible(list);
 }
 
-static void album_thumbnail_end_screen(lv_obj_t * list) {
+static void thumbnail_end_screen(lv_obj_t * list) {
     if (album_thumbnail_active_list != list) return;
     atomic_store(&album_thumbnail_screen_active, false);
     album_thumbnail_active_list = NULL;
     album_thumbnail_scrolling = false;
     album_thumbnail_queue_count = 0;
-    DB_LOG("ALBUMS_PAGE", "unloaded page=%s queued=%u completed=%u with_art=%u stale=%u rss_kb=%ld",
-           list == albums_list ? "albums" : "artist_albums", album_lazy_queued, album_lazy_completed,
-           album_lazy_with_art, album_lazy_stale, db_log_rss_kb());
+    if (list == albums_list || list == artist_albums_list) {
+        DB_LOG("ALBUMS_PAGE", "unloaded page=%s queued=%u completed=%u with_art=%u stale=%u rss_kb=%ld",
+               list == albums_list ? "albums" : "artist_albums", album_lazy_queued, album_lazy_completed,
+               album_lazy_with_art, album_lazy_stale, db_log_rss_kb());
+    } else {
+        const char * page = list == artists_list ? "artists" :
+                            list == album_artist_list ? "album_artists" :
+                            list == all_songs_list ? "all_songs" :
+                            list == recently_added_list ? "recently_added" :
+                            list == group_songs_list ? "group_songs" : "files_search";
+        DB_LOG("ART_LIST_PAGE", "unloaded page=%s queued=%u completed=%u with_art=%u stale=%u rss_kb=%ld",
+               page, album_lazy_queued, album_lazy_completed, album_lazy_with_art, album_lazy_stale,
+               db_log_rss_kb());
+    }
     /* Codec work cannot safely be cancelled. Invalidate and discard it
      * when it completes rather than ever repainting a hidden screen. */
     album_thumbnail_generation++;
@@ -2387,22 +3146,8 @@ static void album_thumbnail_poll_cb(lv_timer_t * timer) {
      * decode just sits ready a tick or two longer, and this timer keeps
      * rescheduling itself regardless. */
     if (gui_navigation_transition_in_progress()) return;
-    /* CAS claims sole ownership of album_boot_preload_result_* against the
-     * warmer thread's own matching CAS in album_thumb_gen_thread_func() --
-     * see that call site's comment for the full protocol. Moving the slot
-     * back to EMPTY only AFTER the payload is fully read/committed (not
-     * before) is what lets the warmer thread's wait loop safely tell "still
-     * being read by the callback" apart from "free to reuse". */
-    int boot_preload_state = ALBUM_BOOT_PRELOAD_PENDING;
-    if (atomic_compare_exchange_strong(&album_boot_preload_state, &boot_preload_state,
-                                        ALBUM_BOOT_PRELOAD_CLAIMED)) {
-        album_thumbnail_cache_commit(album_boot_preload_result_song_id, album_boot_preload_result_pixels,
-                                      album_boot_preload_result_have_source_mtime,
-                                      album_boot_preload_result_source_mtime);
-        album_boot_preload_result_pixels = NULL;
-        if (album_thumbnail_active_list) compact_list_refresh_visible(album_thumbnail_active_list);
-        atomic_store(&album_boot_preload_state, ALBUM_BOOT_PRELOAD_EMPTY);
-    }
+    if (album_thumbnail_scrolling) return;
+    (void) album_thumbnail_commit_boot_preload();
     if (!album_thumbnail_active) {
         start_next_album_thumbnail();
         if (!album_thumbnail_active && !atomic_load(&album_thumb_gen_active)) lv_timer_pause(timer);
@@ -2417,24 +3162,60 @@ static void album_thumbnail_poll_cb(lv_timer_t * timer) {
     bool result_had_art = album_thumbnail_result_pixels != NULL;
     if (album_thumbnail_result_generation == album_thumbnail_generation &&
         album_thumbnail_active_list && album_thumbnail_list_is_visible(album_thumbnail_active_list)) {
-        album_thumbnail_cache_commit(album_thumbnail_result_song_id, album_thumbnail_result_pixels,
-                                      album_thumbnail_result_have_source_mtime,
-                                      album_thumbnail_result_source_mtime);
-        album_thumbnail_result_pixels = NULL;
-        result_applied = true;
+        if (album_thumbnail_result_request_key_kind == THUMBNAIL_KEY_ARTIST) {
+            if (album_thumbnail_result_has_alias || album_thumbnail_result_artist_negative_confirmed) {
+                artist_thumbnail_alias_cache_commit(album_thumbnail_result_artist_key,
+                    album_thumbnail_result_artist_group_kind,
+                    album_thumbnail_result_has_alias, album_thumbnail_result_alias_album_key,
+                    album_thumbnail_result_alias_song_id);
+                if (album_thumbnail_result_has_alias)
+                    album_thumbnail_cache_remove(THUMBNAIL_KEY_ARTIST,
+                                                 album_thumbnail_result_artist_key);
+                result_applied = true;
+            }
+            if (album_thumbnail_result_pixels) {
+                if (album_thumbnail_result_key_kind == THUMBNAIL_KEY_ARTIST)
+                    artist_thumbnail_alias_cache_remove(album_thumbnail_result_artist_key,
+                                                        album_thumbnail_result_artist_group_kind);
+                album_thumbnail_cache_commit(album_thumbnail_result_key_kind, album_thumbnail_result_key,
+                    album_thumbnail_result_song_id, album_thumbnail_result_pixels, false, 0, false);
+                album_thumbnail_result_pixels = NULL;
+                result_applied = true;
+            }
+        } else {
+            album_thumbnail_cache_commit(THUMBNAIL_KEY_ALBUM, album_thumbnail_result_key,
+                album_thumbnail_result_song_id, album_thumbnail_result_pixels,
+                album_thumbnail_result_have_source_mtime, album_thumbnail_result_source_mtime,
+                album_thumbnail_result_negative_confirmed);
+            album_thumbnail_result_pixels = NULL;
+            result_applied = true;
+        }
     }
     album_lazy_completed++;
     if (result_had_art) album_lazy_with_art++;
     if (!result_applied) album_lazy_stale++;
-    DB_LOG("ART_LAZY", "result song=%lld row=%d applied=%d art=%d queue_depth=%d ui_wait_ms=%llu",
-           (long long) album_thumbnail_result_song_id, album_thumbnail_result_logical_index,
-           result_applied, result_had_art, album_thumbnail_queue_count,
-           album_lazy_job_started_ms ? (unsigned long long) (db_log_now_ms() - album_lazy_job_started_ms) : 0ULL);
+    if (album_thumbnail_result_request_key_kind == THUMBNAIL_KEY_ALBUM)
+        DB_LOG("ART_LAZY", "result song=%lld row=%d applied=%d art=%d queue_depth=%d ui_wait_ms=%llu",
+               (long long) album_thumbnail_result_song_id, album_thumbnail_result_logical_index,
+               result_applied, result_had_art, album_thumbnail_queue_count,
+               album_lazy_job_started_ms ? (unsigned long long) (db_log_now_ms() - album_lazy_job_started_ms) : 0ULL);
+    else
+        DB_LOG("ART_ARTIST", "result song=%lld row=%d applied=%d art=%d alias=%d album=%016llx queue_depth=%d",
+               (long long) album_thumbnail_result_song_id, album_thumbnail_result_logical_index,
+               result_applied, result_had_art, album_thumbnail_result_has_alias,
+               (unsigned long long) album_thumbnail_result_alias_album_key,
+               album_thumbnail_queue_count);
     free(album_thumbnail_result_pixels);
     album_thumbnail_result_pixels = NULL;
-    if (result_applied && album_thumbnail_result_list == album_thumbnail_active_list)
-        compact_list_refresh_item(album_thumbnail_result_list, album_thumbnail_result_logical_index);
+    if (result_applied && album_thumbnail_result_list == album_thumbnail_active_list) {
+        if (album_thumbnail_result_key_kind == THUMBNAIL_KEY_ALBUM &&
+            (album_thumbnail_result_list == albums_list || album_thumbnail_result_list == artist_albums_list))
+            compact_list_refresh_item(album_thumbnail_result_list, album_thumbnail_result_logical_index);
+        else
+            refresh_thumbnail_list_visible(album_thumbnail_result_list);
+    }
     album_thumbnail_active = false;
+    album_thumbnail_active_key_valid = false;
     start_next_album_thumbnail();
     if (!album_thumbnail_active) lv_timer_pause(timer);
 }
@@ -2446,11 +3227,13 @@ static void album_thumbnail_poll_cb(lv_timer_t * timer) {
 static void quiesce_album_artwork_workers(void) {
     cancel_album_thumbnail_generation();
     reap_album_thumbnail_generation();
+    album_thumbnail_discard_boot_preload();
     atomic_store(&album_thumb_gen_retry_pending, false);
 
     album_thumbnail_generation++;
     album_thumbnail_queue_count = 0;
     album_thumbnail_active_list = NULL;
+    album_thumbnail_active_key_valid = false;
     atomic_store(&album_thumbnail_screen_active, false);
 
     if (album_thumbnail_active) {
@@ -2464,16 +3247,31 @@ static void quiesce_album_artwork_workers(void) {
     if (album_thumbnail_poll_timer) lv_timer_pause(album_thumbnail_poll_timer);
 }
 
-static void album_row_thumbnail_decorator(lv_obj_t * list, lv_obj_t * row, lv_obj_t * image,
-                                           int logical_index, int pool_slot, int64_t song_id, void * ctx) {
-    (void) pool_slot; (void) ctx;
+static void thumbnail_row_decorator(lv_obj_t * list, lv_obj_t * row, lv_obj_t * image,
+                                    int logical_index, int pool_slot, int64_t representative_song_id,
+                                    uint64_t artwork_key, const char * artwork_name, void * ctx) {
+    (void) pool_slot;
+    const thumbnail_decorator_context_t * context = ctx ? ctx : &album_thumbnail_context;
     /* 14px card inset + 72px cover + 14px breathing room before text. */
     lv_obj_set_style_pad_left(row, 100, 0);
-    if (song_id <= 0) {
+    if (representative_song_id <= 0 || artwork_key == 0) {
+        lv_image_set_src(image, asset_path("touch_list/list_default_album.png"));
         lv_obj_add_flag(image, LV_OBJ_FLAG_HIDDEN);
         return;
     }
-    album_thumbnail_cache_entry_t * cached = album_thumbnail_cache_find(song_id);
+    album_thumbnail_cache_entry_t * cached = album_thumbnail_cache_find(context->key_kind, artwork_key);
+    artist_thumbnail_alias_entry_t * alias = NULL;
+    if ((!cached || !cached->pixels) && context->key_kind == THUMBNAIL_KEY_ARTIST)
+        alias = artist_thumbnail_alias_find(artwork_key, context->artist_group_kind);
+    if (alias && alias->has_album) {
+        cached = album_thumbnail_cache_find(alias->album_key_kind, alias->album_key);
+        if (cached && cached->pixels) {
+            lv_image_set_src(image, &cached->dsc);
+            lv_image_set_scale(image, LV_SCALE_NONE);
+            lv_obj_remove_flag(image, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+    }
     if (cached && cached->pixels) {
         lv_image_set_src(image, &cached->dsc);
         lv_image_set_scale(image, LV_SCALE_NONE);
@@ -2494,8 +3292,97 @@ static void album_row_thumbnail_decorator(lv_obj_t * list, lv_obj_t * row, lv_ob
         int32_t row_y = lv_obj_get_y(row);
         bool in_viewport = row_y + lv_obj_get_height(row) >= scroll_y &&
                            row_y <= scroll_y + lv_obj_get_height(list);
-        if (!cached && in_viewport) queue_album_thumbnail(list, logical_index, song_id);
+        if (!in_viewport) return;
+        if (alias) {
+            if (alias->has_album && !cached)
+                queue_thumbnail(list, logical_index, alias->album_key_kind, alias->album_key,
+                                alias->representative_song_id, METADATA_DB_GROUP_ARTIST, NULL);
+        } else if (!cached) {
+            queue_thumbnail(list, logical_index, context->key_kind, artwork_key,
+                            representative_song_id, context->artist_group_kind, artwork_name);
+        }
     }
+}
+
+static void group_song_row_text_offset(lv_obj_t * row, bool with_thumbnail) {
+    if (!row || lv_obj_get_child_count(row) < 2) return;
+    int32_t target_x = with_thumbnail ? 100 : GUI_TEXT_INSET;
+    int32_t delta = target_x - lv_obj_get_x(lv_obj_get_child(row, 0));
+    if (delta == 0) return;
+    for (int child_index = 0; child_index < 2; child_index++) {
+        lv_obj_t * label = lv_obj_get_child(row, child_index);
+        int32_t width = lv_obj_get_width(label) - delta;
+        if (width < 40) width = 40;
+        lv_obj_set_x(label, target_x);
+        lv_obj_set_width(label, width);
+    }
+}
+
+static void refresh_group_song_thumbnails(void) {
+    if (!group_songs_list) return;
+    lv_obj_update_layout(group_songs_list);
+    int page_end = group_songs_page_start + GROUP_SONGS_PAGE_SIZE;
+    if (page_end > group_songs_count) page_end = group_songs_count;
+    int32_t scroll_y = lv_obj_get_scroll_y(group_songs_list);
+    int32_t view_bottom = scroll_y + lv_obj_get_height(group_songs_list);
+    for (int index = group_songs_page_start; index < page_end; index++) {
+        int slot = index - group_songs_page_start;
+        lv_obj_t * row = group_songs_visible_rows[slot];
+        if (!row) continue;
+        int32_t row_y = lv_obj_get_y(row);
+        bool in_viewport = row_y + lv_obj_get_height(row) >= scroll_y && row_y <= view_bottom;
+        if (!in_viewport || group_songs_entries[index].song_id <= 0 ||
+            group_songs_entries[index].artwork_key == 0) {
+            if (group_songs_thumbnail_images[slot]) {
+                lv_obj_delete(group_songs_thumbnail_images[slot]);
+                group_songs_thumbnail_images[slot] = NULL;
+                group_song_row_text_offset(row, false);
+            }
+            continue;
+        }
+        if (!group_songs_thumbnail_images[slot]) {
+            group_songs_thumbnail_images[slot] = lv_image_create(row);
+            lv_obj_remove_flag(group_songs_thumbnail_images[slot], LV_OBJ_FLAG_CLICKABLE);
+            group_song_row_text_offset(row, true);
+        }
+        thumbnail_row_decorator(group_songs_list, row, group_songs_thumbnail_images[slot],
+                                index, slot, group_songs_entries[index].song_id,
+                                group_songs_entries[index].artwork_key,
+                                NULL,
+                                (void *) &album_thumbnail_context);
+        int32_t pad_left = lv_obj_get_style_pad_left(row, LV_PART_MAIN);
+        int32_t pad_top = lv_obj_get_style_pad_top(row, LV_PART_MAIN);
+        int32_t pad_bottom = lv_obj_get_style_pad_bottom(row, LV_PART_MAIN);
+        lv_obj_align(group_songs_thumbnail_images[slot], LV_ALIGN_LEFT_MID,
+                     14 - pad_left, (pad_top - pad_bottom) / -2);
+    }
+}
+
+/* Before freeing one cached entry's pixels: detach only the image widgets
+ * that borrow its descriptor (pointer compare across the recycled pools),
+ * then re-decorate just the list on screen so it re-queues what it needs.
+ * Hidden lists re-decorate on their own SCREEN_LOADED refresh. */
+static void release_thumbnail_dsc(const lv_image_dsc_t * dsc) {
+    lv_obj_t * lists[] = { albums_list, artist_albums_list, artists_list, album_artist_list,
+                           all_songs_list, recently_added_list, files_search_list };
+    for (size_t i = 0; i < sizeof(lists) / sizeof(lists[0]); i++)
+        if (lists[i]) compact_list_detach_image_src(lists[i], dsc);
+    for (int slot = 0; slot < GROUP_SONGS_PAGE_SIZE; slot++) {
+        lv_obj_t * image = group_songs_thumbnail_images[slot];
+        if (image && lv_image_get_src(image) == dsc) {
+            lv_image_set_src(image, NULL);
+            lv_obj_add_flag(image, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (album_thumbnail_active_list) refresh_thumbnail_list_visible(album_thumbnail_active_list);
+}
+
+static void refresh_all_thumbnail_lists(void) {
+    lv_obj_t * lists[] = { albums_list, artist_albums_list, artists_list, album_artist_list,
+                           all_songs_list, recently_added_list, files_search_list };
+    for (size_t i = 0; i < sizeof(lists) / sizeof(lists[0]); i++)
+        if (lists[i]) compact_list_refresh_visible(lists[i]);
+    refresh_group_song_thumbnails();
 }
 
 /* Unfiltered (NULL filter, "every album in the library") -- uses metadata_
@@ -2511,6 +3398,16 @@ static int albums_fetch_page(void * ctx, int offset, int count, compact_list_pag
         snprintf(out_rows[i].label, sizeof(out_rows[i].label), "%s", rows[i].name);
         snprintf(out_rows[i].subtitle, sizeof(out_rows[i].subtitle), "%s", rows[i].album_artist);
         out_rows[i].identity = rows[i].first_song_id;
+        if (rows[i].album_artist[0]) {
+            albumart_info_t info = {0};
+            snprintf(info.albumartist, sizeof(info.albumartist), "%s", rows[i].album_artist);
+            snprintf(info.album, sizeof(info.album), "%s", rows[i].name);
+            out_rows[i].artwork_key = albumart_thumbnail_key(&info);
+        } else {
+            song_row_t representative;
+            if (metadata_db_get_song_by_id(rows[i].first_song_id, &representative))
+                out_rows[i].artwork_key = song_album_thumbnail_key(&representative);
+        }
         snprintf(out_rows[i].trailing_asset, sizeof(out_rows[i].trailing_asset),
                  "%s", "playing_plane/ic_more.png");
     }
@@ -2535,7 +3432,7 @@ static group_song_entry_t * load_album_entries_filtered(const char * name, const
                                                          int * out_count) {
     *out_count = 0;
     if (artist_filter && artist_filter[0]) {
-        int64_t filtered = metadata_db_count_songs_filtered(NULL, artist_filter, album_artist, name);
+        int64_t filtered = metadata_db_count_songs_filtered(NULL, artist_filter, album_artist, name, NULL);
         song_count = filtered > 0 && filtered <= INT_MAX ? (int) filtered : 0;
     }
     if (song_count <= 0) return NULL;
@@ -2547,7 +3444,7 @@ static group_song_entry_t * load_album_entries_filtered(const char * name, const
         int want = song_count - n;
         if (want > 64) want = 64;
         int got = (artist_filter && artist_filter[0])
-                      ? metadata_db_get_songs_filtered_page(NULL, artist_filter, album_artist, name,
+                      ? metadata_db_get_songs_filtered_page(NULL, artist_filter, album_artist, name, NULL,
                                                             n, want, songs + n)
                       : metadata_db_get_album_songs(name, album_artist, n, songs + n, want);
         if (got <= 0) break;
@@ -2566,6 +3463,8 @@ static group_song_entry_t * load_album_entries_filtered(const char * name, const
         format_music_submenu_identity(&songs[i], title, sizeof(title));
         entries[i].path = strdup(songs[i].path);
         entries[i].title = strdup(title);
+        entries[i].song_id = songs[i].id;
+        entries[i].artwork_key = song_album_thumbnail_key(&songs[i]);
         if (!entries[i].path || !entries[i].title) {
             free(songs);
             free_group_song_entries(entries, song_count);
@@ -2576,11 +3475,6 @@ static group_song_entry_t * load_album_entries_filtered(const char * name, const
     free(songs);
     *out_count = n;
     return entries;
-}
-
-static group_song_entry_t * load_album_entries(const char * name, const char * album_artist,
-                                                int song_count, int * out_count) {
-    return load_album_entries_filtered(name, album_artist, song_count, NULL, out_count);
 }
 
 /* The artist whose album list is on screen, when that list is a plain artist
@@ -2624,6 +3518,12 @@ static lv_obj_t * build_artists_screen(void) {
     int artist_count = 0, album_artist_count = 0, album_count = 0;
     metadata_db_get_group_counts(&artist_count, &album_artist_count, &album_count);
     compact_list_set_paged_provider(artists_list, artists_fetch_page, NULL, artist_count);
+    compact_list_set_row_decorator(artists_list, thumbnail_row_decorator,
+                                    (void *) &artist_thumbnail_context);
+    lv_obj_add_event_cb(scr, album_thumbnail_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, artists_list);
+    lv_obj_add_event_cb(scr, album_thumbnail_screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, artists_list);
+    lv_obj_add_event_cb(artists_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(artists_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_END, NULL);
     finalize_screen_navigation(scr);
     return scr;
 }
@@ -2643,7 +3543,8 @@ static lv_obj_t * build_albums_screen(void) {
     /* Decorator before the paged provider so the first (now synchronous)
      * window fill already has pad_left=100 and the 72px cover slot; names
      * then lay out to the right of the art instead of under it. */
-    compact_list_set_row_decorator(albums_list, album_row_thumbnail_decorator, NULL);
+    compact_list_set_row_decorator(albums_list, thumbnail_row_decorator,
+                                    (void *) &album_thumbnail_context);
     compact_list_set_trailing_click(albums_list, album_more_click_cb);
     compact_list_set_paged_provider(albums_list, albums_fetch_page, NULL, album_count);
     lv_obj_add_event_cb(scr, album_thumbnail_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, albums_list);
@@ -2669,6 +3570,12 @@ static lv_obj_t * build_album_artist_screen(void) {
     int artist_count = 0, album_artist_count = 0, album_count = 0;
     metadata_db_get_group_counts(&artist_count, &album_artist_count, &album_count);
     compact_list_set_paged_provider(album_artist_list, album_artists_fetch_page, NULL, album_artist_count);
+    compact_list_set_row_decorator(album_artist_list, thumbnail_row_decorator,
+                                    (void *) &album_artist_thumbnail_context);
+    lv_obj_add_event_cb(scr, album_thumbnail_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, album_artist_list);
+    lv_obj_add_event_cb(scr, album_thumbnail_screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, album_artist_list);
+    lv_obj_add_event_cb(album_artist_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(album_artist_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_END, NULL);
     finalize_screen_navigation(scr);
     return scr;
 }
@@ -3024,6 +3931,8 @@ static atomic_bool search_job_done_flag = false;
 static search_binding_t * search_job_for_binding;
 static int search_job_result_count;
 static metadata_db_search_hit_t search_job_result_hits[SEARCH_RESULTS_MAX];
+static int64_t search_job_result_identity[SEARCH_RESULTS_MAX];
+static uint64_t search_job_result_artwork_key[SEARCH_RESULTS_MAX];
 
 static bool search_job_pending_valid = false;
 static search_job_request_t search_job_pending_request;
@@ -3032,6 +3941,36 @@ static search_binding_t * search_job_pending_binding;
 static void * search_job_thread_func(void * arg) {
     search_job_request_t * req = (search_job_request_t *) arg;
     search_job_result_count = metadata_db_search_names(req->db_kind, req->query, SEARCH_RESULTS_MAX, search_job_result_hits);
+    for (int i = 0; i < search_job_result_count; i++) {
+        search_job_result_identity[i] = 0;
+        search_job_result_artwork_key[i] = 0;
+        if (req->db_kind == METADATA_DB_AZ_ARTIST || req->db_kind == METADATA_DB_AZ_ALBUM_ARTIST) {
+            group_row_t group;
+            metadata_db_group_kind_t kind = req->db_kind == METADATA_DB_AZ_ARTIST
+                                                ? METADATA_DB_GROUP_ARTIST
+                                                : METADATA_DB_GROUP_ALBUM_ARTIST;
+            if (metadata_db_get_groups_page(kind, search_job_result_hits[i].offset, 1, &group) == 1) {
+                search_job_result_identity[i] = group.first_song_id;
+                search_job_result_artwork_key[i] = albumart_artist_thumbnail_key(group.name);
+            }
+        } else if (req->db_kind == METADATA_DB_AZ_ALBUM) {
+            group_row_t group;
+            if (metadata_db_get_albums_page_filtered(NULL, search_job_result_hits[i].offset, 1, &group) == 1) {
+                song_row_t song;
+                if (metadata_db_get_song_by_id(group.first_song_id, &song)) {
+                    search_job_result_identity[i] = song.id;
+                    search_job_result_artwork_key[i] = song_album_thumbnail_key(&song);
+                }
+            }
+        } else {
+            song_row_t song;
+            if (metadata_db_get_songs_filtered_page(NULL, NULL, NULL, NULL, NULL,
+                    search_job_result_hits[i].offset, 1, &song) == 1) {
+                search_job_result_identity[i] = song.id;
+                search_job_result_artwork_key[i] = song_album_thumbnail_key(&song);
+            }
+        }
+    }
     free(req);
     atomic_store_explicit(&search_job_done_flag, true, memory_order_release); /* written last -- poll_search_job() only checks this flag */
     return NULL;
@@ -3066,7 +4005,9 @@ static void launch_search_job(search_binding_t * b, const char * query) {
 
 /* Builds compact_list_item_t/filtered_indices/filtered_labels from a
  * finished search job's hits and applies them to b->list. */
-static void search_apply_results_to_list(search_binding_t * b, const metadata_db_search_hit_t * hits, int matched) {
+static void search_apply_results_to_list(search_binding_t * b, const metadata_db_search_hit_t * hits,
+                                         const int64_t * identities, const uint64_t * artwork_keys,
+                                         int matched) {
     compact_list_item_t * items = malloc(sizeof(compact_list_item_t) * (size_t) (matched > 0 ? matched : 1));
     int * indices = malloc(sizeof(int) * (size_t) (matched > 0 ? matched : 1));
     char(*labels)[128] = malloc(sizeof(*labels) * (size_t) (matched > 0 ? matched : 1));
@@ -3078,7 +4019,13 @@ static void search_apply_results_to_list(search_binding_t * b, const metadata_db
     }
     for (int i = 0; i < matched; i++) {
         snprintf(labels[i], sizeof(labels[i]), "%.127s", hits[i].label);
-        items[i] = (compact_list_item_t){ labels[i] };
+        items[i] = (compact_list_item_t) {
+            .label = labels[i],
+            .identity = identities[i],
+            .artwork_key = artwork_keys[i],
+            .artwork_name = (b->db_kind == METADATA_DB_AZ_ARTIST ||
+                             b->db_kind == METADATA_DB_AZ_ALBUM_ARTIST) ? labels[i] : NULL
+        };
         indices[i] = hits[i].offset;
     }
 
@@ -3103,7 +4050,9 @@ void poll_search_job(void) {
     pthread_join(search_job_thread, NULL);
 
     if (search_job_for_binding->active && find_search_binding_for_screen(lv_screen_active()) == search_job_for_binding) {
-        search_apply_results_to_list(search_job_for_binding, search_job_result_hits, search_job_result_count);
+        search_apply_results_to_list(search_job_for_binding, search_job_result_hits,
+                                     search_job_result_identity, search_job_result_artwork_key,
+                                     search_job_result_count);
     }
 
     if (search_job_pending_valid) {
@@ -3239,11 +4188,13 @@ static void search_open(search_binding_t * b) {
     t9_keypad_attach(b->screen, b->search_bar, 8, 14, 365);
 
     b->active = true;
+    if (b->is_overlay_list && b->list == files_search_list) thumbnail_begin_screen(b->list);
     search_apply_filter(b, ""); /* start unfiltered -- also (re)establishes filtered_indices == NULL */
 }
 
 static void search_close(search_binding_t * b) {
     t9_keypad_release();
+    if (b->is_overlay_list && b->list == files_search_list) thumbnail_end_screen(b->list);
 
     /* Not strictly required for correctness -- poll_search_job()/search_
      * debounce_timer_cb() both already re-check b->active/find_search_
@@ -3429,7 +4380,8 @@ static group_song_entry_t * build_group_song_entries_from_paths(char ** paths, i
     if (!entries) return NULL;
     for (int i = 0; i < count; i++) {
         entries[i].path = strdup(paths[i]);
-        song_row_t row;
+        song_row_t row = {0};
+        snprintf(row.path, sizeof(row.path), "%s", paths[i]);
         char title[384];
         if (metadata_db_get_song_by_path(paths[i], &row)) {
             format_song_identity(&row, title, sizeof(title));
@@ -3437,6 +4389,8 @@ static group_song_entry_t * build_group_song_entries_from_paths(char ** paths, i
             snprintf(title, sizeof(title), "%s", basename_of(paths[i]));
         }
         entries[i].title = strdup(title);
+        entries[i].song_id = row.id;
+        entries[i].artwork_key = song_album_thumbnail_key(&row);
         if (!entries[i].path || !entries[i].title) {
             free_group_song_entries(entries, count);
             return NULL;
@@ -3484,14 +4438,14 @@ void play_remote_control_song(const char * song_path, const char * playlist_name
             if (scoped_title[0] == '\0') snprintf(scoped_title, sizeof(scoped_title), "%s", playlist_name);
         }
     } else if (album_filter[0] != '\0' && (artist_filter[0] != '\0' || album_artist_filter[0] != '\0')) {
-        int64_t count64 = metadata_db_count_songs_filtered(NULL, artist_filter, album_artist_filter, album_filter);
+        int64_t count64 = metadata_db_count_songs_filtered(NULL, artist_filter, album_artist_filter, album_filter, NULL);
         if (count64 > 0 && count64 <= INT_MAX) {
             scoped_entries = calloc((size_t) count64, sizeof(*scoped_entries));
             song_row_t rows[64];
             while (scoped_entries && scoped_count < count64) {
                 int want = (int) (count64 - scoped_count);
                 if (want > 64) want = 64;
-                int got = metadata_db_get_songs_filtered_page(NULL, artist_filter, album_artist_filter, album_filter,
+                int got = metadata_db_get_songs_filtered_page(NULL, artist_filter, album_artist_filter, album_filter, NULL,
                                                                scoped_count, want, rows);
                 if (got <= 0) break;
                 for (int i = 0; i < got; i++) {
@@ -3499,6 +4453,8 @@ void play_remote_control_song(const char * song_path, const char * playlist_name
                     metadata_db_song_display_title(&rows[i], title, sizeof(title));
                     scoped_entries[scoped_count + i].path = strdup(rows[i].path);
                     scoped_entries[scoped_count + i].title = strdup(title);
+                    scoped_entries[scoped_count + i].song_id = rows[i].id;
+                    scoped_entries[scoped_count + i].artwork_key = song_album_thumbnail_key(&rows[i]);
                     if (!scoped_entries[scoped_count + i].path || !scoped_entries[scoped_count + i].title) {
                         free_group_song_entries(scoped_entries, (int) count64);
                         scoped_entries = NULL;
@@ -3891,9 +4847,35 @@ static void populate_playlists_screen(void) {
     }
 }
 
+/* A missing Playlists folder is recreated so the user always has one to use;
+ * a read-only card simply fails the mkdir. Callers check the card is mounted
+ * so an empty mount point never gets one. */
+static void ensure_playlists_dir(void) {
+    if (mkdir(PLAYLISTS_DIR, 0755) != 0 && errno != EEXIST)
+        DB_LOG("DB", "playlists_mkdir_failed errno=%d", errno);
+}
+
+/* Rescans only the Playlists folder; gui_library_poll_playlists() reports
+ * the result and repopulates the list. */
+static void playlists_refresh_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED || playlists_manual_refresh) return;
+#ifndef HOST_BUILD
+    if (!sd_card_root_is_mounted()) {
+        show_error_toast("SD card not available");
+        return;
+    }
+#endif
+    ensure_playlists_dir();
+    playlists_manual_refresh = true;
+    set_header_refresh_action_busy(playlists_refresh_icon, true);
+    playlist_files_refresh_async(PLAYLISTS_DIR);
+}
+
 static lv_obj_t * build_playlists_screen(void) {
     lv_obj_t * title_label;
     lv_obj_t * scr = build_subsonic_list_screen("Playlists", &title_label, &playlists_list);
+    playlists_refresh_icon = build_header_refresh_action(scr, playlists_refresh_cb);
+    set_header_refresh_action_busy(playlists_refresh_icon, playlists_manual_refresh);
 
     /* Explicit cross-axis centering scoped to this screen also keeps rows
      * correct if it is ever hosted in a parent narrower than the display. */
@@ -4025,6 +5007,330 @@ static metadata_db_load_outcome_t combine_load_outcomes(metadata_db_load_outcome
 /* Cache reports are owned by the UI thread. */
 static metadata_db_load_outcome_t library_cache_load_outcome;
 static bool library_cache_load_pending;
+/* "Library loaded" is shown only for an SD hot swap, not at boot. */
+static bool library_cache_load_announce_loaded;
+static uint32_t library_cache_load_card_generation;
+static uint32_t library_cache_load_generation;
+static uint32_t library_prompt_card_generation;
+static uint32_t library_boot_ready_tick;
+static bool library_boot_ready_tick_set;
+static bool boot_warmup_requested;
+static bool boot_warmup_pending;
+
+typedef enum {
+    LIBRARY_PROMPT_NONE,
+    LIBRARY_PROMPT_NO_DATABASE,
+    LIBRARY_PROMPT_LOAD_FAILED,
+    LIBRARY_PROMPT_FILES_CHANGED,
+} library_prompt_reason_t;
+
+typedef enum {
+    LIBRARY_PROMPT_REQUEST_NONE,
+    LIBRARY_PROMPT_REQUEST_PENDING,
+    LIBRARY_PROMPT_REQUEST_VISIBLE,
+} library_prompt_request_state_t;
+
+typedef struct {
+    library_prompt_reason_t reason;
+    library_prompt_request_state_t state;
+    uint32_t card_generation;
+    uint32_t load_generation;
+} library_prompt_request_t;
+
+typedef enum {
+    LIBRARY_PROMPT_CARD_CURRENT,
+    LIBRARY_PROMPT_CARD_CHANGED,
+    LIBRARY_PROMPT_CARD_UNKNOWN,
+} library_prompt_card_status_t;
+
+static library_prompt_request_t library_prompt_request;
+static library_prompt_request_t library_prompt_queued_request;
+static gui_popup_t library_update_prompt_popup;
+static lv_obj_t * library_update_prompt_title;
+static lv_obj_t * library_update_prompt_body;
+static lv_obj_t * library_update_prompt_confirm_label;
+
+static library_prompt_card_status_t library_prompt_card_status(void);
+static void library_prompt_prepare_cache_load_card(void);
+static void library_update_prompt_confirm_cb(lv_event_t * e);
+static void library_update_prompt_later_cb(lv_event_t * e);
+static void library_update_prompt_backdrop_cb(lv_event_t * e);
+static void library_prompt_requeue_visible(void);
+
+static bool library_prompt_request_is_current(const library_prompt_request_t * request) {
+    if (!request || request->state == LIBRARY_PROMPT_REQUEST_NONE ||
+        request->card_generation != library_prompt_card_generation) return false;
+    if (request->reason == LIBRARY_PROMPT_FILES_CHANGED) return true;
+    if (request->load_generation != library_cache_load_generation) return false;
+    if (request->reason == LIBRARY_PROMPT_NO_DATABASE)
+        return library_cache_load_outcome == METADATA_DB_LOAD_SUCCESS_FRESH;
+    if (request->reason == LIBRARY_PROMPT_LOAD_FAILED)
+        return library_cache_load_outcome == METADATA_DB_LOAD_FAILED;
+    return false;
+}
+
+static void library_prompt_clear_request(library_prompt_request_t * request) {
+    memset(request, 0, sizeof(*request));
+}
+
+static void library_prompt_activate_queued_request(void) {
+    if (library_prompt_request.state != LIBRARY_PROMPT_REQUEST_NONE ||
+        library_prompt_queued_request.state == LIBRARY_PROMPT_REQUEST_NONE) return;
+    library_prompt_request = library_prompt_queued_request;
+    library_prompt_clear_request(&library_prompt_queued_request);
+}
+
+static void library_prompt_queue_request(const library_prompt_request_t * request) {
+    if (library_prompt_queued_request.reason == LIBRARY_PROMPT_FILES_CHANGED &&
+        request->reason != LIBRARY_PROMPT_FILES_CHANGED) return;
+    library_prompt_queued_request = *request;
+}
+
+static void library_prompt_enqueue(library_prompt_reason_t reason, uint32_t card_generation) {
+    library_prompt_request_t request = {
+        .reason = reason,
+        .state = LIBRARY_PROMPT_REQUEST_PENDING,
+        .card_generation = card_generation,
+        .load_generation = library_cache_load_generation,
+    };
+    if (library_prompt_request.state == LIBRARY_PROMPT_REQUEST_VISIBLE) {
+        if (library_prompt_request.reason == LIBRARY_PROMPT_FILES_CHANGED &&
+            reason == LIBRARY_PROMPT_FILES_CHANGED) return;
+        library_prompt_queue_request(&request);
+    } else if (library_prompt_request.state == LIBRARY_PROMPT_REQUEST_PENDING &&
+               library_prompt_request.reason == LIBRARY_PROMPT_FILES_CHANGED &&
+               reason != LIBRARY_PROMPT_FILES_CHANGED) {
+        library_prompt_queue_request(&request);
+    } else {
+        library_prompt_request = request;
+        library_prompt_clear_request(&library_prompt_queued_request);
+    }
+}
+
+static void library_prompt_drop_all(void) {
+    gui_popup_hide(&library_update_prompt_popup);
+    library_prompt_clear_request(&library_prompt_request);
+    library_prompt_clear_request(&library_prompt_queued_request);
+}
+
+void gui_library_invalidate_boot_prompt(void) {
+    library_prompt_drop_all();
+}
+
+void gui_library_suspend_boot_prompt(void) {
+    library_prompt_requeue_visible();
+}
+
+static void library_prompt_card_changed(void) {
+    library_prompt_card_generation++;
+    boot_warmup_pending = false;
+    library_prompt_drop_all();
+}
+
+void gui_library_request_files_changed_prompt(void) {
+    library_prompt_card_status_t card_status = library_prompt_card_status();
+    if (card_status == LIBRARY_PROMPT_CARD_CHANGED) {
+        library_prompt_card_changed();
+        return;
+    }
+    library_prompt_enqueue(LIBRARY_PROMPT_FILES_CHANGED, library_prompt_card_generation);
+}
+
+static bool library_prompt_has_manual_overlay(void) {
+    return az_index_dragging ||
+           (az_index_active_binding && az_index_active_binding->popup &&
+            !lv_obj_has_flag(az_index_active_binding->popup, LV_OBJ_FLAG_HIDDEN)) ||
+           (playlist_start_popup && !lv_obj_has_flag(playlist_start_popup, LV_OBJ_FLAG_HIDDEN)) ||
+           (playlist_start_backdrop && !lv_obj_has_flag(playlist_start_backdrop, LV_OBJ_FLAG_HIDDEN)) ||
+           (playlist_context_menu_popup &&
+            !lv_obj_has_flag(playlist_context_menu_popup, LV_OBJ_FLAG_HIDDEN)) ||
+           (playlist_context_menu_backdrop &&
+            !lv_obj_has_flag(playlist_context_menu_backdrop, LV_OBJ_FLAG_HIDDEN)) ||
+           (collection_menu_popup && !lv_obj_has_flag(collection_menu_popup, LV_OBJ_FLAG_HIDDEN)) ||
+           (collection_menu_backdrop && !lv_obj_has_flag(collection_menu_backdrop, LV_OBJ_FLAG_HIDDEN)) ||
+           (album_collection_menu_popup && !lv_obj_has_flag(album_collection_menu_popup, LV_OBJ_FLAG_HIDDEN)) ||
+           (album_collection_menu_backdrop &&
+            !lv_obj_has_flag(album_collection_menu_backdrop, LV_OBJ_FLAG_HIDDEN));
+}
+
+#define BOOT_SETTLE_MS 8000
+static bool library_prompt_environment_idle(void) {
+    if (!library_boot_ready_tick_set || lv_tick_elaps(library_boot_ready_tick) < BOOT_SETTLE_MS ||
+        !backlight_screen_is_on() || gui_navigation_transition_in_progress() ||
+        lv_screen_active() == gui_busy_get_screen() || gui_library_navigation_blocked() ||
+        gui_network_boot_prompt_blocked() || gui_shell_boot_prompt_blocked() ||
+        gui_lock_screen_is_showing() || gui_player_boot_prompt_blocked() ||
+        gui_queue_boot_prompt_blocked() || library_prompt_has_manual_overlay() ||
+        gui_notifications_toast_visible()) return false;
+
+    lv_obj_t * active = lv_screen_active();
+    if (t9_keypad_is_inline_active() ||
+        (gui_text_input_get_screen() && active == gui_text_input_get_screen()) ||
+        (gui_network_get_import_wifi_screen() && active == gui_network_get_import_wifi_screen())) return false;
+
+    return gui_popup_visible_count() == 0;
+}
+
+/* A visible prompt yields only to something that takes over the screen.
+ * Touches on the prompt itself latch the shell's gesture candidates, and a
+ * toast can appear under it, so the settle checks above do not apply. */
+static bool library_prompt_taken_over(void) {
+    return !backlight_screen_is_on() || lv_screen_active() == gui_busy_get_screen() ||
+           gui_lock_screen_is_showing() || gui_network_boot_prompt_blocked() ||
+           gui_popup_visible_count() != 1;
+}
+
+static void library_prompt_update_labels(library_prompt_reason_t reason) {
+    switch (reason) {
+        case LIBRARY_PROMPT_NO_DATABASE:
+            lv_label_set_text(library_update_prompt_title, "No music database");
+            lv_label_set_text(library_update_prompt_body,
+                              "Build it now? Large libraries can take several minutes.");
+            lv_label_set_text(library_update_prompt_confirm_label, "Build");
+            break;
+        case LIBRARY_PROMPT_LOAD_FAILED:
+            lv_label_set_text(library_update_prompt_title, "Music database unavailable");
+            lv_label_set_text(library_update_prompt_body, "It could not be loaded. Rebuild it now?");
+            lv_label_set_text(library_update_prompt_confirm_label, "Rebuild");
+            break;
+        case LIBRARY_PROMPT_FILES_CHANGED:
+            lv_label_set_text(library_update_prompt_title, "Update music database?");
+            lv_label_set_text(library_update_prompt_body, "Files on the card may have changed.");
+            lv_label_set_text(library_update_prompt_confirm_label, "Update");
+            break;
+        case LIBRARY_PROMPT_NONE:
+            break;
+    }
+}
+
+static void library_update_prompt_close(bool show_settings_toast) {
+    gui_popup_hide(&library_update_prompt_popup);
+    library_prompt_clear_request(&library_prompt_request);
+    library_prompt_activate_queued_request();
+
+    if (!show_settings_toast) return;
+    show_info_toast("Use Settings > Update Music Database");
+}
+
+/* The settle checks only decide when to show the prompt. Once the user taps
+ * the action, revalidate what makes the scan unsafe or stale; the tap's own
+ * press still has the shell's gesture candidates latched at this point. */
+static bool library_prompt_can_run_action(const library_prompt_request_t * request) {
+    return library_prompt_request_is_current(request) &&
+           library_prompt_card_status() == LIBRARY_PROMPT_CARD_CURRENT &&
+           !gui_library_navigation_blocked() && !gui_network_usb_prompt_invalidated();
+}
+
+static void library_update_prompt_confirm_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED ||
+        !gui_popup_is_visible(&library_update_prompt_popup)) return;
+    library_prompt_request_t handled = library_prompt_request;
+    gui_popup_hide(&library_update_prompt_popup);
+    library_prompt_clear_request(&library_prompt_request);
+    if (!library_prompt_can_run_action(&handled)) {
+        library_prompt_card_status_t card_status = library_prompt_card_status();
+        if (card_status == LIBRARY_PROMPT_CARD_CHANGED) library_prompt_card_changed();
+        else if (gui_library_navigation_blocked())
+            library_prompt_drop_all();
+        else if (library_prompt_request_is_current(&handled)) {
+            handled.state = LIBRARY_PROMPT_REQUEST_PENDING;
+            library_prompt_request = handled;
+        }
+        return;
+    }
+    if (handled.reason == LIBRARY_PROMPT_LOAD_FAILED) start_library_rescan();
+    else start_library_auto_rescan();
+}
+
+static void library_update_prompt_later_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    library_update_prompt_close(true);
+}
+
+static void library_update_prompt_backdrop_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    library_update_prompt_close(true);
+}
+
+static void build_library_update_prompt_popup(void) {
+    library_update_prompt_popup.popup = build_confirm_popup_with_labels(
+        "", LV_LABEL_LONG_WRAP, &library_update_prompt_title, "", &library_update_prompt_body,
+        "", &library_update_prompt_confirm_label, accent_lv_color(), library_update_prompt_confirm_cb, NULL,
+        "Later", lv_color_white(), library_update_prompt_later_cb, NULL,
+        library_update_prompt_backdrop_cb, &library_update_prompt_popup.backdrop);
+}
+
+static void library_prompt_requeue_visible(void) {
+    if (!gui_popup_is_visible(&library_update_prompt_popup)) return;
+    gui_popup_hide(&library_update_prompt_popup);
+    if (library_prompt_request_is_current(&library_prompt_request))
+        library_prompt_request.state = LIBRARY_PROMPT_REQUEST_PENDING;
+    else
+        library_prompt_clear_request(&library_prompt_request);
+}
+
+void gui_library_boot_ready(uint32_t tick) {
+    if (library_boot_ready_tick_set) return;
+    library_boot_ready_tick = tick;
+    library_boot_ready_tick_set = true;
+}
+
+void gui_library_poll_boot_prompt(void) {
+    bool has_request = library_prompt_request.state != LIBRARY_PROMPT_REQUEST_NONE ||
+                       library_prompt_queued_request.state != LIBRARY_PROMPT_REQUEST_NONE;
+    library_prompt_card_status_t card_status = LIBRARY_PROMPT_CARD_CURRENT;
+    if (has_request || boot_warmup_pending) card_status = library_prompt_card_status();
+    if ((has_request || boot_warmup_pending) && card_status == LIBRARY_PROMPT_CARD_CHANGED) {
+        library_prompt_card_changed();
+        return;
+    }
+    if (card_status == LIBRARY_PROMPT_CARD_UNKNOWN) {
+        library_prompt_requeue_visible();
+        return;
+    }
+    if (has_request && gui_network_usb_prompt_invalidated()) {
+        gui_library_suspend_boot_prompt();
+        return;
+    }
+    if (has_request && gui_library_navigation_blocked()) {
+        library_prompt_drop_all();
+        return;
+    }
+
+    if (library_prompt_request.state != LIBRARY_PROMPT_REQUEST_NONE &&
+        !library_prompt_request_is_current(&library_prompt_request)) {
+        gui_popup_hide(&library_update_prompt_popup);
+        library_prompt_clear_request(&library_prompt_request);
+    }
+    if (library_prompt_queued_request.state != LIBRARY_PROMPT_REQUEST_NONE &&
+        !library_prompt_request_is_current(&library_prompt_queued_request))
+        library_prompt_clear_request(&library_prompt_queued_request);
+    library_prompt_activate_queued_request();
+
+    if (boot_warmup_pending && library_prompt_environment_idle()) {
+        int64_t song_count = metadata_db_get_song_count();
+        bool warmer_active = atomic_load(&album_thumb_gen_active);
+        if (song_count <= 0 || warmer_active) {
+            boot_warmup_pending = false;
+        } else if (!album_thumbnail_active) {
+            boot_warmup_pending = false;
+            start_album_thumbnail_generation();
+        }
+    }
+
+    if (library_prompt_request.state == LIBRARY_PROMPT_REQUEST_VISIBLE) {
+        if (!gui_popup_is_visible(&library_update_prompt_popup) ||
+            library_prompt_taken_over()) library_prompt_requeue_visible();
+        return;
+    }
+    if (library_prompt_request.state != LIBRARY_PROMPT_REQUEST_PENDING ||
+        !library_update_prompt_popup.popup || !library_prompt_environment_idle()) return;
+
+    library_prompt_update_labels(library_prompt_request.reason);
+    library_prompt_request.state = LIBRARY_PROMPT_REQUEST_VISIBLE;
+    gui_popup_show(&library_update_prompt_popup);
+}
+
 /* Initialized before pthread_create and published by library_rescan_done_flag. */
 static metadata_db_load_outcome_t library_operation_outcome;
 static metadata_db_load_outcome_t reload_library_cache(void);
@@ -4040,12 +5346,16 @@ static void report_library_cache_load(void) {
     }
     switch (library_cache_load_outcome) {
         case METADATA_DB_LOAD_FAILED:
-            show_error_toast("Library unavailable. Use Settings > Update Music Database to rebuild");
+            library_prompt_enqueue(LIBRARY_PROMPT_LOAD_FAILED, library_cache_load_card_generation);
             break;
         case METADATA_DB_LOAD_UNMOUNTED: show_error_toast("No SD card"); break;
         case METADATA_DB_LOAD_SUCCESS_RECOVERED: show_info_toast(library_recovered_message); break;
-        case METADATA_DB_LOAD_SUCCESS_FRESH: show_info_toast("Library empty"); break;
-        case METADATA_DB_LOAD_SUCCESS_NORMAL: show_info_toast("Library loaded"); break;
+        case METADATA_DB_LOAD_SUCCESS_FRESH:
+            library_prompt_enqueue(LIBRARY_PROMPT_NO_DATABASE, library_cache_load_card_generation);
+            break;
+        case METADATA_DB_LOAD_SUCCESS_NORMAL:
+            if (library_cache_load_announce_loaded) show_info_toast("Library loaded");
+            break;
     }
 }
 
@@ -4079,6 +5389,8 @@ bool gui_library_auto_rescan_enabled(void) {
 #define LIBRARY_RESCAN_THREAD_STACK_SIZE (4 * 1024 * 1024)
 
 static void start_library_rescan_with_repair(bool allow_rebuild) {
+    gui_library_invalidate_boot_prompt();
+    boot_warmup_pending = false;
     /* Ignore request if a rescan is already running. */
     if (library_rescan_active) return;
     DB_LOG("DB", "rescan_requested existing_songs=%lld rss_kb=%ld",
@@ -4146,6 +5458,7 @@ static void refresh_library_screens_after_reload(void) {
      * long enough to show the completion message, so only preserve that
      * explicitly safe case. Resetting also removes deeper group screens
      * whose rows reference the library arrays replaced by the reload. */
+    album_thumbnail_cache_clear();
     if (lv_screen_active() != gui_busy_get_screen()) {
         nav_reset_to_home();
     }
@@ -4193,16 +5506,18 @@ static void refresh_library_screens_after_reload(void) {
 /* SD reinsertion loads an existing saved database and queue without walking
  * the whole tree again. A card with no database still needs its first scan;
  * users can explicitly update a saved database after changing files. */
-static void reload_library_on_sd_reinsert(void) {
+static void reload_library_on_sd_reinsert(bool announce_loaded) {
+    quiesce_album_artwork_workers();
+    album_thumbnail_cache_clear();
     playlist_files_refresh_async(PLAYLISTS_DIR);
     library_load_from_cache_only();
+    library_cache_load_announce_loaded = announce_loaded;
     refresh_library_screens_after_reload();
-    if (gui_library_auto_rescan_enabled() &&
-        library_cache_load_outcome == METADATA_DB_LOAD_SUCCESS_FRESH) {
-        start_library_auto_rescan();
-    } else {
-        report_library_cache_load();
-        if (metadata_db_get_song_count() > 0) start_album_thumbnail_generation();
+    report_library_cache_load();
+    if (library_cache_load_outcome != METADATA_DB_LOAD_SUCCESS_FRESH &&
+        metadata_db_get_song_count() > 0) {
+        boot_warmup_pending = false;
+        start_album_thumbnail_generation();
     }
 }
 
@@ -4255,9 +5570,24 @@ void poll_library_rescan(void) {
          * finishes (see library_scan_once()), so there's nothing
          * meaningful to show yet in that window; the label just keeps
          * reading "Updating music database..." until then. */
-        if (library_scan_progress_total > 0) {
-            gui_busy_set_progress(library_rescan_token, (int32_t) ((int64_t) library_scan_progress_done * 100 / library_scan_progress_total));
+        int total = library_scan_progress_total;
+        int done = library_scan_progress_done;
+        char detail[96];
+        int phase = library_scan_phase;
+        if (phase == LIBRARY_SCAN_PHASE_WALK) {
+            int items = library_scan_walk_items;
+            if (items > 0) snprintf(detail, sizeof(detail), "Looking for music files\n%d items checked", items);
+            else snprintf(detail, sizeof(detail), "Looking for music files");
+        } else if (phase == LIBRARY_SCAN_PHASE_TAGS && total > 0) {
+            if (done > total) done = total;
+            gui_busy_set_progress(library_rescan_token, (int32_t) ((int64_t) done * 100 / total));
+            snprintf(detail, sizeof(detail), "Reading tags\n%d of %d songs (%d%%)", done, total,
+                     (int) ((int64_t) done * 100 / total));
+        } else {
+            gui_busy_set_progress(library_rescan_token, 100);
+            snprintf(detail, sizeof(detail), "Saving music database\nThis can take a few minutes on large libraries");
         }
+        gui_busy_set_detail(library_rescan_token, detail);
         return;
     }
 
@@ -4344,6 +5674,12 @@ static bool sd_handoff_pending = false;
  * after physical insertion can't false-positive, short enough the user
  * isn't left staring at an empty library wondering what's wrong). */
 #define SD_MOUNT_FAIL_STREAK_THRESHOLD 6
+
+static dev_t last_mounted_device;
+static bool have_last_mounted_device;
+static char last_card_cid[64];
+static bool have_last_card_identity;
+static bool prompt_card_change_seen;
 
 static bool sd_card_mount_attached(dev_t * mounted_device) {
     struct stat parent_st, root_st;
@@ -4443,7 +5779,38 @@ static void sd_card_read_cid(char out[64]) {
     fclose(file);
 }
 
+static library_prompt_card_status_t library_prompt_card_status(void) {
+    if (!sd_card_root_is_mounted()) return LIBRARY_PROMPT_CARD_UNKNOWN;
+    bool have_current_device = false;
+    dev_t current_device = 0;
+    have_current_device = sd_card_mount_attached(&current_device);
+    if (!have_current_device) return LIBRARY_PROMPT_CARD_UNKNOWN;
+    char current_cid[64];
+    sd_card_read_cid(current_cid);
+    if (sd_card_identity_replaced(true, true, have_last_card_identity,
+                                  have_last_mounted_device, last_mounted_device,
+                                  have_current_device, current_device,
+                                  last_card_cid, current_cid))
+        return LIBRARY_PROMPT_CARD_CHANGED;
+    if (have_last_card_identity && !current_cid[0]) return LIBRARY_PROMPT_CARD_UNKNOWN;
+    return LIBRARY_PROMPT_CARD_CURRENT;
+}
+
+static void library_prompt_prepare_cache_load_card(void) {
+    if (!sd_card_root_is_mounted()) return;
+    dev_t current_device = 0;
+    bool have_current_device = sd_card_mount_attached(&current_device);
+    char current_cid[64];
+    sd_card_read_cid(current_cid);
+    bool replaced = sd_card_identity_replaced(true, true, have_last_card_identity,
+                                              have_last_mounted_device, last_mounted_device,
+                                              have_current_device, current_device,
+                                              last_card_cid, current_cid);
+    if (replaced) library_prompt_card_changed();
+}
+
 static void clear_removed_sd_library(void) {
+    quiesce_album_artwork_workers();
     gui_player_handle_sd_unmount();
     metadata_db_close();
     refresh_library_screens_after_reload();
@@ -4486,10 +5853,6 @@ void poll_sd_card_hotplug(void) {
      * (SD_UNMOUNT_CONFIRM_STREAK_THRESHOLD) before tearing down library
      * state to debounce brief transient unmounts. */
     static int unmount_confirm_streak = 0;
-    static dev_t last_mounted_device;
-    static bool have_last_mounted_device;
-    static char last_card_cid[64];
-    static bool have_last_card_identity;
 #define SD_UNMOUNT_CONFIRM_STREAK_THRESHOLD 2
 
     time_t now = time(NULL);
@@ -4530,6 +5893,12 @@ void poll_sd_card_hotplug(void) {
     bool replaced_between_polls = sd_card_identity_replaced(
         mounted, was_mounted, have_last_card_identity, have_last_mounted_device, last_mounted_device,
         have_current_device, current_mounted_device, last_card_cid, current_card_cid);
+    if (replaced_between_polls) {
+        if (!prompt_card_change_seen) library_prompt_card_changed();
+        prompt_card_change_seen = true;
+    } else if (!mounted) {
+        library_prompt_requeue_visible();
+    }
     /* Unconfirmed absence still cancels a scan and, below, blocks writes.
      * It does not latch sd_handoff_pending; that waits for confirmation. */
     if (sd_card_sample_cancels_scan(mounted, replaced_between_polls, library_rescan_active))
@@ -4558,6 +5927,8 @@ void poll_sd_card_hotplug(void) {
         subprocess_run(argv, NULL, 0);
         mounted = false;
         if (library_rescan_active) gui_library_cancel_scan();
+        if (!prompt_card_change_seen) library_prompt_card_changed();
+        prompt_card_change_seen = true;
     }
 
     group_probe_storage_available = mounted;
@@ -4578,6 +5949,10 @@ void poll_sd_card_hotplug(void) {
             removal_confirmed = sd_card_absence_confirmed(
                 stale_mount || forced_removal, unmount_confirm_streak,
                 SD_UNMOUNT_CONFIRM_STREAK_THRESHOLD);
+            if (removal_confirmed && !prompt_card_change_seen) {
+                library_prompt_card_changed();
+                prompt_card_change_seen = true;
+            }
             if (removal_confirmed && !library_rescan_active) {
                 /* Close old handles before loading the next card. */
                 clear_removed_sd_library();
@@ -4670,7 +6045,7 @@ void poll_sd_card_hotplug(void) {
         return;
     }
     /* Every poll that observes the card mounted un-sticks the checkpoint
-     * target, even for a transient blip that never reached the confirmed-
+    * target, even for a transient blip that never reached the confirmed-
      * removal streak above. */
     gui_player_notify_sd_mounted();
     /* Reset file browser and reload fallback fonts before triggering the
@@ -4680,7 +6055,7 @@ void poll_sd_card_hotplug(void) {
         was_mounted = false;
         file_browser_reset_to_root();
         fallback_font_on_sd_mounted();
-        reload_library_on_sd_reinsert();
+        reload_library_on_sd_reinsert(true);
         gui_player_restore_sd_queue(false);
         sd_handoff_pending = false;
     } else if (!boot_library_recheck_done) {
@@ -4688,7 +6063,7 @@ void poll_sd_card_hotplug(void) {
         fallback_font_on_sd_mounted();
         if (metadata_db_get_load_outcome() == METADATA_DB_LOAD_UNMOUNTED && !library_rescan_active) {
             file_browser_reset_to_root();
-            reload_library_on_sd_reinsert();
+            reload_library_on_sd_reinsert(false);
         }
         /* Covers the boot-time mount race this whole branch exists for: the
          * card genuinely was NOT YET mounted when gui_init() ran its own
@@ -4711,11 +6086,19 @@ void poll_sd_card_hotplug(void) {
      * CID. A known device number remains a valid identity baseline, so a
      * later device change is still detected while CID reads recover. */
     have_last_card_identity = sd_card_identity_is_known(have_last_mounted_device, current_card_cid);
+    prompt_card_change_seen = false;
 }
 #else
 bool sd_card_root_is_mounted(void) {
     struct stat st;
     return stat(MUSIC_ROOT_DIR, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static library_prompt_card_status_t library_prompt_card_status(void) {
+    return sd_card_root_is_mounted() ? LIBRARY_PROMPT_CARD_CURRENT : LIBRARY_PROMPT_CARD_UNKNOWN;
+}
+
+static void library_prompt_prepare_cache_load_card(void) {
 }
 
 void poll_sd_card_hotplug(void) {
@@ -4806,6 +6189,8 @@ static void start_sd_format(void) {
         show_error_toast("SD card repair is still running");
         return;
     }
+    gui_library_invalidate_boot_prompt();
+    boot_warmup_pending = false;
     atomic_store_explicit(&sd_format_done_flag, false, memory_order_relaxed);
     sd_format_active = true;
     sd_format_token = gui_busy_show("Formatting\nSD Card...", "");
@@ -5241,8 +6626,9 @@ static const char * artist_albums_song_filter(void) {
 }
 
 /* Defined with the shared bounded artwork cache below. */
-static void album_row_thumbnail_decorator(lv_obj_t * list, lv_obj_t * row, lv_obj_t * image,
-                                           int logical_index, int pool_slot, int64_t song_id, void * ctx);
+static void thumbnail_row_decorator(lv_obj_t * list, lv_obj_t * row, lv_obj_t * image,
+                                    int logical_index, int pool_slot, int64_t representative_song_id,
+                                    uint64_t artwork_key, const char * artwork_name, void * ctx);
 
 /* Now-playing indicator bar -- same "recreated fresh every populate call"
  * lifecycle as group_songs_now_playing_bar (see its own comment):
@@ -5260,6 +6646,8 @@ static void album_row_thumbnail_decorator(lv_obj_t * list, lv_obj_t * row, lv_ob
 typedef struct {
     char * path;
     char * title;
+    int64_t song_id;
+    uint64_t artwork_key;
     char album[128];
     char album_artist[128];
     int32_t disc_number;
@@ -5331,6 +6719,8 @@ static bool artist_albums_show_all_songs(void) {
             artist_song_sort_entry_t * dst = &sort_entries[n + i];
             dst->path = strdup(page[i].path);
             dst->title = strdup(title);
+            dst->song_id = page[i].id;
+            dst->artwork_key = song_album_thumbnail_key(&page[i]);
             snprintf(dst->album, sizeof(dst->album), "%s", page[i].tags.album);
             snprintf(dst->album_artist, sizeof(dst->album_artist), "%s", page[i].tags.album_artist);
             dst->disc_number = page[i].tags.disc_number;
@@ -5378,7 +6768,7 @@ static bool artist_albums_show_all_songs(void) {
         int previous_disc = first_disc;
         for (int i = start; i < end; i++) {
             int disc = sort_entries[i].disc_number > 0 ? sort_entries[i].disc_number : 1;
-            sort_entries[i].show_disc_header = multi_disc && i > start && disc != previous_disc;
+            sort_entries[i].show_disc_header = multi_disc && (i == start || disc != previous_disc);
             previous_disc = disc;
         }
         start = end;
@@ -5398,6 +6788,8 @@ static bool artist_albums_show_all_songs(void) {
     for (int i = 0; i < n; i++) {
         entries[i].path = sort_entries[i].path;
         entries[i].title = sort_entries[i].title;
+        entries[i].song_id = sort_entries[i].song_id;
+        entries[i].artwork_key = sort_entries[i].artwork_key;
         entries[i].disc_number = sort_entries[i].disc_number > 0 ? sort_entries[i].disc_number : 1;
         entries[i].show_disc_header = sort_entries[i].show_disc_header;
     }
@@ -5506,7 +6898,7 @@ static bool collection_song_at(int offset, song_row_t * song) {
         if (collection_menu_artist[0])
             return metadata_db_get_songs_filtered_page(NULL, collection_menu_artist,
                                                        collection_menu_album_artist,
-                                                       collection_menu_name, offset, 1, song) == 1;
+                                                       collection_menu_name, NULL, offset, 1, song) == 1;
         return metadata_db_get_album_songs(collection_menu_name, collection_menu_album_artist,
                                             offset, song, 1) == 1;
     }
@@ -5550,7 +6942,7 @@ static void open_album_collection_menu(const group_row_t * group, const char * a
      * screen does not show. */
     if (collection_menu_artist[0]) {
         int64_t filtered = metadata_db_count_songs_filtered(NULL, collection_menu_artist,
-                                                            group->album_artist, group->name);
+                                                            group->album_artist, group->name, NULL);
         collection_menu_song_count = filtered > 0 && filtered <= INT_MAX ? (int) filtered : 0;
     } else {
         collection_menu_song_count = group->song_count;
@@ -5619,12 +7011,12 @@ static void build_collection_menus(void) {
  * decoded while the list was off-screen. */
 static void album_thumbnail_screen_loaded_cb(lv_event_t * e) {
     lv_obj_t * list = (lv_obj_t *) lv_event_get_user_data(e);
-    album_thumbnail_begin_screen(list);
+    thumbnail_begin_screen(list);
 }
 
 static void album_thumbnail_screen_unloaded_cb(lv_event_t * e) {
     lv_obj_t * list = (lv_obj_t *) lv_event_get_user_data(e);
-    album_thumbnail_end_screen(list);
+    thumbnail_end_screen(list);
 }
 
 /* Resolve the matching album's sorted result offset directly. This keeps the
@@ -5680,6 +7072,16 @@ static int artist_albums_fetch_page(void * ctx, int offset, int count, compact_l
     for (int i = 0; i < n; i++) {
         snprintf(out_rows[prefix + i].label, sizeof(out_rows[prefix + i].label), "%s", rows[i].name);
         out_rows[prefix + i].identity = rows[i].first_song_id;
+        if (rows[i].album_artist[0]) {
+            albumart_info_t info = {0};
+            snprintf(info.albumartist, sizeof(info.albumartist), "%s", rows[i].album_artist);
+            snprintf(info.album, sizeof(info.album), "%s", rows[i].name);
+            out_rows[prefix + i].artwork_key = albumart_thumbnail_key(&info);
+        } else {
+            song_row_t representative;
+            if (metadata_db_get_song_by_id(rows[i].first_song_id, &representative))
+                out_rows[prefix + i].artwork_key = song_album_thumbnail_key(&representative);
+        }
         snprintf(out_rows[prefix + i].trailing_asset, sizeof(out_rows[prefix + i].trailing_asset),
                  "%s", "playing_plane/ic_more.png");
     }
@@ -5699,7 +7101,8 @@ void show_artist_albums(const char * name, metadata_db_group_kind_t kind) {
     lv_label_set_text(artist_albums_title_label, name);
     compact_list_set_paged_provider(artist_albums_list, artist_albums_fetch_page, NULL,
                                     artist_albums_group_count + 1);
-    compact_list_set_row_decorator(artist_albums_list, album_row_thumbnail_decorator, NULL);
+    compact_list_set_row_decorator(artist_albums_list, thumbnail_row_decorator,
+                                    (void *) &album_thumbnail_context);
     compact_list_set_trailing_click(artist_albums_list, artist_album_more_click_cb);
     refresh_artist_albums_now_playing_indicator();
 
@@ -5719,6 +7122,8 @@ static int artists_fetch_page(void * ctx, int offset, int count, compact_list_pa
     for (int i = 0; i < n; i++) {
         snprintf(out_rows[i].label, sizeof(out_rows[i].label), "%s", rows[i].name);
         out_rows[i].identity = rows[i].first_song_id;
+        out_rows[i].artwork_key = albumart_artist_thumbnail_key(rows[i].name);
+        snprintf(out_rows[i].artwork_name, sizeof(out_rows[i].artwork_name), "%s", rows[i].name);
         out_rows[i].trailing_asset[0] = '\0';
     }
     free(rows);
@@ -5732,6 +7137,8 @@ static int album_artists_fetch_page(void * ctx, int offset, int count, compact_l
     for (int i = 0; i < n; i++) {
         snprintf(out_rows[i].label, sizeof(out_rows[i].label), "%s", rows[i].name);
         out_rows[i].identity = rows[i].first_song_id;
+        out_rows[i].artwork_key = albumart_artist_thumbnail_key(rows[i].name);
+        snprintf(out_rows[i].artwork_name, sizeof(out_rows[i].artwork_name), "%s", rows[i].name);
         out_rows[i].trailing_asset[0] = '\0';
     }
     free(rows);
@@ -5773,6 +7180,8 @@ void gui_library_init(void) {
                                                       LIST_ROW_WIDTH_WIDE, true, accent_lv_color());
     library_teardown_diag("compact_list_set_row_height before");
     compact_list_set_row_height(artist_albums_list, MUSIC_LIST_ROW_HEIGHT);
+    compact_list_set_row_decorator(artist_albums_list, thumbnail_row_decorator,
+                                    (void *) &album_thumbnail_context);
     library_teardown_diag("artist_albums event cbs before");
     lv_obj_add_event_cb(artist_albums_screen, album_thumbnail_screen_loaded_cb,
                         LV_EVENT_SCREEN_LOADED, artist_albums_list);
@@ -5816,6 +7225,10 @@ void gui_library_init(void) {
     lv_obj_add_style(files_search_list, &style_theme_screen_bg, 0);
     lv_obj_add_flag(files_search_list, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(files_search_list, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    compact_list_set_row_decorator(files_search_list, thumbnail_row_decorator,
+                                    (void *) &album_thumbnail_context);
+    lv_obj_add_event_cb(files_search_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(files_search_list, album_thumbnail_scroll_cb, LV_EVENT_SCROLL_END, NULL);
     library_teardown_diag("enable_gesture_bubble_recursive(files_search_list) before");
     enable_gesture_bubble_recursive(files_search_list);
 
@@ -5829,6 +7242,8 @@ void gui_library_init(void) {
     build_sd_format_confirm_popup();
     library_teardown_diag("build_collection_menus before");
     build_collection_menus();
+    library_teardown_diag("build_library_update_prompt_popup before");
+    build_library_update_prompt_popup();
     library_teardown_diag("gui_library_init done");
 }
 
@@ -5862,6 +7277,11 @@ static void library_teardown_diag(const char * step) {
 void gui_library_teardown(void) {
     cancel_group_song_probes();
     reset_az_index_bindings();
+    library_prompt_requeue_visible();
+    gui_popup_teardown(&library_update_prompt_popup);
+    library_update_prompt_title = NULL;
+    library_update_prompt_body = NULL;
+    library_update_prompt_confirm_label = NULL;
     if (playlist_start_popup) { lv_obj_delete(playlist_start_popup); playlist_start_popup = NULL; }
     if (playlist_start_backdrop) { lv_obj_delete(playlist_start_backdrop); playlist_start_backdrop = NULL; }
     gui_popup_teardown(&playlist_delete_popup);
@@ -5907,6 +7327,7 @@ void gui_library_teardown(void) {
     if (artist_albums_screen) { lv_obj_delete(artist_albums_screen); artist_albums_screen = NULL; }
     library_teardown_diag("playlists_screen before");
     if (playlists_screen) { lv_obj_delete(playlists_screen); playlists_screen = NULL; }
+    playlists_refresh_icon = NULL;
     library_teardown_diag("cue_tracks_screen before");
     if (cue_tracks_screen) { lv_obj_delete(cue_tracks_screen); cue_tracks_screen = NULL; }
     library_teardown_diag("add_to_playlist_screen before");
@@ -6098,6 +7519,7 @@ static bool scan_all_songs_with_timeout(const char * root, int * out_spool_fd,
         if (atomic_load_explicit(&library_scan_cancel_requested, memory_order_acquire))
             atomic_store_explicit(&w->cancel, true, memory_order_release);
         int progress = w->progress;
+        library_scan_walk_items = progress;
         if (progress != last_seen_progress) {
             last_seen_progress = progress;
             stalled_ms = 0;
@@ -6163,6 +7585,7 @@ static bool library_scan_unchanged_fast_path(int spool_fd, int root_fd, int disc
     if (fclose(spool) != 0) unchanged = false;
     if (!unchanged) return false;
     library_scan_progress_done = discovered_count;
+    library_scan_phase = LIBRARY_SCAN_PHASE_SAVE;
     library_rescan_succeeded = true;
     library_rescan_incomplete = false;
     library_rescan_saved = false;
@@ -6236,12 +7659,22 @@ void gui_library_poll_playlists(void) {
     bool visible = screen && (screen == playlists_screen || screen == add_to_playlist_screen);
     bool entered = visible && screen != last_screen;
     last_screen = screen;
-    if (playlist_files_refresh_poll() && visible) {
-        lv_obj_t * list = screen == playlists_screen ? playlists_list : add_to_playlist_list;
-        int32_t scroll = lv_obj_get_scroll_y(list);
-        if (screen == playlists_screen) populate_playlists_screen();
-        else populate_add_to_playlist_screen();
-        lv_obj_scroll_to_y(list, scroll, LV_ANIM_OFF);
+    bool refresh_ok = false;
+    if (playlist_files_refresh_poll(&refresh_ok)) {
+        /* A failed scan can still have pruned deleted playlists. */
+        if (visible) {
+            lv_obj_t * list = screen == playlists_screen ? playlists_list : add_to_playlist_list;
+            int32_t scroll = lv_obj_get_scroll_y(list);
+            if (screen == playlists_screen) populate_playlists_screen();
+            else populate_add_to_playlist_screen();
+            lv_obj_scroll_to_y(list, scroll, LV_ANIM_OFF);
+        }
+        if (playlists_manual_refresh) {
+            playlists_manual_refresh = false;
+            set_header_refresh_action_busy(playlists_refresh_icon, false);
+            if (refresh_ok) show_info_toast("Playlists refreshed");
+            else show_error_toast("Some playlists could not be read");
+        }
     }
     if (!backlight_screen_is_on()) return;
 #ifndef HOST_BUILD
@@ -6269,7 +7702,11 @@ void gui_library_poll_playlists(void) {
 }
 
 static void rescan_playlists(void) {
-    playlist_files_reconcile(PLAYLISTS_DIR);
+    /* Runs before library_scan_once()'s own mount check: never prune or
+     * create folders against an unmounted, empty mount point. */
+    bool mounted = sd_card_root_is_mounted();
+    if (mounted) ensure_playlists_dir();
+    playlist_files_reconcile(PLAYLISTS_DIR, mounted);
 }
 
 
@@ -6285,6 +7722,8 @@ void library_scan_once(void) {
     uint64_t phase_started_ms = scan_started_ms;
     library_scan_progress_done = 0;
     library_scan_progress_total = 0;
+    library_scan_walk_items = 0;
+    library_scan_phase = LIBRARY_SCAN_PHASE_WALK;
 
     if (atomic_load_explicit(&library_scan_cancel_requested, memory_order_acquire)) return;
 
@@ -6366,6 +7805,7 @@ void library_scan_once(void) {
     }
 
     library_scan_progress_total = discovered_count;
+    library_scan_phase = LIBRARY_SCAN_PHASE_TAGS;
     if (open_outcome == METADATA_DB_LOAD_SUCCESS_NORMAL && !preserve_rebuild &&
         !library_rescan_migrating && skipped_count == 0 && discovered_count >= 0 &&
         metadata_db_get_song_count() == (int64_t) discovered_count &&
@@ -6481,6 +7921,7 @@ void library_scan_once(void) {
         metadata_db_abort_update();
         return;
     }
+    library_scan_phase = LIBRARY_SCAN_PHASE_SAVE;
     bool committed = metadata_db_end_update();
     if (committed && library_rescan_migrating && metadata_db_storage_current() &&
         !atomic_load_explicit(&library_scan_cancel_requested, memory_order_acquire))
@@ -6513,23 +7954,25 @@ void library_scan_once(void) {
 static metadata_db_load_outcome_t reload_library_cache(void) {
     library_scan_progress_done = 0;
     library_scan_progress_total = 0;
+    library_scan_walk_items = 0;
     return metadata_db_reload();
 }
 
 /* Loads saved metadata without scanning and queues one UI report. */
 void library_load_from_cache_only(void) {
+    library_prompt_prepare_cache_load_card();
+    library_cache_load_card_generation = library_prompt_card_generation;
+    library_cache_load_announce_loaded = false;
     library_cache_load_outcome = reload_library_cache();
+    library_cache_load_generation++;
     library_cache_load_pending = true;
 }
 
-/* Kicks off the persistent album-art warmer at boot (normally only started
- * after a rescan or SD reinsert) so its first ALBUM_THUMBNAIL_CACHE_SIZE
- * decoded thumbnails are already sitting in album_thumbnail_cache[] before
- * the user ever opens Albums, in addition to its existing on-disk sized-BMP
- * warming. No-op on a fresh/empty database, matching every other
- * start_album_thumbnail_generation() call site's own guard. */
+/* Mark the boot warmer for the idle tick after the screen settles. */
 void gui_library_start_boot_thumbnail_warmup(void) {
-    if (metadata_db_get_song_count() > 0) start_album_thumbnail_generation();
+    if (boot_warmup_requested) return;
+    boot_warmup_requested = true;
+    boot_warmup_pending = true;
 }
 
 bool gui_library_has_background_work(void) {
@@ -6548,6 +7991,7 @@ bool gui_library_navigation_blocked(void) {
 void gui_library_prepare_for_ui_reload(void) {
     cancel_group_song_probes();
     quiesce_album_artwork_workers();
+    album_thumbnail_cache_clear();
 
     if (search_debounce_timer) lv_timer_pause(search_debounce_timer);
     search_job_pending_valid = false;

@@ -180,6 +180,8 @@
 /open_hiby_player_host_*
 /open_hiby_player_target
 /open_hiby_player_target_*
+/compas_bootloader
+/compas_bootloader_*
 /open_hiby_bootloader
 /open_hiby_bootloader_*
 /compile_commands.json
@@ -233,11 +235,17 @@
 !/src/core/sd_fsck_test.c
 !/src/library/albumart_migration_test.c
 !/src/library/metadata_migration_retry_test.c
+!/src/network/remote_control_mdns_test.c
 !/src/library/tagcache_storage_test.c
 !/src/library/tagcache_write_volume_test.c
+!/src/library/metadata_catalog_test.c
 !/src/library/tagcache_incremental_test.c
 !/src/library/tagcache_refs_test.c
 !/src/library/tagcache_commit_failure_test.c
+!/src/bootloader/sd_ready_test.c
+!/src/library/playlist_test.c
+!/src/network/bluetooth_codec_test.c
+!/src/ui/sd_card_identity_test.c
 
 # Local GUI-refactor extraction workspace
 /scratch/

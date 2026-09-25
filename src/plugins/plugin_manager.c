@@ -3,6 +3,9 @@
 #include "gui_reload.h"
 #include "gui_lock_screen.h"
 #include "peq.h"
+#include "led_control.h"
+#include "battery.h"
+#include "charge_limiter.h"
 #include "audio.h"
 #include "http_client.h"
 #include "playlist_files.h"
@@ -10,6 +13,7 @@
 #include "plugin_storage.h"
 #include "plugin_internal.h"
 #include "plugin_disabled_list.h"
+#include "../core/screenshot.h"
 #include "db_log.h"
 #include "app_version.h"
 #include "fallback_font.h"
@@ -34,6 +38,7 @@
 #include <stdatomic.h>
 #include <limits.h>
 #include <unistd.h>
+#include <setjmp.h>
 
 #ifdef HOST_BUILD
   #define MUSIC_ROOT_DIR "./music"
@@ -98,6 +103,10 @@ typedef struct {
     char name[96];
     char version[32];
     bool defined;
+    /* Set when a plugin call blew past the hard time budget and was
+     * longjmp-aborted (see plugin_call()). Its lua_State is then left frozen
+     * mid-execution and must never be run again. */
+    bool aborted;
     time_t last_library_refresh;
     /* Source filename (basename, e.g. "Themes.lua"), not just the derived
      * plugin id -- needed by plugin_manager_scan_available() to map a
@@ -110,6 +119,7 @@ typedef struct {
 static plugin_instance_t plugin_instances[PLUGIN_MAX_FILES];
 static int plugin_instance_count = 0;
 static int loading_plugin_slot = -1;
+static lua_State * plugin_led_override_owner = NULL;
 
 /* plugin.storage and plugin.secrets need to know WHICH plugin is calling
  * at arbitrary runtime (not just at plugin.define() time, unlike
@@ -122,6 +132,27 @@ static plugin_instance_t * plugin_instance_for_state(lua_State * L) {
         if (plugin_instances[i].L == L) return &plugin_instances[i];
     }
     return NULL;
+}
+
+/* A call made from inside a plugin coroutine runs on that coroutine's own
+ * lua_State; the owner is always the plugin's main state so a release from
+ * any of its threads matches. */
+static lua_State * plugin_main_state(lua_State * L) {
+    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
+    lua_State * main = lua_tothread(L, -1);
+    lua_pop(L, 1);
+    return main ? main : L;
+}
+
+/* Returns charge-status control to the current user setting only when the
+ * plugin whose main Lua state is L owns the shared override. L must already
+ * be a main state: the error and failed-load paths pass one directly and
+ * never touch a possibly hard-aborted state's registry. */
+static void release_plugin_led_override(lua_State * L) {
+    if (plugin_led_override_owner != L) return;
+    plugin_led_override_owner = NULL;
+    led_control_clear_override();
+    led_control_apply(current_settings.led_indicator_enabled);
 }
 
 /* Shared by every plugin.storage and plugin.secrets binding below --
@@ -359,6 +390,44 @@ static int plugin_settings_list_row_counts[PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE
  *     Shows the same transient toast used elsewhere in the app; duration
  *     defaults to 5000ms and is clamped by validation to 100..30000ms.
  *
+ *   plugin.screenshot() -> true | false, reason
+ *     Starts an asynchronous screenshot of the visible display. A successful
+ *     capture is saved under SD/Screenshots, flashes the display, and fires
+ *     screenshot_saved(path) or screenshot_failed(reason) on the UI thread.
+ *
+ *   plugin.led_available() -> bool
+ *     True when both charge-status LED brightness sysfs nodes exist on this
+ *     board.
+ *
+ *   plugin.led_set(color, on_or_level)
+ *     Sets one color to off, full brightness (true), or integer brightness
+ *     0..100. Setting a color stops its current effect.
+ *
+ *   plugin.led_blink(color, on_ms, off_ms [, level])
+ *     Software blink using a UI-thread LVGL timer. Each interval is clamped
+ *     to 50..60000ms; level defaults to 100 and is clamped to 0..100.
+ *
+ *   plugin.led_breathe(color, period_ms_or_bpm [, level])
+ *     Red at peak level 100 uses the kernel breathing trigger. Other colors
+ *     and partial peaks use software stepping at 25Hz or less. Numeric
+ *     periods 1..600 mean breaths per minute; values above 600 mean period
+ *     milliseconds. Leaving kernel breathing restores trigger=none.
+ *
+ *   plugin.led_get(color) -> { mode, level }
+ *     Reports off/on/blink/breathe/status and the configured level or peak;
+ *     status mode reports the current normal-indicator brightness.
+ *
+ *   plugin.led_status([color])
+ *     Returns one color, or both when omitted/nil, to charge-status mode.
+ *     The other color keeps its plugin mode.
+ *
+ *   plugin.led_release()
+ *     Only the most recent plugin to control an LED owns the shared override.
+ *     Releasing restores charge-status indication when LED Indicator is
+ *     enabled, or turns both LEDs off otherwise. Errors and plugin/UI reloads
+ *     also release the owner. These synchronous calls run on the main UI
+ *     thread.
+ *
  *   plugin.register_stream_media_tile(label, on_open [, icon])
  *     Appended as a real icon-grid tile in gui.c's Stream Media screen
  *     (after the built-in Subsonic tile) -- for plugins that thematically
@@ -456,6 +525,8 @@ static int plugin_settings_list_row_counts[PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE
  *   plugin.is_paused() -> bool
  *   plugin.get_position() -> seconds
  *   plugin.get_duration() -> seconds
+ *   plugin.get_volume() -> 0..100
+ *   plugin.get_battery() -> { level, charging, full, external_power }
  *     Playback control/query, bridged through gui.c so a plugin-driven
  *     change stays in sync with the play/pause icon, volume slider/popup,
  *     and shuffle-aware next/prev stepping the native UI itself uses -- see
@@ -496,14 +567,24 @@ static int plugin_settings_list_row_counts[PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE
  *     that isn't reacting to that event directly.
  *
  *   plugin.on(event, callback)
- *     Subscribes to a playback lifecycle event -- every subscriber fires,
- *     across every loaded plugin (unlike register_list_item(), an event
- *     isn't UI real estate to divide up). Four events:
+ *     Subscribes to a playback or device-state event -- every subscriber
+ *     fires across every loaded plugin (unlike register_list_item(), an event
+ *     isn't UI real estate to divide up). Playback, device, volume, and
+ *     battery events are documented in PLUGINS.md:
  *       "track_started" -- callback(title, artist, album, duration_seconds),
  *         fires whenever a new track begins playing, whatever the cause
  *         (manual tap, next/prev, gapless/crossfade auto-advance, a
  *         plugin's own play_file/play_list, remote control).
  *       "paused" / "resumed" -- callback(), no arguments.
+ *       "volume_changed" -- callback(percent), coalesced to the 500ms UI
+ *         tick and fired only when the applied volume percent changes.
+ *       "battery_changed" -- callback(info), when level/charging/full/
+ *         external_power changes.
+ *       "screenshot_saved" -- callback(path), after a PNG is saved.
+ *       "screenshot_failed" -- callback(reason), if the asynchronous
+ *         capture or save fails.
+ *       "suspending" / "system_resumed" -- callback(), around suspend-to-RAM.
+ *         system_resumed is separate from playback's existing "resumed".
  *       "stopped" -- callback(), no arguments, fires when playback stops
  *         outright (not paused). Does NOT cover "playlist reaches its end
  *         with repeat off" (that path doesn't route through this app's own
@@ -1362,6 +1443,17 @@ static int l_plugin_show_toast(lua_State * L) {
         return luaL_error(L, "plugin.show_toast: duration_ms must be between 100 and 30000");
     gui_plugin_show_toast(msg, (uint32_t) duration_ms);
     return 0;
+}
+
+static int l_plugin_screenshot(lua_State * L) {
+    screenshot_result_t result = screenshot_start();
+    if (result == SCREENSHOT_RESULT_STARTED) {
+        lua_pushboolean(L, true);
+        return 1;
+    }
+    lua_pushboolean(L, false);
+    lua_pushstring(L, screenshot_result_reason(result));
+    return 2;
 }
 
 #ifndef HOST_BUILD
@@ -2243,6 +2335,54 @@ static int l_plugin_get_position(lua_State * L) {
 
 static int l_plugin_get_duration(lua_State * L) {
     lua_pushnumber(L, gui_plugin_get_duration_seconds());
+    return 1;
+}
+
+typedef struct {
+    int level;
+    bool charging;
+    bool full;
+    bool external_power;
+} plugin_battery_info_t;
+
+static plugin_battery_info_t plugin_read_battery_info(void) {
+    plugin_battery_info_t info;
+    int level = battery_get_display_percent(); /* same value the status bar shows */
+    if (level < 0) level = 0;
+    if (level > 100) level = 100;
+    battery_external_power_state_t power_state = battery_get_external_power_state();
+    bool power_disconnected = power_state == BATTERY_EXTERNAL_POWER_DISCONNECTED;
+    bool capped = charge_limiter_is_confirmed_off();
+    info.level = level;
+    info.external_power = power_state == BATTERY_EXTERNAL_POWER_CONNECTED;
+    info.full = !power_disconnected && (battery_is_full() || capped);
+    info.charging = !info.full && !power_disconnected && battery_is_charging();
+    return info;
+}
+
+static void push_battery_info(lua_State * L, const plugin_battery_info_t * info) {
+    lua_newtable(L);
+    lua_pushinteger(L, info->level); lua_setfield(L, -2, "level");
+    lua_pushboolean(L, info->charging); lua_setfield(L, -2, "charging");
+    lua_pushboolean(L, info->full); lua_setfield(L, -2, "full");
+    lua_pushboolean(L, info->external_power); lua_setfield(L, -2, "external_power");
+}
+
+static int current_volume_percent(void) {
+    int percent = (int) (audio_get_volume() * 100.0f + 0.5f);
+    if (percent < 0) return 0;
+    if (percent > 100) return 100;
+    return percent;
+}
+
+static int l_plugin_get_volume(lua_State * L) {
+    lua_pushinteger(L, current_volume_percent());
+    return 1;
+}
+
+static int l_plugin_get_battery(lua_State * L) {
+    plugin_battery_info_t info = plugin_read_battery_info();
+    push_battery_info(L, &info);
     return 1;
 }
 
@@ -3189,11 +3329,11 @@ static int l_plugin_refresh_library(lua_State * L) {
 /* ---- plugin.on(event, callback) -- see plugin_manager.h's own
  * PLUGIN_MAX_EVENT_SUBSCRIBERS comment for the design rationale (multiple
  * plugins can subscribe to the same event, unlike register_list_item()'s
- * "each plugin's row coexists as its own entry" model). Four events, each
- * with its own small subscriber array -- storage kept separate per event
- * (not a single generic dispatch table keyed by string) for the same reason
- * l_plugin_register_list_item() gives each list_id its own array: known,
- * small, fixed set, not something built ahead of actually needing genericity. ---- */
+ * "each plugin's row coexists as its own entry" model). Each event has its
+ * own small subscriber array -- storage kept separate per event (not a
+ * generic dispatch table keyed by string) for the same reason
+ * l_plugin_register_list_item() gives each list_id its own array: this is a
+ * known, fixed set rather than genericity built ahead of needing it. ---- */
 
 typedef enum {
     PLUGIN_EVENT_TRACK_STARTED = 0,
@@ -3202,6 +3342,12 @@ typedef enum {
     PLUGIN_EVENT_STOPPED,
     PLUGIN_EVENT_SCREEN_WOKE,
     PLUGIN_EVENT_QUEUE_EXHAUSTED,
+    PLUGIN_EVENT_VOLUME_CHANGED,
+    PLUGIN_EVENT_BATTERY_CHANGED,
+    PLUGIN_EVENT_SUSPENDING,
+    PLUGIN_EVENT_SYSTEM_RESUMED,
+    PLUGIN_EVENT_SCREENSHOT_SAVED,
+    PLUGIN_EVENT_SCREENSHOT_FAILED,
     PLUGIN_EVENT_COUNT,
 } plugin_event_t;
 
@@ -3212,6 +3358,9 @@ typedef struct {
 
 static plugin_event_subscriber_t plugin_event_subscribers[PLUGIN_EVENT_COUNT][PLUGIN_MAX_EVENT_SUBSCRIBERS];
 static int plugin_event_subscriber_count[PLUGIN_EVENT_COUNT];
+static int plugin_last_volume_percent = -1;
+static bool plugin_battery_snapshot_valid = false;
+static plugin_battery_info_t plugin_last_battery_info;
 
 static int l_plugin_on(lua_State * L) {
     const char * event = luaL_checkstring(L, 1);
@@ -3224,7 +3373,13 @@ static int l_plugin_on(lua_State * L) {
     else if (strcmp(event, "stopped") == 0) idx = PLUGIN_EVENT_STOPPED;
     else if (strcmp(event, "screen_woke") == 0) idx = PLUGIN_EVENT_SCREEN_WOKE;
     else if (strcmp(event, "queue_exhausted") == 0) idx = PLUGIN_EVENT_QUEUE_EXHAUSTED;
-    else return luaL_error(L, "plugin.on: unknown event '%s' (expected \"track_started\", \"paused\", \"resumed\", \"stopped\", \"screen_woke\", or \"queue_exhausted\")", event);
+    else if (strcmp(event, "volume_changed") == 0) idx = PLUGIN_EVENT_VOLUME_CHANGED;
+    else if (strcmp(event, "battery_changed") == 0) idx = PLUGIN_EVENT_BATTERY_CHANGED;
+    else if (strcmp(event, "suspending") == 0) idx = PLUGIN_EVENT_SUSPENDING;
+    else if (strcmp(event, "system_resumed") == 0) idx = PLUGIN_EVENT_SYSTEM_RESUMED;
+    else if (strcmp(event, "screenshot_saved") == 0) idx = PLUGIN_EVENT_SCREENSHOT_SAVED;
+    else if (strcmp(event, "screenshot_failed") == 0) idx = PLUGIN_EVENT_SCREENSHOT_FAILED;
+    else return luaL_error(L, "plugin.on: unknown event '%s'", event);
 
     if (plugin_event_subscriber_count[idx] >= PLUGIN_MAX_EVENT_SUBSCRIBERS) {
         return luaL_error(L, "plugin.on: too many subscribers registered for \"%s\" (max %d)", event,
@@ -3430,8 +3585,122 @@ static int l_plugin_api_version(lua_State * L) {
     return 1;
 }
 
+static led_control_color_t check_led_color(lua_State * L, const char * api) {
+    const char * color = luaL_checkstring(L, 1);
+    if (strcmp(color, "red") == 0) return LED_CONTROL_RED;
+    if (strcmp(color, "blue") == 0) return LED_CONTROL_BLUE;
+    luaL_error(L, "%s: color must be 'red' or 'blue'", api);
+    return LED_CONTROL_RED; /* unreachable -- luaL_error() longjmps */
+}
+
+static int check_led_level(lua_State * L, int arg, int default_level, const char * api) {
+    (void) api;
+    if (lua_gettop(L) < arg || lua_isnil(L, arg)) return default_level;
+    lua_Integer level = luaL_checkinteger(L, arg);
+    if (level < 0) return 0;
+    if (level > 100) return 100;
+    return (int) level;
+}
+
+static int check_led_interval(lua_State * L, int arg, const char * api) {
+    lua_Integer value = luaL_checkinteger(L, arg);
+    if (value < 50) return 50;
+    if (value > 60000) return 60000;
+    (void) api;
+    return (int) value;
+}
+
+static int l_plugin_led_available(lua_State * L) {
+    lua_pushboolean(L, led_control_available());
+    return 1;
+}
+
+static int l_plugin_led_set(lua_State * L) {
+    led_control_color_t color = check_led_color(L, "plugin.led_set");
+    int level;
+    if (lua_type(L, 2) == LUA_TBOOLEAN) {
+        level = lua_toboolean(L, 2) ? 100 : 0;
+    } else if (lua_type(L, 2) == LUA_TNUMBER) {
+        level = check_led_level(L, 2, 0, "plugin.led_set");
+    } else {
+        return luaL_error(L, "plugin.led_set: second argument must be a boolean or integer brightness 0..100");
+    }
+    if (!led_control_available())
+        return luaL_error(L, "plugin.led_set: charge-status LEDs are not available on this board");
+
+    plugin_led_override_owner = plugin_main_state(L);
+    led_control_set_override(color, level);
+    return 0;
+}
+
+static int l_plugin_led_blink(lua_State * L) {
+    led_control_color_t color = check_led_color(L, "plugin.led_blink");
+    int on_ms = check_led_interval(L, 2, "plugin.led_blink");
+    int off_ms = check_led_interval(L, 3, "plugin.led_blink");
+    int level = check_led_level(L, 4, 100, "plugin.led_blink");
+    if (!led_control_available())
+        return luaL_error(L, "plugin.led_blink: charge-status LEDs are not available on this board");
+
+    plugin_led_override_owner = plugin_main_state(L);
+    if (!led_control_blink(color, on_ms, off_ms, level))
+        return luaL_error(L, "plugin.led_blink: could not create an LVGL effect timer");
+    return 0;
+}
+
+static int l_plugin_led_breathe(lua_State * L) {
+    led_control_color_t color = check_led_color(L, "plugin.led_breathe");
+    lua_Integer input = luaL_checkinteger(L, 2);
+    if (input < 1)
+        return luaL_error(L, "plugin.led_breathe: period or breaths per minute must be positive");
+    int period_ms;
+    if (input <= 600) {
+        int bpm = (int) input;
+        period_ms = (60000 + bpm / 2) / bpm;
+    } else {
+        period_ms = input > 120000 ? 120000 : (int) input;
+    }
+    int level = check_led_level(L, 3, 100, "plugin.led_breathe");
+    if (!led_control_available())
+        return luaL_error(L, "plugin.led_breathe: charge-status LEDs are not available on this board");
+
+    plugin_led_override_owner = plugin_main_state(L);
+    if (!led_control_breathe(color, period_ms, level))
+        return luaL_error(L, "plugin.led_breathe: could not create an LVGL effect timer");
+    return 0;
+}
+
+static int l_plugin_led_get(lua_State * L) {
+    led_control_color_t color = check_led_color(L, "plugin.led_get");
+    static const char * const modes[] = { "off", "on", "blink", "breathe", "status" };
+    led_control_mode_t mode = led_control_get_mode(color);
+    int level = led_control_get_level(color);
+    if (mode < LED_CONTROL_MODE_OFF || mode > LED_CONTROL_MODE_STATUS) mode = LED_CONTROL_MODE_OFF;
+    lua_newtable(L);
+    lua_pushstring(L, modes[mode]); lua_setfield(L, -2, "mode");
+    lua_pushinteger(L, level); lua_setfield(L, -2, "level");
+    return 1;
+}
+
+static int l_plugin_led_status(lua_State * L) {
+    bool both = lua_gettop(L) == 0 || lua_isnil(L, 1);
+    led_control_color_t color = LED_CONTROL_RED;
+    if (!both) color = check_led_color(L, "plugin.led_status");
+    if (!led_control_available())
+        return luaL_error(L, "plugin.led_status: charge-status LEDs are not available on this board");
+
+    plugin_led_override_owner = plugin_main_state(L);
+    if (both) led_control_set_all_status();
+    else led_control_set_status(color);
+    return 0;
+}
+
+static int l_plugin_led_release(lua_State * L) {
+    release_plugin_led_override(plugin_main_state(L));
+    return 0;
+}
+
 static const char * const plugin_capabilities[] = {
-    "ui.list", "ui.settings", "ui.row_width", "ui.text_input", "ui.toast", "ui.theme",
+    "ui.list", "ui.settings", "ui.row_width", "ui.text_input", "ui.toast", "ui.screenshot", "ui.theme",
     "filesystem.sd", "playback.control", "playback.state", "playback.events",
     "library.artist_albums", "library.paged", "network.http.sync", "network.http.async",
     "network.http.download", "filesystem.mkdir", "crypto.md5", "audio.peq", "data.json",
@@ -3615,6 +3884,13 @@ static const luaL_Reg plugin_funcs[] = {
     { "api_version",               l_plugin_api_version },
     { "has_capability",            l_plugin_has_capability },
     { "get_app_info",              l_plugin_get_app_info },
+    { "led_available",             l_plugin_led_available },
+    { "led_set",                   l_plugin_led_set },
+    { "led_blink",                 l_plugin_led_blink },
+    { "led_breathe",               l_plugin_led_breathe },
+    { "led_get",                   l_plugin_led_get },
+    { "led_status",                l_plugin_led_status },
+    { "led_release",               l_plugin_led_release },
     { "register_list_item",        l_plugin_register_list_item },
     { "register_stream_media_tile", l_plugin_register_stream_media_tile },
     { "register_home_tile",        l_plugin_register_home_tile },
@@ -3636,6 +3912,7 @@ static const luaL_Reg plugin_funcs[] = {
     { "play_remote",               l_plugin_play_remote },
     { "queue_remote_list",         l_plugin_queue_remote_list },
     { "show_toast",                l_plugin_show_toast },
+    { "screenshot",                l_plugin_screenshot },
     { "set_icon",                  l_plugin_set_icon },
     { "set_background_color",      l_plugin_set_background_color },
     { "set_text_color",            l_plugin_set_text_color },
@@ -3659,6 +3936,8 @@ static const luaL_Reg plugin_funcs[] = {
     { "prev_track",                l_plugin_prev_track },
     { "seek",                      l_plugin_seek },
     { "set_volume",                l_plugin_set_volume },
+    { "get_volume",                l_plugin_get_volume },
+    { "get_battery",               l_plugin_get_battery },
     { "is_playing",                l_plugin_is_playing },
     { "is_paused",                 l_plugin_is_paused },
     { "get_position",              l_plugin_get_position },
@@ -3709,8 +3988,16 @@ static const luaL_Reg plugin_secrets_funcs[] = {
 };
 
 #define PLUGIN_CALL_MAX_MS 2000
+/* One second of grace past the soft budget. A well-behaved plugin sees the
+ * catchable luaL_error at PLUGIN_CALL_MAX_MS and unwinds; a plugin that keeps
+ * running past this (e.g. by wrapping its loop body in its own pcall() and
+ * swallowing that error) is hard-aborted via longjmp so it cannot pin the UI
+ * thread indefinitely. */
+#define PLUGIN_CALL_HARD_MS 3000
 
 static struct timespec plugin_call_deadline_start;
+static jmp_buf plugin_call_abort_jmp;
+static volatile int plugin_call_abort_armed = 0;
 
 /* Adds time spent executing inside native C functions to the deadline start. */
 static void plugin_call_exclude_native_elapsed(const struct timespec * started) {
@@ -3908,6 +4195,16 @@ static void plugin_call_timeout_hook(lua_State * L, lua_Debug * ar) {
     clock_gettime(CLOCK_MONOTONIC, &now);
     long elapsed_ms = (now.tv_sec - plugin_call_deadline_start.tv_sec) * 1000L +
                       (now.tv_nsec - plugin_call_deadline_start.tv_nsec) / 1000000L;
+    if (elapsed_ms > PLUGIN_CALL_HARD_MS && plugin_call_abort_armed) {
+        /* Jump straight out to plugin_call(), past any pcall the plugin itself
+         * installed. The catchable luaL_error below is not enough on its own:
+         * a plugin can wrap its work in pcall() and swallow it, so without this
+         * a runaway loop would keep the UI thread busy forever. The VM is at an
+         * instruction boundary here, so its stack is consistent for the
+         * cleanup plugin_call() does after catching this. */
+        plugin_call_abort_armed = 0;
+        longjmp(plugin_call_abort_jmp, 1);
+    }
     if (elapsed_ms > PLUGIN_CALL_MAX_MS) {
         luaL_error(L, "plugin call exceeded %dms time budget -- aborted to keep the UI responsive", PLUGIN_CALL_MAX_MS);
     }
@@ -3915,12 +4212,49 @@ static void plugin_call_timeout_hook(lua_State * L, lua_Debug * ar) {
 
 /* Executes a Lua protected call with a wall-clock timeout enforced by an
  * instruction count hook. Time spent in native C functions is added to the
- * deadline to avoid penalizing I/O. */
+ * deadline to avoid penalizing I/O. A plugin that blows past the hard budget
+ * (PLUGIN_CALL_HARD_MS) is longjmp-aborted from the hook, bypassing any pcall
+ * it installed, and permanently disabled -- its lua_State is left frozen and
+ * never run again. */
 static int plugin_call(lua_State * L, int nargs, int nresults, int errfunc) {
+    plugin_instance_t * inst = plugin_instance_for_state(L);
+    if (inst && inst->aborted) {
+        lua_pushliteral(L, "plugin disabled after exceeding its time budget");
+        return LUA_ERRRUN;
+    }
+
+    /* Save/restore so a nested plugin_call (should one ever exist) can't lose
+     * the outer call's abort target or deadline. */
+    struct timespec saved_deadline = plugin_call_deadline_start;
+    int saved_armed = plugin_call_abort_armed;
+    jmp_buf saved_jmp;
+    memcpy(saved_jmp, plugin_call_abort_jmp, sizeof(jmp_buf));
+
     clock_gettime(CLOCK_MONOTONIC, &plugin_call_deadline_start);
     lua_sethook(L, plugin_call_timeout_hook, LUA_MASKCOUNT, 10000);
-    int result = lua_pcall(L, nargs, nresults, errfunc);
+
+    int result;
+    if (setjmp(plugin_call_abort_jmp) == 0) {
+        plugin_call_abort_armed = 1;
+        result = lua_pcall(L, nargs, nresults, errfunc);
+    } else {
+        /* Hard-aborted from the hook. L is at a VM instruction boundary, so its
+         * stack pointers are consistent: reset the stack and leave a readable
+         * error for the caller's usual lua_tostring()/lua_pop(). Mark the
+         * plugin dead and never call back into this state -- it is deliberately
+         * not lua_close()d (a half-unwound VM), just frozen and leaked, the
+         * same lifetime every other plugin state already has in this file. */
+        if (inst) inst->aborted = true;
+        lua_settop(L, 0);
+        lua_pushliteral(L, "plugin call hard-aborted after exceeding its time budget");
+        result = LUA_ERRRUN;
+    }
+
     lua_sethook(L, NULL, 0, 0); /* stop checking between plugin calls -- no cost while idle */
+    plugin_call_abort_armed = saved_armed;
+    memcpy(plugin_call_abort_jmp, saved_jmp, sizeof(jmp_buf));
+    plugin_call_deadline_start = saved_deadline;
+    if (result != LUA_OK) release_plugin_led_override(L);
     return result;
 }
 
@@ -3928,7 +4262,11 @@ static int plugin_call(lua_State * L, int nargs, int nresults, int errfunc) {
 static void discard_failed_plugin_load(plugin_instance_t * inst, lua_State * L,
                                         bool prev_curve_active, const uint8_t * prev_curve) {
     audio_stage_custom_hw_volume_curve(prev_curve_active, prev_curve_active ? prev_curve : NULL);
-    lua_close(L);
+    release_plugin_led_override(L);
+    /* A hard-aborted state (load-time top-level code ran past the budget) was
+     * longjmp'd out of mid-execution; closing it could run finalizers on a
+     * half-unwound VM, so leave it frozen and leaked instead. */
+    if (!inst->aborted) lua_close(L);
     memset(inst, 0, sizeof(*inst));
     loading_plugin_slot = -1;
 }
@@ -4057,6 +4395,7 @@ static char (*scan_plugin_dir_sorted_names(char dir_path_out[600], int * out_cou
 }
 
 void plugin_manager_init(void) {
+    plugin_last_volume_percent = current_volume_percent();
     plugin_disabled_list_load();
 
     char dir_path[600];
@@ -4237,6 +4576,9 @@ void plugin_manager_deinit(void) {
     gui_plugin_reset_home_layout();
     gui_plugin_reset_launcher_layout();
     gui_plugin_reset_player_layout();
+    plugin_led_override_owner = NULL;
+    led_control_clear_override();
+    led_control_apply(current_settings.led_indicator_enabled);
     /* Same "in-process plugin config must not outlive the plugin" category
      * as the two resets above -- without this, disabling/removing a Gain
      * Mode-style plugin followed by a UI reload left its hardware volume
@@ -4728,6 +5070,80 @@ void plugin_manager_notify_queue_exhausted(int direction) {
             lua_pop(sub->L, 1);
         }
     }
+}
+
+void plugin_manager_notify_volume_changed(int percent) {
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    if (percent == plugin_last_volume_percent) return;
+    plugin_last_volume_percent = percent;
+
+    for (int i = 0; i < plugin_event_subscriber_count[PLUGIN_EVENT_VOLUME_CHANGED]; i++) {
+        plugin_event_subscriber_t * sub = &plugin_event_subscribers[PLUGIN_EVENT_VOLUME_CHANGED][i];
+        lua_rawgeti(sub->L, LUA_REGISTRYINDEX, sub->ref);
+        lua_pushinteger(sub->L, percent);
+        if (plugin_call(sub->L, 1, 0, 0) != LUA_OK) {
+            const char * err = lua_tostring(sub->L, -1);
+            fprintf(stderr, "[plugins] volume_changed handler error: %s\n", err ? err : "unknown error");
+            lua_pop(sub->L, 1);
+        }
+    }
+}
+
+static bool battery_info_equal(const plugin_battery_info_t * a, const plugin_battery_info_t * b) {
+    return a->level == b->level && a->charging == b->charging && a->full == b->full &&
+           a->external_power == b->external_power;
+}
+
+void plugin_manager_poll_battery(void) {
+    plugin_battery_info_t current = plugin_read_battery_info();
+    if (!plugin_battery_snapshot_valid) {
+        plugin_last_battery_info = current;
+        plugin_battery_snapshot_valid = true;
+        return;
+    }
+    if (battery_info_equal(&current, &plugin_last_battery_info)) return;
+    plugin_last_battery_info = current;
+
+    for (int i = 0; i < plugin_event_subscriber_count[PLUGIN_EVENT_BATTERY_CHANGED]; i++) {
+        plugin_event_subscriber_t * sub = &plugin_event_subscribers[PLUGIN_EVENT_BATTERY_CHANGED][i];
+        lua_rawgeti(sub->L, LUA_REGISTRYINDEX, sub->ref);
+        push_battery_info(sub->L, &current);
+        if (plugin_call(sub->L, 1, 0, 0) != LUA_OK) {
+            const char * err = lua_tostring(sub->L, -1);
+            fprintf(stderr, "[plugins] battery_changed handler error: %s\n", err ? err : "unknown error");
+            lua_pop(sub->L, 1);
+        }
+    }
+}
+
+void plugin_manager_notify_suspending(void) {
+    notify_event_no_args(PLUGIN_EVENT_SUSPENDING, "suspending");
+}
+
+void plugin_manager_notify_system_resumed(void) {
+    notify_event_no_args(PLUGIN_EVENT_SYSTEM_RESUMED, "system_resumed");
+}
+
+static void notify_event_string(plugin_event_t idx, const char * kind, const char * value) {
+    for (int i = 0; i < plugin_event_subscriber_count[idx]; i++) {
+        plugin_event_subscriber_t * sub = &plugin_event_subscribers[idx][i];
+        lua_rawgeti(sub->L, LUA_REGISTRYINDEX, sub->ref);
+        lua_pushstring(sub->L, value ? value : "");
+        if (plugin_call(sub->L, 1, 0, 0) != LUA_OK) {
+            const char * err = lua_tostring(sub->L, -1);
+            fprintf(stderr, "[plugins] %s handler error: %s\n", kind, err ? err : "unknown error");
+            lua_pop(sub->L, 1);
+        }
+    }
+}
+
+void plugin_manager_notify_screenshot_saved(const char * path) {
+    notify_event_string(PLUGIN_EVENT_SCREENSHOT_SAVED, "screenshot_saved", path);
+}
+
+void plugin_manager_notify_screenshot_failed(const char * reason) {
+    notify_event_string(PLUGIN_EVENT_SCREENSHOT_FAILED, "screenshot_failed", reason);
 }
 
 void plugin_manager_interval_fired(int slot) {
