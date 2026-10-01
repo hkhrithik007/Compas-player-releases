@@ -94,6 +94,7 @@
 #include "gui_player.h"
 #include "gui_lyrics.h"
 #include "gui_text_input.h"
+#include "gui_text_view.h"
 #include "gui_subsonic.h"
 #include "gui_library.h"
 #include "gui_network.h"
@@ -103,6 +104,7 @@
 #include "gui_plugins.h"
 #include "plugin_manager.h"
 #include "gui_plugin_manage.h"
+#include "gui_plugin_store.h"
 #include "gui_lock_screen.h"
 #include "db_log.h"
 
@@ -162,6 +164,7 @@ void gui_soft_reload(void) {
     gui_lyrics_teardown();
     reload_diag("gui_text_input_teardown: before");
     gui_text_input_teardown();
+    gui_text_view_teardown();
     reload_diag("gui_subsonic_teardown: before");
     gui_subsonic_teardown();
     reload_diag("gui_library_teardown: before");
@@ -172,6 +175,8 @@ void gui_soft_reload(void) {
     gui_settings_teardown();
     reload_diag("gui_plugin_manage_teardown: before");
     gui_plugin_manage_teardown();
+    reload_diag("gui_plugin_store_teardown: before");
+    gui_plugin_store_teardown();
     reload_diag("gui_lock_screen_teardown: before");
     gui_lock_screen_teardown();
     reload_diag("gui_books_teardown: before");
@@ -205,6 +210,7 @@ void gui_soft_reload(void) {
     gui_lyrics_init();
     reload_diag("gui_text_input_init: before");
     gui_text_input_init();
+    gui_text_view_init();
     reload_diag("gui_stream_media_rebuild: before");
     gui_stream_media_rebuild();
     reload_diag("gui_subsonic_init: before");
@@ -217,6 +223,8 @@ void gui_soft_reload(void) {
     gui_settings_init();
     reload_diag("gui_plugin_manage_init: before");
     gui_plugin_manage_init();
+    reload_diag("gui_plugin_store_init: before");
+    gui_plugin_store_init();
     reload_diag("gui_lock_screen_init: before");
     gui_lock_screen_init();
     reload_diag("gui_books_init: before");

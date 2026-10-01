@@ -3,6 +3,7 @@
 #include "subprocess.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
 #include <stdio.h>
@@ -52,16 +53,19 @@ bool firmware_update_scan(char * out_path, size_t out_size) {
 
 void firmware_update_enter_recovery(void) {
     char * bootmode_argv[] = { "/usr/bin/bootmode.sh", "Recovery", NULL };
-    subprocess_run(bootmode_argv, NULL, 0);
+    int exit_code = -1;
+    if (!subprocess_run_checked(bootmode_argv, NULL, 0, 15000, &exit_code) || exit_code != 0) {
+        fprintf(stderr, "firmware_update: recovery boot flag failed (exit %d)\n", exit_code);
+        return;
+    }
 
 #ifndef HOST_BUILD
     sync();
-    /* Reboot directly while still inside the player process. Executing the
-     * reboot utility first can return a clean child exit to our supervising
-     * bootloader, whose deliberate clean-exit policy is to power off. */
+    /* A successful reboot does not return. On failure keep the player alive:
+     * replacing it with the reboot utility can trigger the supervisor's
+     * clean-exit poweroff, and waiting forever hides the failure from users. */
     reboot(RB_AUTOBOOT);
-    execl("/sbin/reboot", "reboot", (char *) NULL);
-    for (;;) pause();
+    fprintf(stderr, "firmware_update: reboot failed: %s\n", strerror(errno));
 #endif
 }
 
@@ -91,8 +95,15 @@ void firmware_update_check_boot_combo(void) {
     if (!find_input_device_by_name("md-gpio-keys", gpio_keys_path, sizeof(gpio_keys_path))) return;
     if (!find_input_device_by_name("jz adc keyboard", adc_keyboard_path, sizeof(adc_keyboard_path))) return;
 
+#if defined(BOARD_R3II_2025)
+    /* No volume key here (the knob only pulses); the stock combo is Play/Pause
+     * + Power, and Play/Pause lives on "jz adc keyboard". */
+    #define FIRMWARE_UPDATE_COMBO_KEY KEY_PLAYPAUSE
+#else
+    #define FIRMWARE_UPDATE_COMBO_KEY KEY_VOLUMEUP
+#endif
     if (!device_reports_key_down(gpio_keys_path, KEY_POWER)) return;
-    if (!device_reports_key_down(adc_keyboard_path, KEY_VOLUMEUP)) return;
+    if (!device_reports_key_down(adc_keyboard_path, FIRMWARE_UPDATE_COMBO_KEY)) return;
 
     char upt_path[512];
     if (!firmware_update_scan(upt_path, sizeof(upt_path))) return;

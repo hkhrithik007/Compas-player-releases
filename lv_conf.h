@@ -1,6 +1,8 @@
 #ifndef LV_CONF_H
 #define LV_CONF_H
 
+#include <stdint.h>
+
 /* Set to 1 to enable configuration content */
 #define LV_CONF_SKIP 0
 
@@ -26,8 +28,20 @@
  * snappier. Paired with lv_indev_scroll.c's own ELASTIC_SLOWNESS_FACTOR
  * (hand-tuned directly in that vendored file -- LVGL exposes no config
  * override for it) for the "way overshot" half of the same bug report. */
-#define SCROLL_ANIM_TIME_MIN 100
-#define SCROLL_ANIM_TIME_MAX 200
+uint32_t gui_anim_ms(uint32_t base_ms); /* src/ui/gui_theme.c */
+#define SCROLL_ANIM_TIME_MIN gui_anim_ms(100) /* Settings > Display > Animation Speed */
+#define SCROLL_ANIM_TIME_MAX gui_anim_ms(200)
+
+/* Stock switches, sliders, rollers, and dropdowns still wear LVGL's default
+ * theme, which grows a pressed control and fades its state colors over
+ * 80 ms. On this software renderer that reads as a late response to the
+ * touch, so pressed and checked states apply on the same frame. */
+#define LV_THEME_DEFAULT_GROW 0
+#define LV_THEME_DEFAULT_TRANSITION_TIME 0
+
+/* The accent picker's hue bar is one seven-stop gradient (red, yellow,
+ * green, cyan, blue, magenta, red). LVGL's default allows two stops. */
+#define LV_GRADIENT_MAX_STOPS 8
 
 /* Memory management: Use standard C library functions */
 #define LV_USE_STDLIB_MALLOC  LV_STDLIB_CLIB
@@ -40,7 +54,9 @@
                                   * own clock/volume/battery faces), so they
                                   * still fit their 84px slot under the icon
                                   * regardless of the Settings > Font Size tier */
+#define LV_FONT_MONTSERRAT_14 1 /* R3II 2025 scaled Small/Medium tiers */
 #define LV_FONT_MONTSERRAT_16 1
+#define LV_FONT_MONTSERRAT_18 1 /* R3II 2025 scaled Medium tier */
 #define LV_FONT_MONTSERRAT_20 1 /* status bar text, 16*1.25 -- see build_status_bar() */
 #define LV_FONT_MONTSERRAT_22 1 /* touch_list rows (Artists/Albums/Songs/...) -- see LIST_ROW_FONT */
 #define LV_FONT_MONTSERRAT_28 1
@@ -182,6 +198,15 @@
  * bitmaps instead (see gui.c's screen_transition_slide()) turns "N frames x
  * 2 full re-renders" into "2 renders + N cheap bitmap blits". */
 #define LV_USE_SNAPSHOT 1
+
+/* Player layouts: named widgets (lv_obj_set_name / lv_obj_find_by_name) let
+ * the C binder wire up a layout by role, and LV_USE_XML enables the XML
+ * engine vendored under third_party/lv_xml (LVGL 9.5 dropped it; see
+ * docs/PLAYER_LAYOUTS.md). The vendored sources read this macro themselves,
+ * LVGL 9.5's own headers ignore it. The observer (subjects) is on by
+ * default in 9.5; the XML engine requires it. */
+#define LV_USE_OBJ_NAME 1
+#define LV_USE_XML 1
 
 /* Platform-specific driver settings */
 #ifdef HOST_BUILD

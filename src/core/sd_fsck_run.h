@@ -1,17 +1,9 @@
 #ifndef SD_FSCK_RUN_H
 #define SD_FSCK_RUN_H
 
-#include <stdbool.h>
+#include "sd_fsck.h"
 
-/* Posted for the UI thread. show_error_toast() is not safe before the
- * notification widgets exist, and it is not safe from the repair thread. */
-typedef enum {
-    SD_REPAIR_NOTE_NONE = 0,
-    SD_REPAIR_NOTE_STARTED,
-    SD_REPAIR_NOTE_REPAIRED,
-    SD_REPAIR_NOTE_STILL_READONLY,
-    SD_REPAIR_NOTE_FAILED,
-} sd_repair_note_t;
+#include <stdbool.h>
 
 typedef struct {
     bool started;           /* card was unmounted and a check is running */
@@ -38,8 +30,16 @@ void sd_repair_complete(bool mounted, bool readonly);
  * a background thread. release_handles may close library files if the
  * first unmount is busy; it may be NULL. A failed unmount with no release
  * callback is not remembered, so a later call can close files and retry.
- * One remembered attempt per card, whether it repairs the filesystem or not. */
+ * One remembered attempt per card, whether it repairs the filesystem or not.
+ * A skipped read-only check warns the user. A skipped writable check triggered
+ * only by the FAT dirty flag is diagnostic: it stays mounted and unchanged,
+ * and no corruption warning is posted. */
 sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void));
+
+/* Same as sd_readonly_repair_kick(), and also checks a writable FAT card
+ * the kernel reported as not safely removed. The kernel log is read on
+ * each call; each FAT card insertion is one remembered attempt. */
+sd_repair_kick_result_t sd_card_repair_kick(void (* release_handles)(void));
 
 sd_repair_note_t sd_repair_take_note(void);
 

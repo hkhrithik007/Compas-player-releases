@@ -53,8 +53,16 @@ void favorite_icon_event_cb(lv_event_t * e);
 int gui_player_get_playlist_count(void);
 int gui_player_get_playlist_index(void);
 bool gui_player_has_active_track(void);
+/* Defer visual refresh work while the lyrics pane is moving. */
+bool gui_player_lyrics_animation_in_progress(void);
 const char * gui_player_get_current_track_path(void);
 const char * gui_player_get_track_path_at(int index);
+/* Resolve Subsonic stream identity by exact URL after validating the current
+ * playlist slot; this remains valid when queue edits move stream entries. */
+bool gui_player_get_subsonic_track_identity(int track_index, const char * path,
+                                            char * title, size_t title_size,
+                                            char * artist, size_t artist_size,
+                                            char * album, size_t album_size);
 int gui_player_get_queued_count(void);
 const char * gui_player_get_queued_path_at(int offset);
 void gui_player_queue_add(const char * path);
@@ -69,6 +77,14 @@ bool gui_player_queue_snapshot(int ** order, int * count, int * current, uint64_
 void gui_player_sync_remote_queue(void);
 bool gui_player_remote_queue_remove(int offset, uint64_t revision);
 bool gui_player_remote_queue_clear(uint64_t revision);
+/* Remote Control Up Next edits by offset (current track excluded); each
+ * returns false and changes nothing when the revision is stale. */
+bool gui_player_remote_queue_move(int from_offset, int to_offset, uint64_t revision);
+bool gui_player_remote_queue_play(int offset, uint64_t revision);
+/* Plays a file with its folder as the queue, like a Files tap. */
+bool gui_player_play_folder_track(const char * track_path);
+/* Reloads the now-playing heart after Remote Control changed a favorite. */
+void gui_player_refresh_favorite(void);
 bool gui_player_queue_edit(uint64_t revision, int from, int to);
 bool gui_player_queue_select(uint64_t revision, int index);
 void gui_player_queue_clear_all(void);
@@ -86,6 +102,8 @@ void gui_player_queue_flush(void);
 void gui_player_play_at(int index);
 void gui_player_play_at_from(int index, double start_seconds);
 void gui_player_step_manual(int direction);
+/* Time skipping applies only to manual transport within this directory. */
+void gui_player_set_transport_skip(const char * directory, int seconds);
 /* Applies `step_count` accumulated forward-seek steps from a held physical
  * Next button (hw_buttons_consume_next_seek_steps()) -- is_first resets the
  * seek target from the live playback position, same as a touch hold's first
@@ -152,6 +170,8 @@ extern double deferred_resume_position;
 bool build_saved_resume_playlist(char *** out_playlist, int * out_count, int * out_index);
 bool build_sd_card_resume_playlist(char *** out_playlist, int * out_count, int * out_index, double * out_position);
 bool gui_player_restore_sd_queue(bool is_boot);
+/* Effective boot resume mode: Car Mode overrides the normal resume setting. */
+int gui_player_boot_resume_mode(void);
 void gui_player_notify_sd_unmounted_immediate(void);
 void gui_player_notify_sd_mounted(void);
 void gui_player_handle_sd_unmount(void);
@@ -161,6 +181,10 @@ void prepare_deferred_resume(int index, double start_seconds);
 
 int32_t gui_player_get_volume_percent(void);
 void gui_player_set_volume_percent(int32_t percent);
+/* Remember volume changes in the active mode without changing audio output. */
+void gui_player_remember_volume_percent(int32_t percent);
+/* Switch volume profiles and persist Car Mode's enabled state. */
+void gui_player_set_car_mode_enabled(bool enabled);
 bool gui_player_volume_is_being_adjusted(void);
 const char * gui_player_get_now_playing_title(void);
 const char * gui_player_get_now_playing_folder(void);

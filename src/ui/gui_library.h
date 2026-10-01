@@ -26,6 +26,7 @@ lv_obj_t * gui_library_get_recently_added_screen(void);
 lv_obj_t * gui_library_get_artists_screen(void);
 lv_obj_t * gui_library_get_albums_screen(void);
 lv_obj_t * gui_library_get_album_artist_screen(void);
+lv_obj_t * gui_library_get_genres_screen(void);
 lv_obj_t * gui_library_get_group_songs_screen(void);
 lv_obj_t * gui_library_get_playlists_screen(void);
 
@@ -40,6 +41,7 @@ void gui_library_suspend_boot_prompt(void);
  * reload can call gui_library_init() again from a clean slate. */
 void gui_library_teardown(void);
 void gui_library_refresh_music_screen(void);
+void gui_library_set_artist_images_enabled(bool enabled);
 
 void start_library_rescan(void);
 void start_library_auto_rescan(void);
@@ -79,6 +81,10 @@ void gui_library_poll_playlists(void);
 void gui_library_poll_track_probes(void);
 void on_cue_file_selected(const char * cue_path);
 void show_artist_albums(const char * name, metadata_db_group_kind_t kind);
+/* Opens the local artist or album group containing `path`, if the path is
+ * present in the indexed library. Returns false for streams and unindexed
+ * tracks. Album identity is the exact (album, album_artist) pair. */
+bool gui_library_open_now_playing_group(const char * path, bool album);
 void refresh_library_screens_after_rescan(void);
 
 void poll_az_index_drag(lv_timer_t * timer);
@@ -107,6 +113,9 @@ void gui_library_resume_fast_timers(void);
 void gui_library_reset_drag_state(void);
 
 bool gui_library_has_background_work(void);
+/* Experimental (Developer Options): let the cover warmer keep reading already
+ * generated thumbnails while audio plays. */
+void gui_library_set_covers_during_playback(bool enabled);
 /* True only while a modal library operation owns navigation. Optional
  * workers such as album-art warming remain background work for shutdown
  * coordination, but must not disable the drawer or screen gestures. */

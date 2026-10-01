@@ -9,6 +9,13 @@
 #define HTTP_MAX_HEADERS 32
 #define HTTP_HEADER_NAME_MAX 64
 #define HTTP_HEADER_VALUE_MAX 768
+/* A long bearer token (an OAuth JWT can reach about 2 KiB) does not fit a
+ * header slot. Raising HTTP_HEADER_VALUE_MAX instead would grow every
+ * request and response (32 slots each) to about 84 KB, and a worker holds
+ * two requests and a response on a thread stack that is 128 KiB by default
+ * on musl. One request can carry a single longer value instead; see
+ * http_request_t.long_header_value. */
+#define HTTP_LONG_HEADER_VALUE_MAX 4096
 
 #define HTTP_ERR_NONE ""
 #define HTTP_ERR_CANCELLED "cancelled"
@@ -66,6 +73,12 @@ typedef struct {
     uint32_t total_timeout_ms;
     size_t max_response_bytes;
     int redirect_limit;
+    /* One header whose value does not fit a slot (see
+     * HTTP_LONG_HEADER_VALUE_MAX): borrowed, NUL-terminated, shorter than
+     * that bound; NULL when unused. It follows the same validation and
+     * cross-origin redirect stripping as headers[]. */
+    char long_header_name[HTTP_HEADER_NAME_MAX];
+    const char * long_header_value;
 } http_request_t;
 
 typedef struct {
@@ -118,5 +131,16 @@ bool http_get_to_file_cancelable(const char * url, bool verify_tls, const char *
                                   http_progress_cb_t progress_cb, void * progress_user_data,
                                   uint32_t connect_timeout_ms, uint32_t read_timeout_ms,
                                   http_cancel_token_t * cancel);
+
+/* Like http_get_to_file_cancelable(), but follows up to max_redirects
+ * absolute http(s) redirects (Location values up to 2047 bytes, as signed
+ * storage URLs need), refuses an https -> http downgrade while verify_tls
+ * is set, and writes only the final response body, bounded by
+ * max_body_size (0 for the default 2 GiB cap). *out_status, when non-NULL,
+ * receives the final HTTP status. The file is removed on any failure. */
+bool http_get_to_file_redirects(const char * url, bool verify_tls, const char * dest_path, size_t max_body_size,
+                                http_progress_cb_t progress_cb, void * progress_user_data,
+                                uint32_t connect_timeout_ms, uint32_t read_timeout_ms,
+                                http_cancel_token_t * cancel, int max_redirects, int * out_status);
 
 #endif /* HTTP_CLIENT_H */
