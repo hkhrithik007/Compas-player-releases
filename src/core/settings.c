@@ -4,6 +4,7 @@ player_settings_t current_settings;
 #include "subprocess.h"
 #include "subsonic_saved_servers.h"
 #include "storage_paths.h"
+#include "utf8_util.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -35,6 +36,36 @@ const int SCREEN_TIMEOUT_STEPS[SCREEN_TIMEOUT_STEP_COUNT] = { 15, 30, 60, 120, 3
 const int SCREEN_DIM_DELAY_STEPS[SCREEN_DIM_DELAY_STEP_COUNT] = { 5, 10, 15, 30, 60, 120, 300 };
 const int IDLE_SHUTDOWN_STEPS[IDLE_SHUTDOWN_STEP_COUNT] = { 10, 15, 30, 60, 120 };
 const int SLEEP_TIMER_STEPS[SLEEP_TIMER_STEP_COUNT] = { 5, 10, 15, 20, 30, 45, 60, 90, 120, 180 };
+
+bool settings_validate_subsonic_download_subfolder(const char *value, char *out, size_t out_size) {
+    if (!value || !out || out_size == 0) return false;
+    size_t length = strlen(value);
+    if (length >= out_size) return false;
+    if (length == 0) { out[0] = '\0'; return true; }
+
+    char valid_utf8[SETTINGS_SUBSONIC_DOWNLOAD_SUBFOLDER_MAX];
+    utf8_truncate_safe_bounded(valid_utf8, sizeof(valid_utf8), value, length);
+    if (strcmp(valid_utf8, value) != 0) return false;
+
+    size_t component_length = 0;
+    bool component_start = true;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)value[i];
+        if (c == '/') {
+            if (component_length == 0) return false;
+            component_length = 0;
+            component_start = true;
+            continue;
+        }
+        if (c == '\\' || (c < 0x80 && strchr(":*?\"<>|", c)) || c < 0x20 || c == 0x7F ||
+            (component_start && c == '.')) return false;
+        component_start = false;
+        if (++component_length > 255) return false;
+    }
+    if (component_length == 0) return false;
+    memcpy(out, value, length + 1);
+    return true;
+}
 
 /* Snap hand-edited and legacy values onto the same presets used by the UI. */
 static int nearest_step(int value, const int * steps, int count) {
@@ -85,16 +116,22 @@ static void set_defaults(player_settings_t * out) {
     out->resume_mode = 0;
     out->play_pause_button_mode = 0;
     out->accent_color = 0x2196F3; /* matches the app's existing default blue */
+    out->accent_dynamic = false;
     out->crossfade_enabled = false;
     out->gapless_enabled = true; /* on by default -- see settings.h */
     out->replaygain_mode = 1; /* Per Track -- preserves the old replaygain_enabled=true default */
+    out->animation_scale = 100;
     out->car_mode_enabled = false;
+    out->car_mode_autoresume_enabled = true;
     out->inline_remote_enabled = true;
     out->lyrics_enabled = true;
     out->subsonic_url[0] = '\0';
     out->subsonic_username[0] = '\0';
     out->subsonic_password[0] = '\0';
     out->subsonic_verify_tls = true;
+    out->subsonic_stream_quality = 0;
+    out->subsonic_download_subfolder[0] = '\0';
+    out->subsonic_download_layout = 0;
     memset(out->subsonic_saved, 0, sizeof(out->subsonic_saved));
     out->subsonic_saved_count = 0;
     out->bt_volume_sync_enabled = true;
@@ -115,12 +152,16 @@ static void set_defaults(player_settings_t * out) {
     out->screen_dimming_enabled = true;
     out->screen_dim_delay_seconds = 10;
     out->hide_player_topbar = false;
+    out->screen_upside_down = false;
     out->led_indicator_enabled = true;
     out->db_logging_enabled = false; /* opt-in developer diagnostic, off by default */
     out->screenshot_combo_enabled = false;
+    out->dev_bt_dac_all_codecs = false;
+    out->dev_covers_during_playback = false;
     out->charge_limiter_enabled = false; /* opt-in -- caps max charge voltage to 4.2V, a real behavior change the user should choose, not a default surprise */
     out->safe_charging_enabled = false; /* off means leave the PMIC charge-current setting untouched */
     out->show_battery_percent = true; /* on by default -- matches every previous version's always-on behavior */
+    out->show_artist_images = true;
     /* Defaults on: a device left screen-off with idle_shutdown_enabled=false
      * sits at full power indefinitely. Suspend-to-RAM (not a full poweroff)
      * avoids resetting the music queue. 10 minutes (IDLE_SHUTDOWN_STEPS min)
@@ -132,8 +173,10 @@ static void set_defaults(player_settings_t * out) {
     out->usb_mode = 0; /* USB_MODE_STORAGE -- see settings.h's own comment on why this is a plain int */
     out->play_mode = 0; /* PLAY_MODE_SEQUENTIAL */
     out->swipe_up_home_enabled = true;
+    out->quick_drawer_volume_visible = true;
     out->startup_volume_fixed_enabled = true; /* matches stock's own default */
     out->startup_volume_fixed_percent = 20;
+    out->car_mode_volume_percent = 80;
     out->sleep_timer_minutes = 15;
     out->timezone[0] = '\0';
     out->hostname[0] = '\0'; /* empty -- stock's own /usr/resource/hostname stays in effect */
@@ -145,6 +188,7 @@ static void set_defaults(player_settings_t * out) {
     out->clock_manual_epoch = 0;
     out->clock_system_reference = 0;
     out->custom_font[0] = '\0';
+    out->player_layout[0] = '\0';
 }
 
 void settings_subsonic_server_upsert(player_settings_t * settings, const char * url, const char * username,
@@ -271,6 +315,10 @@ static void sync_subsonic_saved_sidecar(player_settings_t * out) {
 bool settings_load(player_settings_t * out) {
     set_defaults(out);
 
+    bool car_mode_volume_percent_seen = false;
+    int legacy_car_mode_volume_percent = 80;
+    bool legacy_car_mode_volume_percent_seen = false;
+
     FILE * f = fopen(SETTINGS_FILE_PATH, "r");
     if (!f) f = fopen(SETTINGS_LEGACY_FILE_PATH, "r");
     if (!f) {
@@ -305,6 +353,8 @@ bool settings_load(player_settings_t * out) {
             out->play_pause_button_mode = atoi(value);
         } else if (strcmp(key, "accent_color") == 0) {
             out->accent_color = (uint32_t) strtoul(value, NULL, 16);
+        } else if (strcmp(key, "accent_dynamic") == 0) {
+            out->accent_dynamic = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "crossfade") == 0) {
             out->crossfade_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "gapless") == 0) {
@@ -319,8 +369,12 @@ bool settings_load(player_settings_t * out) {
             out->replaygain_mode = (strcmp(value, "1") == 0) ? 1 : 0;
         } else if (strcmp(key, "replaygain_mode") == 0) {
             out->replaygain_mode = atoi(value);
+        } else if (strcmp(key, "animation_scale") == 0) {
+            out->animation_scale = atoi(value);
         } else if (strcmp(key, "car_mode_enabled") == 0) {
             out->car_mode_enabled = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "car_mode_autoresume_enabled") == 0) {
+            out->car_mode_autoresume_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "inline_remote_enabled") == 0) {
             out->inline_remote_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "lyrics_enabled") == 0) {
@@ -333,6 +387,15 @@ bool settings_load(player_settings_t * out) {
             snprintf(out->subsonic_password, sizeof(out->subsonic_password), "%s", value);
         } else if (strcmp(key, "subsonic_verify_tls") == 0) {
             out->subsonic_verify_tls = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "subsonic_stream_quality") == 0) {
+            int quality = atoi(value);
+            out->subsonic_stream_quality = quality >= 0 && quality <= 3 ? quality : 0;
+        } else if (strcmp(key, "subsonic_download_subfolder") == 0) {
+            (void) settings_validate_subsonic_download_subfolder(value, out->subsonic_download_subfolder,
+                sizeof(out->subsonic_download_subfolder));
+        } else if (strcmp(key, "subsonic_download_layout") == 0) {
+            int layout = atoi(value);
+            out->subsonic_download_layout = layout == 1 ? 1 : 0;
         } else if (strncmp(key, "subsonic_saved_", 15) == 0) {
             int idx = -1;
             char field[32];
@@ -400,18 +463,26 @@ bool settings_load(player_settings_t * out) {
             out->screen_dim_delay_seconds = atoi(value);
         } else if (strcmp(key, "hide_player_topbar") == 0) {
             out->hide_player_topbar = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "screen_upside_down") == 0) {
+            out->screen_upside_down = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "led_indicator_enabled") == 0) {
             out->led_indicator_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "db_logging_enabled") == 0) {
             out->db_logging_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "screenshot_combo_enabled") == 0) {
             out->screenshot_combo_enabled = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "dev_bt_dac_all_codecs") == 0) {
+            out->dev_bt_dac_all_codecs = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "dev_covers_during_playback") == 0) {
+            out->dev_covers_during_playback = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "charge_limiter_enabled") == 0) {
             out->charge_limiter_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "safe_charging_enabled") == 0) {
             out->safe_charging_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "show_battery_percent") == 0) {
             out->show_battery_percent = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "show_artist_images") == 0) {
+            out->show_artist_images = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "idle_shutdown_enabled") == 0) {
             out->idle_shutdown_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "idle_shutdown_minutes") == 0) {
@@ -426,10 +497,18 @@ bool settings_load(player_settings_t * out) {
             out->play_mode = atoi(value);
         } else if (strcmp(key, "swipe_up_home_enabled") == 0) {
             out->swipe_up_home_enabled = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "quick_drawer_volume_visible") == 0) {
+            out->quick_drawer_volume_visible = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "startup_volume_fixed_enabled") == 0) {
             out->startup_volume_fixed_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "startup_volume_fixed_percent") == 0) {
             out->startup_volume_fixed_percent = atoi(value);
+        } else if (strcmp(key, "car_mode_startup_volume_percent") == 0) {
+            legacy_car_mode_volume_percent = atoi(value);
+            legacy_car_mode_volume_percent_seen = true;
+        } else if (strcmp(key, "car_mode_volume_percent") == 0) {
+            out->car_mode_volume_percent = atoi(value);
+            car_mode_volume_percent_seen = true;
         } else if (strcmp(key, "sleep_timer_minutes") == 0) {
             out->sleep_timer_minutes = atoi(value);
         } else if (strcmp(key, "timezone") == 0) {
@@ -456,6 +535,12 @@ bool settings_load(player_settings_t * out) {
             } else {
                 out->custom_font[0] = '\0';
             }
+        } else if (strcmp(key, "player_layout") == 0) {
+            if (!strchr(value, '/') && !strchr(value, '\\') && !strstr(value, "..")) {
+                snprintf(out->player_layout, sizeof(out->player_layout), "%s", value);
+            } else {
+                out->player_layout[0] = '\0';
+            }
         }
     }
 
@@ -464,7 +549,12 @@ bool settings_load(player_settings_t * out) {
     if (out->font_size_tier < 0 || out->font_size_tier > 2) out->font_size_tier = 0;
     if (out->lyrics_font_size_tier != 1 && out->lyrics_font_size_tier != 2) out->lyrics_font_size_tier = 2; /* Medium/Large only, see settings.h */
     if (out->replaygain_mode < 0 || out->replaygain_mode > 2) out->replaygain_mode = 1; /* Off/Per Track/Per Album only, see settings.h */
+    if (out->animation_scale != 0 && out->animation_scale != 25 && out->animation_scale != 50 &&
+        out->animation_scale != 75 && out->animation_scale != 100) out->animation_scale = 100;
     if (out->startup_volume_fixed_percent < 0 || out->startup_volume_fixed_percent > 100) out->startup_volume_fixed_percent = 20;
+    if (!car_mode_volume_percent_seen && legacy_car_mode_volume_percent_seen)
+        out->car_mode_volume_percent = legacy_car_mode_volume_percent;
+    if (out->car_mode_volume_percent < 0 || out->car_mode_volume_percent > 100) out->car_mode_volume_percent = 80;
     if (out->brightness_percent < 0 || out->brightness_percent > 100) out->brightness_percent = 80;
     if (out->resume_mode < 0 || out->resume_mode > 2) out->resume_mode = 0;
     if (out->play_pause_button_mode < 0 || out->play_pause_button_mode > 2) out->play_pause_button_mode = 0;
@@ -512,6 +602,9 @@ static void fsync_settings_dir(void) {
 }
 
 static void settings_write_file(const player_settings_t * settings) {
+    char subsonic_download_subfolder[SETTINGS_SUBSONIC_DOWNLOAD_SUBFOLDER_MAX] = "";
+    (void) settings_validate_subsonic_download_subfolder(settings->subsonic_download_subfolder,
+        subsonic_download_subfolder, sizeof(subsonic_download_subfolder));
     DBG_LOG("settings_save: called (idle_suspend_enabled=%d)\n", settings->idle_suspend_enabled ? 1 : 0);
     (void) mkdir(INTERNAL_COMPAS_DIR, 0755);
     /* This file contains the RC PIN and Subsonic credentials. Create or
@@ -537,16 +630,22 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "resume_mode=%d\n", settings->resume_mode);
     fprintf(f, "play_pause_button_mode=%d\n", settings->play_pause_button_mode);
     fprintf(f, "accent_color=%06X\n", (unsigned int) (settings->accent_color & 0xFFFFFF));
+    fprintf(f, "accent_dynamic=%d\n", settings->accent_dynamic ? 1 : 0);
     fprintf(f, "crossfade=%d\n", settings->crossfade_enabled ? 1 : 0);
     fprintf(f, "gapless=%d\n", settings->gapless_enabled ? 1 : 0);
     fprintf(f, "replaygain_mode=%d\n", settings->replaygain_mode);
+    fprintf(f, "animation_scale=%d\n", settings->animation_scale);
     fprintf(f, "car_mode_enabled=%d\n", settings->car_mode_enabled ? 1 : 0);
+    fprintf(f, "car_mode_autoresume_enabled=%d\n", settings->car_mode_autoresume_enabled ? 1 : 0);
     fprintf(f, "inline_remote_enabled=%d\n", settings->inline_remote_enabled ? 1 : 0);
     fprintf(f, "lyrics_enabled=%d\n", settings->lyrics_enabled ? 1 : 0);
     fprintf(f, "subsonic_url=%s\n", settings->subsonic_url);
     fprintf(f, "subsonic_username=%s\n", settings->subsonic_username);
     fprintf(f, "subsonic_password=%s\n", settings->subsonic_password);
     fprintf(f, "subsonic_verify_tls=%d\n", settings->subsonic_verify_tls ? 1 : 0);
+    fprintf(f, "subsonic_stream_quality=%d\n", settings->subsonic_stream_quality);
+    fprintf(f, "subsonic_download_subfolder=%s\n", subsonic_download_subfolder);
+    fprintf(f, "subsonic_download_layout=%d\n", settings->subsonic_download_layout == 1 ? 1 : 0);
     for (int i = 0; i < settings->subsonic_saved_count && i < SETTINGS_SUBSONIC_SAVED_MAX; i++) {
         fprintf(f, "subsonic_saved_%d_url=%s\n", i, settings->subsonic_saved[i].url);
         fprintf(f, "subsonic_saved_%d_username=%s\n", i, settings->subsonic_saved[i].username);
@@ -571,12 +670,16 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "screen_dimming_enabled=%d\n", settings->screen_dimming_enabled ? 1 : 0);
     fprintf(f, "screen_dim_delay_seconds=%d\n", settings->screen_dim_delay_seconds);
     fprintf(f, "hide_player_topbar=%d\n", settings->hide_player_topbar ? 1 : 0);
+    fprintf(f, "screen_upside_down=%d\n", settings->screen_upside_down ? 1 : 0);
     fprintf(f, "led_indicator_enabled=%d\n", settings->led_indicator_enabled ? 1 : 0);
     fprintf(f, "db_logging_enabled=%d\n", settings->db_logging_enabled ? 1 : 0);
     fprintf(f, "screenshot_combo_enabled=%d\n", settings->screenshot_combo_enabled ? 1 : 0);
+    fprintf(f, "dev_bt_dac_all_codecs=%d\n", settings->dev_bt_dac_all_codecs ? 1 : 0);
+    fprintf(f, "dev_covers_during_playback=%d\n", settings->dev_covers_during_playback ? 1 : 0);
     fprintf(f, "charge_limiter_enabled=%d\n", settings->charge_limiter_enabled ? 1 : 0);
     fprintf(f, "safe_charging_enabled=%d\n", settings->safe_charging_enabled ? 1 : 0);
     fprintf(f, "show_battery_percent=%d\n", settings->show_battery_percent ? 1 : 0);
+    fprintf(f, "show_artist_images=%d\n", settings->show_artist_images ? 1 : 0);
     fprintf(f, "idle_shutdown_enabled=%d\n", settings->idle_shutdown_enabled ? 1 : 0);
     fprintf(f, "idle_shutdown_minutes=%d\n", settings->idle_shutdown_minutes);
     fprintf(f, "idle_suspend_enabled=%d\n", settings->idle_suspend_enabled ? 1 : 0);
@@ -584,8 +687,10 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "usb_mode=%d\n", settings->usb_mode);
     fprintf(f, "play_mode=%d\n", settings->play_mode);
     fprintf(f, "swipe_up_home_enabled=%d\n", settings->swipe_up_home_enabled ? 1 : 0);
+    fprintf(f, "quick_drawer_volume_visible=%d\n", settings->quick_drawer_volume_visible ? 1 : 0);
     fprintf(f, "startup_volume_fixed_enabled=%d\n", settings->startup_volume_fixed_enabled ? 1 : 0);
     fprintf(f, "startup_volume_fixed_percent=%d\n", settings->startup_volume_fixed_percent);
+    fprintf(f, "car_mode_volume_percent=%d\n", settings->car_mode_volume_percent);
     fprintf(f, "sleep_timer_minutes=%d\n", settings->sleep_timer_minutes);
     fprintf(f, "timezone=%s\n", settings->timezone);
     fprintf(f, "hostname=%s\n", settings->hostname);
@@ -597,6 +702,7 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "clock_manual_epoch=%lld\n", (long long) settings->clock_manual_epoch);
     fprintf(f, "clock_system_reference=%lld\n", (long long) settings->clock_system_reference);
     fprintf(f, "custom_font=%s\n", settings->custom_font);
+    fprintf(f, "player_layout=%s\n", settings->player_layout);
 
     fflush(f);
     fsync(fileno(f));

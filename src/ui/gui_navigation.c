@@ -12,6 +12,7 @@
 #include "gui_shell.h"
 #include "gui_books.h"
 #include "gui_lock_screen.h"
+#include "gui_text_view.h"
 #include "screen_builders.h"
 #include "metadata.h"
 #include "audio.h"
@@ -50,7 +51,7 @@ extern bool active_press_is_over_drag_adjust_widget(void);
 /* Forward navigation slides the current screen out to the left as the new
  * one slides in from the right (matching a left-swipe gesture); back
  * navigation is the mirror of that. */
-#define NAV_ANIM_TIME_MS 165 /* 220ms * 0.75, per real-hardware feedback */
+#define NAV_ANIM_TIME_MS 120 /* Short settle; input feedback precedes movement. */
 
 /* Slide transitions use pre-rendered RGB565 bitmaps rather than animating
  * the live widget trees. Two static snapshots (one per screen) are blitted
@@ -239,15 +240,82 @@ static lv_draw_buf_t * build_flattened_transition_frame(lv_obj_t * target_screen
 #define STATIC_SNAPSHOT_SCREEN_COUNT 9
 static lv_obj_t * static_snapshot_screen[STATIC_SNAPSHOT_SCREEN_COUNT];
 static lv_draw_buf_t * static_snapshot_buf[STATIC_SNAPSHOT_SCREEN_COUNT];
+static uint64_t static_snapshot_scroll_state[STATIC_SNAPSHOT_SCREEN_COUNT];
+
+/* Static screen content can still contain scrollable containers. Include
+ * every descendant's scroll offsets in the cache key so a screen cached at
+ * its initial position is never reused after the user has scrolled it. */
+static uint64_t static_snapshot_scroll_state_recursive(lv_obj_t * obj, uint64_t hash) {
+    hash ^= (uint32_t) lv_obj_get_scroll_x(obj);
+    hash *= UINT64_C(1099511628211);
+    uint32_t scroll_y = (uint32_t) lv_obj_get_scroll_y(obj);
+    hash ^= scroll_y;
+    hash *= UINT64_C(1099511628211);
+    uint32_t child_count = lv_obj_get_child_count(obj);
+    hash ^= child_count;
+    hash *= UINT64_C(1099511628211);
+    for (uint32_t i = 0; i < child_count; i++) {
+        hash = static_snapshot_scroll_state_recursive(lv_obj_get_child(obj, (int32_t) i), hash);
+    }
+    return hash;
+}
+
+static uint64_t static_snapshot_scroll_state_for(lv_obj_t * scr) {
+    return scr ? static_snapshot_scroll_state_recursive(scr, UINT64_C(14695981039346656037)) : 0;
+}
 
 static lv_draw_buf_t * get_static_snapshot(lv_obj_t * scr) {
     for (int i = 0; i < STATIC_SNAPSHOT_SCREEN_COUNT; i++) {
-        if (static_snapshot_screen[i] == scr) return static_snapshot_buf[i];
+        if (static_snapshot_screen[i] != scr) continue;
+        if (static_snapshot_buf[i] &&
+            static_snapshot_scroll_state[i] != static_snapshot_scroll_state_for(scr)) {
+            /* Transitions always dup a cached base before using it, so this
+             * cache-owned buffer is not aliased by an in-flight transition. */
+            lv_draw_buf_destroy(static_snapshot_buf[i]);
+            static_snapshot_buf[i] = NULL;
+        }
+        return static_snapshot_buf[i];
     }
     return NULL;
 }
 
+/* Refresh a scrolled menu while idle, so returning to it does not need
+ * to render its entire widget tree in the navigation callback. */
+static void static_scroll_snapshot_async(void * data) {
+    int index = (int) (intptr_t) data;
+    if (gui_navigation_transition_in_progress() || index < 0 ||
+        index >= STATIC_SNAPSHOT_SCREEN_COUNT) return;
+    for (lv_indev_t * indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER &&
+            lv_indev_get_state(indev) == LV_INDEV_STATE_PRESSED) return;
+    }
+    lv_obj_t * screen = static_snapshot_screen[index];
+    if (!screen) return;
+    uint64_t scroll = static_snapshot_scroll_state_for(screen);
+    if (static_snapshot_buf[index] && static_snapshot_scroll_state[index] == scroll) return;
+    lv_draw_buf_t * fresh = snapshot_screen_base(screen);
+    if (!fresh) return;
+    if (static_snapshot_buf[index]) lv_draw_buf_destroy(static_snapshot_buf[index]);
+    static_snapshot_buf[index] = fresh;
+    static_snapshot_scroll_state[index] = scroll;
+}
+
+static void static_scroll_end_cb(lv_event_t * event) {
+    lv_async_call(static_scroll_snapshot_async, lv_event_get_user_data(event));
+}
+
+static void register_static_scroll_callbacks(lv_obj_t * obj, int index) {
+    void * data = (void *) (intptr_t) index;
+    lv_obj_remove_event_cb_with_user_data(obj, static_scroll_end_cb, data);
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_SCROLLABLE))
+        lv_obj_add_event_cb(obj, static_scroll_end_cb, LV_EVENT_SCROLL_END, data);
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); ++i)
+        register_static_scroll_callbacks(lv_obj_get_child(obj, (int32_t) i), index);
+}
+
 void register_static_snapshot(int index, lv_obj_t * scr) {
+    if (index < 0 || index >= STATIC_SNAPSHOT_SCREEN_COUNT || !scr) return;
+    register_static_scroll_callbacks(scr, index);
     /* Destroy any buffer from a prior registration of this slot first -- see
      * gui_navigation_invalidate_font_snapshots()'s own destroy-before-
      * overwrite pattern just below. Without this, re-registering the same
@@ -256,6 +324,7 @@ void register_static_snapshot(int index, lv_obj_t * scr) {
     if (static_snapshot_buf[index]) lv_draw_buf_destroy(static_snapshot_buf[index]);
     static_snapshot_screen[index] = scr;
     static_snapshot_buf[index] = snapshot_screen_base(scr);
+    static_snapshot_scroll_state[index] = static_snapshot_scroll_state_for(scr);
 }
 
 static void player_transition_discard_cache(void);
@@ -268,6 +337,7 @@ static void rebuild_font_snapshots_async_cb(void * unused) {
         screen_builders_refresh_font_geometry(static_snapshot_screen[i]);
         if (static_snapshot_buf[i]) lv_draw_buf_destroy(static_snapshot_buf[i]);
         static_snapshot_buf[i] = snapshot_screen_base(static_snapshot_screen[i]);
+        static_snapshot_scroll_state[i] = static_snapshot_scroll_state_for(static_snapshot_screen[i]);
     }
 }
 
@@ -288,8 +358,10 @@ void gui_navigation_invalidate_font_snapshots(void) {
 static void rebuild_theme_snapshots_async_cb(void * unused) {
     (void) unused;
     for (int i = 0; i < STATIC_SNAPSHOT_SCREEN_COUNT; i++) {
-        if (static_snapshot_screen[i] && !static_snapshot_buf[i])
+        if (static_snapshot_screen[i] && !static_snapshot_buf[i]) {
             static_snapshot_buf[i] = snapshot_screen_base(static_snapshot_screen[i]);
+            static_snapshot_scroll_state[i] = static_snapshot_scroll_state_for(static_snapshot_screen[i]);
+        }
     }
 }
 
@@ -422,6 +494,10 @@ static void back_target_cache_discard(void) {
     if (back_target_cache_buf) lv_draw_buf_destroy(back_target_cache_buf);
     back_target_cache_buf = NULL;
     if (back_target_cache_screen) lv_async_call(back_target_cache_rebuild_cb, NULL);
+}
+
+void gui_navigation_invalidate_back_snapshot(lv_obj_t * screen) {
+    if (screen && back_target_cache_screen == screen) back_target_cache_discard();
 }
 
 /* Called from nav_push() right after it decides `scr` is being left behind
@@ -762,7 +838,7 @@ slide_transition_ctx_t * begin_slide_transition_ex(lv_obj_t * to_scr, bool forwa
      * or if fbdev pan-based double buffering is inactive). */
     lv_draw_buf_t * buf_from = NULL;
 #if LV_USE_LINUX_FBDEV
-    {
+    if (lv_display_get_rotation(disp) == LV_DISPLAY_ROTATION_0) {
         const void * phys_active = lv_linux_fbdev_get_active_page(disp);
         uint32_t fb_stride = lv_linux_fbdev_get_stride(disp);
         if (phys_active && fb_stride != 0) {
@@ -887,7 +963,8 @@ slide_transition_ctx_t * begin_slide_transition_ex(lv_obj_t * to_scr, bool forwa
 }
 
 static void screen_transition_slide_ex(lv_obj_t * to_scr, bool forward, bool vertical, bool reveal) {
-    slide_transition_ctx_t * ctx = begin_slide_transition_ex(to_scr, forward, vertical, reveal);
+    /* Animation Speed Off: cut straight to the screen, no snapshots. */
+    slide_transition_ctx_t * ctx = gui_anims_off() ? NULL : begin_slide_transition_ex(to_scr, forward, vertical, reveal);
     if (!ctx) {
         lv_screen_load(to_scr);
         sync_player_topbar_visibility(to_scr);
@@ -900,7 +977,7 @@ static void screen_transition_slide_ex(lv_obj_t * to_scr, bool forward, bool ver
     lv_anim_set_var(&a, ctx);
     lv_anim_set_user_data(&a, ctx);
     lv_anim_set_values(&a, 0, -ctx->to_offset);
-    lv_anim_set_duration(&a, NAV_ANIM_TIME_MS);
+    lv_anim_set_duration(&a, gui_anim_ms(NAV_ANIM_TIME_MS));
     lv_anim_set_exec_cb(&a, slide_transition_anim_x_cb);
     lv_anim_set_completed_cb(&a, slide_transition_done_cb);
     lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
@@ -936,12 +1013,20 @@ void nav_push_stack_only(lv_obj_t * scr) {
     if (nav_depth < NAV_STACK_MAX) nav_stack[nav_depth++] = scr;
 }
 
+/* A covered text view is already unloaded, so dropping its stack entry
+ * never delivers another LV_EVENT_SCREEN_UNLOADED. on_close stays queued
+ * until a slide already in progress has finished. */
+static void note_text_view_if_dropped(void) {
+    gui_text_view_note_nav_removed();
+}
+
 void nav_pop_ex(bool forward, bool vertical, bool reveal) {
     if (nav_depth > 1) nav_depth--;
     /* Keep the outgoing screen's bars untouched until its physical frame
      * has been captured. The transition completion/cut-fallback path
      * applies the destination state at the actual screen handoff. */
     screen_transition_slide_ex(nav_stack[nav_depth - 1], forward, vertical, reveal);
+    note_text_view_if_dropped();
 }
 
 void nav_pop(void) {
@@ -950,6 +1035,7 @@ void nav_pop(void) {
 
 void nav_pop_stack_only(void) {
     if (nav_depth > 1) nav_depth--;
+    note_text_view_if_dropped();
 }
 
 /* Splices the stack slot at `index` out entirely (shifting everything
@@ -963,6 +1049,7 @@ void nav_pop_stack_only(void) {
 void nav_remove_stack_slot(int index) {
     for (int i = index; i < nav_depth - 1; i++) nav_stack[i] = nav_stack[i + 1];
     if (nav_depth > 0) nav_depth--;
+    note_text_view_if_dropped();
 }
 
 /* Collapses the whole nav stack back to Home -- used after a library rescan,
@@ -993,11 +1080,13 @@ void nav_reset_to_home(void) {
     lv_screen_load(target);
     sync_player_topbar_visibility(target);
     sync_home_indicator_visibility(target);
+    note_text_view_if_dropped();
 }
 
 void nav_reset_to_home_stack_only(void) {
     nav_depth = 1;
     nav_stack[0] = nav_home_target();
+    note_text_view_if_dropped();
 }
 
 /* Shared back-button handler for every screen built via the reusable
@@ -1163,6 +1252,7 @@ void gui_navigation_teardown(void) {
         if (static_snapshot_buf[i]) lv_draw_buf_destroy(static_snapshot_buf[i]);
         static_snapshot_buf[i] = NULL;
         static_snapshot_screen[i] = NULL;
+        static_snapshot_scroll_state[i] = 0;
     }
     player_transition_discard_cache();
     /* Unlike the font/theme-invalidate call sites above, the screen this
@@ -1198,6 +1288,13 @@ lv_obj_t * gui_navigation_get_screen_at(int index) {
 
 bool gui_navigation_is_top(lv_obj_t * screen) {
     return (nav_depth > 0 && nav_stack[nav_depth - 1] == screen);
+}
+
+bool gui_navigation_contains(lv_obj_t * screen) {
+    for (int i = 0; i < nav_depth; i++) {
+        if (nav_stack[i] == screen) return true;
+    }
+    return false;
 }
 
 void gui_navigation_remove_screen_instances(lv_obj_t ** screens, int count) {

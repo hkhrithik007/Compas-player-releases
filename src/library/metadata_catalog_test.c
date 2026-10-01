@@ -17,6 +17,16 @@
 
 void path_cache_drop(void) {}
 void remote_state_drop(void) {}
+bool remote_state_get(const char *path, int32_t *rating, int32_t *count, int32_t *last) {
+    (void) path; (void) rating; (void) count; (void) last;
+    return false;
+}
+static int remote_state_saves;
+bool remote_state_set_rating(const char *path, int32_t rating) {
+    (void) path; (void) rating;
+    remote_state_saves++;
+    return false; /* stands in for a sidecar that failed to save */
+}
 bool remote_state_take(const char *path, int32_t *rating, int32_t *count, int32_t *last) {
     (void) path; (void) rating; (void) count; (void) last;
     return false;
@@ -365,6 +375,144 @@ static void test_targeted_delete_statistics(void) {
     metadata_db_close();
 }
 
+static void test_recently_played(void) {
+    char root[] = "/tmp/compas-recently-played-XXXXXX";
+    must(mkdtemp(root) != NULL && chdir(root) == 0, "recently played fixture directory");
+    must(metadata_db_open() == METADATA_DB_LOAD_SUCCESS_FRESH, "open recently played database");
+    const char *names[] = { "a.flac", "b.flac", "c.flac", "d.flac", "e.flac" };
+    metadata_db_begin_update();
+    for (int i = 0; i < 5; i++) {
+        touch(names[i]);
+        put_song(names[i], names[i], "Artist", "Album", "Artist");
+    }
+    must(metadata_db_end_update(), "commit recently played rows");
+    song_row_t rows[8];
+    int64_t played[8];
+    int total = -1;
+    must(metadata_db_get_recently_played_page(0, 8, rows, played, &total) == 0 && total == 0,
+         "no play history lists nothing");
+
+    tagcache_add_play("a.flac", 100);
+    tagcache_add_play("b.flac", 300);
+    tagcache_add_play("c.flac", 200);
+    tagcache_add_play("c.flac", 250);
+    tagcache_add_play("e.flac", 300);
+    must(metadata_db_get_recently_played_page(0, 8, rows, played, &total) == 4 && total == 4,
+         "every played song listed once; unplayed song omitted");
+    must(strcmp(rows[0].path, "b.flac") == 0 && strcmp(rows[1].path, "e.flac") == 0 &&
+         strcmp(rows[2].path, "c.flac") == 0 && strcmp(rows[3].path, "a.flac") == 0,
+         "newest play first, equal times by ascending song id, repeat plays keep the latest time");
+    must(played[0] == 300 && played[1] == 300 && played[2] == 250 && played[3] == 100,
+         "rows carry their last-played time");
+    must(metadata_db_get_recently_played_page(1, 2, rows, NULL, &total) == 2 && total == 4 &&
+         strcmp(rows[0].path, "e.flac") == 0 && strcmp(rows[1].path, "c.flac") == 0,
+         "offset pages continue the same order");
+    must(metadata_db_get_recently_played_page(4, 2, rows, NULL, &total) == 0 && total == 4,
+         "page past the end is empty with the same total");
+    must(metadata_db_get_recently_played_page(METADATA_DB_RECENTLY_PLAYED_MAX + 5, 2, rows, NULL, &total) == 0,
+         "offset beyond the cap is empty");
+    must(metadata_db_get_recently_played_page(-1, 2, rows, NULL, &total) == -1, "negative offset is rejected");
+
+    char **paths = NULL;
+    int count = 0;
+    metadata_db_load_recently_played_songs(2, &paths, &count);
+    must(count == 2 && strcmp(paths[0], "b.flac") == 0 && strcmp(paths[1], "e.flac") == 0,
+         "recently played loader uses the page order");
+    for (int i = 0; i < count; i++) free(paths[i]);
+    free(paths);
+    metadata_db_load_top_played_songs(10, &paths, &count);
+    must(count == 4 && strcmp(paths[0], "c.flac") == 0 && strcmp(paths[1], "b.flac") == 0 &&
+         strcmp(paths[2], "e.flac") == 0 && strcmp(paths[3], "a.flac") == 0,
+         "Most Played order is unchanged by the shared heap");
+    for (int i = 0; i < count; i++) free(paths[i]);
+    free(paths);
+
+    must(metadata_db_song_favorite_set_durable("d.flac", true) && metadata_db_song_favorite_is_set("d.flac"),
+         "durable favorite write succeeds for a library row");
+    must(!metadata_db_song_favorite_set_durable("not-in-library.flac", true) && remote_state_saves == 1,
+         "non-library path reports the sidecar save result");
+    /* A different directory now answers to the database path (a swapped
+     * card): the write would be discarded, so it must not report success. */
+    must(rename(".compas", ".compas-original") == 0 && mkdir(".compas", 0755) == 0, "swap database directory");
+    must(!metadata_db_song_favorite_set_durable("a.flac", true), "durable write refuses a changed card");
+    must(rmdir(".compas") == 0 && rename(".compas-original", ".compas") == 0, "restore database directory");
+    /* Queued on the right card, then the card changes before the flush: the
+     * batch is discarded and a later successful write must not mask it. */
+    int lost = tagcache_set_rating_durable_begin("b.flac", 1);
+    must(lost > 0, "durable waiter registered");
+    must(rename(".compas", ".compas-original") == 0 && mkdir(".compas", 0755) == 0, "swap database directory again");
+    must(!tagcache_numeric_wait_durable(lost, 5000), "discarded batch fails its waiter");
+    must(rmdir(".compas") == 0 && rename(".compas-original", ".compas") == 0, "restore database directory again");
+    must(metadata_db_song_favorite_set_durable("c.flac", true), "a later durable write succeeds");
+    must(tagcache_set_rating_durable_begin("not-in-library.flac", 1) == 0, "no waiter for an absent row");
+    metadata_db_close();
+    must(!metadata_db_song_favorite_set_durable("d.flac", false), "durable write fails with the database closed");
+    must(metadata_db_open() == METADATA_DB_LOAD_SUCCESS_NORMAL, "reopen recently played database");
+    must(metadata_db_song_favorite_is_set("d.flac"), "durable favorite is on disk after reopen");
+    metadata_db_close();
+}
+
+static void test_now_playing_group_identity(void) {
+    char root[] = "/tmp/compas-now-playing-group-XXXXXX";
+    must(mkdtemp(root) != NULL && chdir(root) == 0, "now-playing group fixture directory");
+    must(metadata_db_open() == METADATA_DB_LOAD_SUCCESS_FRESH, "open now-playing group fixture database");
+    touch("comp-one.flac");
+    touch("comp-two.flac");
+    touch("fallback.flac");
+    touch("normalized-fallback.flac");
+    metadata_db_begin_update();
+    put_song("comp-one.flac", "One", "Guest One", "Compilation", "Various Artists");
+    put_song("comp-two.flac", "Two", "Guest Two", "Compilation", "Various Artists");
+    put_song("fallback.flac", "Fallback", "Fallback Artist", "Fallback Album", "");
+    put_song("normalized-fallback.flac", "Normalized", "Fallback Artist", "Normalized Album", "Fallback Artist");
+    must(metadata_db_end_update(), "commit now-playing group fixture");
+
+    song_row_t song;
+    must(metadata_db_get_song_by_path("comp-one.flac", &song), "local compilation path resolves");
+    int64_t guest_artist_offset = metadata_db_get_group_offset(METADATA_DB_GROUP_ARTIST,
+                                                                "gUeSt oNe", NULL);
+    group_row_t artist;
+    must(guest_artist_offset >= 0 &&
+         metadata_db_get_groups_page(METADATA_DB_GROUP_ARTIST, (int) guest_artist_offset, 1, &artist) == 1 &&
+         tagcache_cmp_ascii(artist.name, "Guest One") == 0,
+         "artist group lookup accepts case variants while preserving the indexed name");
+    int64_t compilation_offset = metadata_db_get_group_offset(METADATA_DB_GROUP_ALBUM,
+                                                               "cOmPiLaTiOn", "vArIoUs aRtIsTs");
+    group_row_t album;
+    must(compilation_offset >= 0 &&
+         metadata_db_get_groups_page(METADATA_DB_GROUP_ALBUM, (int) compilation_offset, 1, &album) == 1 &&
+         tagcache_cmp_ascii(album.name, "Compilation") == 0 &&
+         tagcache_cmp_ascii(album.album_artist, "Various Artists") == 0 &&
+         album.song_count == 2,
+         "album lookup accepts case variants and resolves compilation by album-artist, not track artist");
+
+    must(metadata_db_get_song_by_path("fallback.flac", &song), "fallback album local path resolves");
+    const char * effective_album_artist = song.tags.album_artist[0]
+        ? song.tags.album_artist : song.tags.artist;
+    int64_t fallback_offset = metadata_db_get_group_offset(METADATA_DB_GROUP_ALBUM,
+                                                            song.tags.album, effective_album_artist);
+    const char * expected_group_album_artist = effective_album_artist;
+    if (fallback_offset < 0 && !song.tags.album_artist[0]) {
+        /* Older cache rows can retain the empty key; the UI helper supports
+         * this exact pair after trying the scanner's normalized identity. */
+        fallback_offset = metadata_db_get_group_offset(METADATA_DB_GROUP_ALBUM,
+                                                       song.tags.album, "");
+        expected_group_album_artist = "";
+    }
+    must(fallback_offset >= 0 &&
+         metadata_db_get_groups_page(METADATA_DB_GROUP_ALBUM, (int) fallback_offset, 1, &album) == 1 &&
+         strcmp(album.name, "Fallback Album") == 0 &&
+         strcmp(album.album_artist, expected_group_album_artist) == 0,
+         "missing album-artist resolves the normalized or legacy exact album pair");
+    must(metadata_db_get_song_by_path("normalized-fallback.flac", &song) &&
+         metadata_db_get_group_offset(METADATA_DB_GROUP_ALBUM, "nOrMaLiZeD aLbUm",
+             "fAlLbAcK aRtIsT") >= 0,
+         "case variants resolve the scanner-normalized artist fallback album identity");
+    must(!metadata_db_get_song_by_path("subsonic://stream/one", &song),
+         "stream path does not resolve as local group membership");
+    metadata_db_close();
+}
+
 static bool valid_uuid(const char *id) {
     if (strlen(id) != 36) return false;
     for (int i = 0; i < 36; i++) {
@@ -484,6 +632,8 @@ int main(void) {
     test_noop_refresh_abort();
     test_force_metadata_upsert();
     test_targeted_delete_statistics();
+    test_recently_played();
+    test_now_playing_group_identity();
 
     char other_root[] = "/tmp/compas-catalog-fresh-XXXXXX";
     must(mkdtemp(other_root) != NULL && chdir(other_root) == 0, "second fixture directory");

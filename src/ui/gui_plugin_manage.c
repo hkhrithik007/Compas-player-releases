@@ -1,4 +1,5 @@
 #include "gui_plugin_manage.h"
+#include "gui_plugin_store.h"
 #include "screen_builders.h"
 #include "gui_theme.h"
 #include "gui_navigation.h"
@@ -10,17 +11,47 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <strings.h>
 
 /* A bound, not a promise -- plugin_manager_scan_available() truncates its
  * on-disk scan at this count. It guarantees every currently-LOADED plugin
- * (at most PLUGIN_MAX_FILES=16 of those) is always included even when
+ * (at most PLUGIN_MAX_FILES=32 of those) is always included even when
  * truncating, so only *disabled, never-loaded* files can ever be the ones
  * left off; still, no realistic .plugins folder approaches 64 files. */
 #define PLUGIN_MANAGE_MAX_ROWS 64
 
 static plugin_available_entry_t manage_entries[PLUGIN_MANAGE_MAX_ROWS];
+/* Row text: the plugin name, plus why an enabled plugin is not running. */
+static char manage_labels[PLUGIN_MANAGE_MAX_ROWS][sizeof(manage_entries[0].display_name) + 64];
 static int manage_entry_count = 0;
 static bool manage_changes_dirty = false;
+
+/* AsyncHttp.lua is a bundled request helper installed beside user-facing
+ * plugins. It has no settings or actions of its own, so keep it out of the
+ * user-facing manager while leaving every other .lua file visible. Match the
+ * exact filename only; plugins with similar names remain manageable. */
+static bool plugin_manage_is_support_module(const char * filename) {
+    return filename && strcasecmp(filename, "AsyncHttp.lua") == 0;
+}
+
+static void plugin_manage_format_label(int index, const plugin_available_entry_t * entry) {
+    char display_name[sizeof(entry->display_name)];
+    snprintf(display_name, sizeof(display_name), "%s", entry->display_name);
+
+    /* Unloaded plugins have no manifest name yet, so use their filename but
+     * omit the implementation suffix from the label. The callback still
+     * uses entry->filename unchanged as the stable toggle identity. */
+    size_t length = strlen(display_name);
+    if (!entry->loaded && length > 4 && strcasecmp(display_name + length - 4, ".lua") == 0)
+        display_name[length - 4] = '\0';
+
+    const char * status = "";
+    if (!entry->disabled && !entry->loaded) {
+        status = entry->over_limit ? " · Not loaded: limit reached" : " · Not loaded";
+    }
+    snprintf(manage_labels[index], sizeof(manage_labels[index]), "%s%s", display_name, status);
+}
 
 static void plugin_manage_apply_changes(void) {
     if (!manage_changes_dirty) return;
@@ -39,11 +70,15 @@ static void plugin_manage_reload_row_cb(lv_event_t * e) {
     gui_reload_request();
 }
 
+static lv_obj_t * plugin_manage_screen;
+
 static void plugin_manage_screen_unloaded_cb(lv_event_t * e) {
     (void) e;
     /* Back button, swipe-back, and Home all converge here. Persist each
      * toggle immediately, but rebuild the UI only once after the user has
-     * finished changing the set. */
+     * finished changing the set. A screen opened on top (the Plugin Store
+     * and its busy screen) only covers this one: wait until it is left. */
+    if (plugin_manage_screen && gui_navigation_contains(plugin_manage_screen)) return;
     plugin_manage_apply_changes();
 }
 
@@ -89,13 +124,18 @@ static void plugin_manage_toggle_cb(lv_event_t * e) {
 lv_obj_t * gui_plugin_manage_build_screen(void) {
     manage_entry_count = plugin_manager_scan_available(manage_entries, PLUGIN_MANAGE_MAX_ROWS);
 
-    static pill_list_item_t items[1 + PLUGIN_MANAGE_MAX_ROWS];
-    items[0] = (pill_list_item_t){ "Refresh Plugins", PILL_ACCESSORY_NONE, false,
+    static pill_list_item_t items[2 + PLUGIN_MANAGE_MAX_ROWS];
+    items[0] = (pill_list_item_t){ "Plugin Store", PILL_ACCESSORY_CHEVRON, false,
+                                    gui_plugin_store_row_cb, NULL, NULL };
+    items[1] = (pill_list_item_t){ "Refresh Plugins", PILL_ACCESSORY_NONE, false,
                                     plugin_manage_reload_row_cb, NULL, NULL };
-    int count = 1;
+    int count = 2;
     for (int i = 0; i < manage_entry_count; i++) {
+        const plugin_available_entry_t * en = &manage_entries[i];
+        if (plugin_manage_is_support_module(en->filename)) continue;
+        plugin_manage_format_label(i, en);
         items[count++] = (pill_list_item_t){
-            manage_entries[i].display_name, PILL_ACCESSORY_TOGGLE,
+            manage_labels[i], PILL_ACCESSORY_TOGGLE,
             !manage_entries[i].disabled, NULL, plugin_manage_toggle_cb,
             (void *) (intptr_t) i
         };
@@ -108,8 +148,6 @@ lv_obj_t * gui_plugin_manage_build_screen(void) {
     return scr;
 }
 
-static lv_obj_t * plugin_manage_screen;
-
 void gui_plugin_manage_init(void) {
     plugin_manage_screen = gui_plugin_manage_build_screen();
 }
@@ -119,6 +157,13 @@ void gui_plugin_manage_teardown(void) {
         lv_obj_delete(plugin_manage_screen);
         plugin_manage_screen = NULL;
     }
+}
+
+void gui_plugin_manage_poll(void) {
+    /* Home drops a covered Plugin Manager (under the store) from the stack
+     * without another unload event. */
+    if (manage_changes_dirty && plugin_manage_screen && !gui_navigation_contains(plugin_manage_screen))
+        plugin_manage_apply_changes();
 }
 
 void gui_plugin_manage_row_cb(lv_event_t * e) {

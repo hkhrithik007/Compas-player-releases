@@ -8,6 +8,7 @@
 #include <strings.h>
 #include <time.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 typedef struct {
     /* Exactly one of these is set, matching which http_get_* the caller used. */
@@ -28,6 +29,12 @@ typedef struct {
      * extension at all). */
     char * out_content_type;
     size_t out_content_type_size;
+
+    /* Optional -- set only by redirect-following downloads. A 3xx response
+     * with a Location header fills this and its body is skipped, so a
+     * redirect page never lands in the destination file. */
+    char * out_location;
+    size_t out_location_size;
 } body_sink_t;
 
 static bool sink_write(body_sink_t * sink, const uint8_t * data, size_t len, uint64_t total_written, uint64_t total_expected) {
@@ -238,7 +245,10 @@ static bool read_response(http_conn_t * conn, int * out_status, body_sink_t * si
 
     bool is_chunked = false;
     uint64_t content_length = 0;
-    char header_line[1024];
+    if (sink->out_location && sink->out_location_size) sink->out_location[0] = '\0';
+    /* Signed storage redirects (for example GitHub release assets) carry
+     * Location values near a kilobyte; leave room well beyond that. */
+    char header_line[4096];
     while (http_conn_reader_line(&reader, header_line, sizeof(header_line)) && header_line[0] != '\0') {
         char * colon = strchr(header_line, ':');
         if (!colon) continue;
@@ -256,10 +266,19 @@ static bool read_response(http_conn_t * conn, int * out_status, body_sink_t * si
             char * semi = strchr(value, ';');
             if (semi) *semi = '\0';
             snprintf(sink->out_content_type, sink->out_content_type_size, "%s", value);
+        } else if (strcasecmp(header_line, "Location") == 0 && sink->out_location && sink->out_location_size) {
+            /* A Location that does not fit is left empty: following a
+             * truncated URL would fetch the wrong resource. */
+            if (strlen(value) < sink->out_location_size) snprintf(sink->out_location, sink->out_location_size, "%s", value);
         }
     }
     DBG_LOG("http_client: status=%d content_length=%llu chunked=%d\n", status,
             (unsigned long long) content_length, is_chunked);
+
+    if (sink->out_location && sink->out_location[0] && status >= 300 && status < 400) {
+        *out_status = status; /* the caller follows it; the connection closes */
+        return true;
+    }
 
     if (sink->out_buffer && !is_chunked && content_length > sink->max_buffer_size) {
         DBG_LOG("http_client: refusing oversized buffered response (%llu > %zu)\n",
@@ -398,6 +417,53 @@ bool http_get_to_file_cancelable(const char * url, bool verify_tls, const char *
     return true;
 }
 
+bool http_get_to_file_redirects(const char * url, bool verify_tls, const char * dest_path, size_t max_body_size,
+                                http_progress_cb_t progress_cb, void * progress_user_data,
+                                uint32_t connect_timeout_ms, uint32_t read_timeout_ms,
+                                http_cancel_token_t * cancel, int max_redirects, int * out_status) {
+    if (out_status) *out_status = 0;
+    FILE * f = fopen(dest_path, "wb");
+    if (!f) return false;
+
+    char current[2048], location[2048];
+    if (snprintf(current, sizeof(current), "%s", url) >= (int) sizeof(current)) {
+        fclose(f);
+        remove(dest_path);
+        return false;
+    }
+    int status = 0;
+    bool ok = false;
+    for (int hop = 0; hop <= max_redirects; hop++) {
+        body_sink_t sink = { .out_buffer = NULL, .out_buffer_size = NULL, .out_file = f, .buffer_capacity = 0,
+                             .max_buffer_size = max_body_size > 0 ? max_body_size : HTTP_FILE_DOWNLOAD_DEFAULT_MAX_BYTES,
+                             .progress_cb = progress_cb, .progress_user_data = progress_user_data,
+                             .out_content_type = NULL, .out_content_type_size = 0,
+                             .out_location = location, .out_location_size = sizeof(location) };
+        status = 0;
+        ok = do_get_ex(current, verify_tls, &status, &sink, connect_timeout_ms, read_timeout_ms, cancel);
+        if (!ok || status < 300 || status >= 400) break;
+        ok = false;
+        /* Only absolute http(s) targets, and never an https -> http
+         * downgrade while certificates are being verified. */
+        bool to_https = strncasecmp(location, "https://", 8) == 0;
+        bool to_http = strncasecmp(location, "http://", 7) == 0;
+        if (!location[0] || (!to_https && !to_http) ||
+            (verify_tls && to_http && strncasecmp(current, "https://", 8) == 0)) {
+            DBG_LOG("http_client: refusing redirect to '%s'\n", location);
+            break;
+        }
+        memcpy(current, location, strlen(location) + 1);
+        if (fflush(f) != 0 || ftruncate(fileno(f), 0) != 0 || fseek(f, 0, SEEK_SET) != 0) break;
+    }
+    if (fclose(f) != 0) ok = false;
+    if (out_status) *out_status = status;
+    if (!ok || status < 200 || status >= 300) {
+        remove(dest_path);
+        return false;
+    }
+    return true;
+}
+
 /* ---- Extended request API (http_client.h's own comment explains why
  * this is new, separate code rather than a rework of do_get()/do_post()
  * above) ---- */
@@ -494,6 +560,21 @@ static bool http_same_origin(bool https_a, const char * host_a, const char * por
 static bool http_header_name_is_sensitive(const char * name) {
     return strcasecmp(name, "Authorization") == 0 || strcasecmp(name, "Cookie") == 0 ||
            strcasecmp(name, "Cookie2") == 0 || strcasecmp(name, "Proxy-Authorization") == 0;
+}
+
+/* The long header carries credentials, not framing: names the request
+ * builder sets itself are refused, and so is a name already in headers[],
+ * so no field is ever sent twice. */
+static bool http_long_header_is_valid(const http_request_t * req) {
+    static const char * const reserved[] = { "Host", "User-Agent", "Content-Type", "Content-Length", "Connection" };
+    if (!http_header_name_is_valid(req->long_header_name) ||
+        strnlen(req->long_header_value, HTTP_LONG_HEADER_VALUE_MAX) >= HTTP_LONG_HEADER_VALUE_MAX ||
+        !http_header_value_is_valid(req->long_header_value))
+        return false;
+    for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); i++) {
+        if (strcasecmp(req->long_header_name, reserved[i]) == 0) return false;
+    }
+    return http_headers_get(req->headers, req->header_count, req->long_header_name) == NULL;
 }
 
 /* Strips sensitive credential headers (Authorization, Cookie, etc.) on
@@ -594,6 +675,7 @@ static bool send_request_ex(http_conn_t * conn, const http_request_t * req, cons
             return false;
         }
     }
+    if (req->long_header_value && !http_long_header_is_valid(req)) return false;
 
     char header_block[8192];
     size_t pos = 0;
@@ -622,6 +704,7 @@ static bool send_request_ex(http_conn_t * conn, const http_request_t * req, cons
     for (int i = 0; i < req->header_count; i++) {
         APPEND_HDR("%s: %s\r\n", req->headers[i].name, req->headers[i].value);
     }
+    if (req->long_header_value) APPEND_HDR("%s: %s\r\n", req->long_header_name, req->long_header_value);
     APPEND_HDR("\r\n");
 #undef APPEND_HDR
 
@@ -825,6 +908,8 @@ static bool http_request_ex_internal(http_request_t * req, http_cancel_token_t *
             DBG_LOG("http_client: http_request_ex cross-origin redirect (%s:%s -> %s:%s) -- stripping credential headers\n",
                     host, port, new_host, new_port);
             http_strip_sensitive_headers(req->headers, &req->header_count);
+            if (req->long_header_value && http_header_name_is_sensitive(req->long_header_name))
+                req->long_header_value = NULL;
         }
 
         http_apply_redirect_method_semantics(req, resp->status);
@@ -872,6 +957,10 @@ bool http_request_ex(const http_request_t * req_in, http_cancel_token_t * cancel
             resp->error = HTTP_ERR_INVALID_REQUEST;
             return false;
         }
+    }
+    if (req_in->long_header_value && !http_long_header_is_valid(req_in)) {
+        resp->error = HTTP_ERR_INVALID_REQUEST;
+        return false;
     }
 
     /* Local, mutable copy -- http_request_ex_internal() strips headers /

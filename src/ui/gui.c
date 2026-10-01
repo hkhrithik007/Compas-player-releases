@@ -16,6 +16,7 @@
 #include "gui_network.h"
 #include "gui_books.h"
 #include "gui_text_input.h"
+#include "gui_text_view.h"
 #include "gui_lyrics.h"
 #include "gui_track_info.h"
 #include "gui_subsonic.h"
@@ -27,6 +28,8 @@
 #include "dlna_control.h"
 #include "remote_control.h"
 #include "battery.h"
+#include "firmware_ota.h"
+#include "plugin_store.h"
 #include "wifi_status.h"
 #include "audio.h"
 #include "audio_output.h"
@@ -55,6 +58,7 @@
 #include "headphone_status.h"
 #include "plugin_manager.h"
 #include "gui_plugin_manage.h"
+#include "gui_plugin_store.h"
 #include "led_control.h"
 #include "charge_limiter.h"
 #include "idle_shutdown.h"
@@ -269,7 +273,7 @@ static bool screen_off_playback_active = false;
  * current_settings.idle_shutdown_minutes with the screen off and nothing
  * going on -- same gating as radio-suspend above (not playing, not
  * charging, no DAC receive mode active) since none of those should ever be
- * interrupted by the device turning itself off. idle_shutdown_attempted
+ * interrupted by the device turning itself off. */
 /* Idle shutdown logic:
  *
  * Automatically power off if the device is inactive for a user-defined period
@@ -286,7 +290,7 @@ static bool shutdown_background_work_active(void) {
            gui_network_has_background_work() || gui_lyrics_has_background_work() ||
            gui_player_has_background_work() || gui_shell_has_background_work() ||
            plugin_manager_has_background_work() || playlist_files_has_active_write() ||
-           gui_player_queue_write_busy() || screenshot_is_busy();
+           gui_player_queue_write_busy() || screenshot_is_busy() || firmware_ota_busy() || plugin_store_busy();
 }
 
 /* Grace window after resuming from suspend. hw_buttons sets its short-tap flag
@@ -472,16 +476,11 @@ static void power_button_timer_cb(lv_timer_t * timer) {
     process_power_button_events();
 }
 
-static void update_timer_cb(lv_timer_t * timer) {
+/* Only cheap event consumption runs at input cadence. Periodic status,
+ * storage and service work remains on the 500 ms update timer. Keep all
+ * player and LVGL actions on this thread, including while the screen is off. */
+static void media_button_timer_cb(lv_timer_t * timer) {
     (void) timer;
-
-    /* Physical volume/skip/play-pause buttons: applied here, on the one
-     * thread allowed to touch LVGL widgets (see hw_buttons.h). Play/pause
-     * is a count, not a bool -- this poll only runs every 500ms, and a real
-     * double-click's two presses routinely land inside one poll window; a
-     * count of 2 here dispatches immediately, twice in a row, letting
-     * handle_physical_play_pause_press()'s own click-count state (mode 2)
-     * see it as a same-tick double-click without waiting on its timer. */
     int played_paused_count = hw_buttons_consume_play_pause();
     for (int i = 0; i < played_paused_count; i++) {
         handle_physical_play_pause_press();
@@ -504,6 +503,27 @@ static void update_timer_cb(lv_timer_t * timer) {
     if (next_seek_steps > 0) {
         gui_player_hw_next_seek_steps(next_seek_steps, next_seek_is_first);
     }
+    int volume_delta = hw_buttons_consume_volume_delta();
+    if (volume_delta != 0) {
+        int32_t new_percent = gui_player_get_volume_percent() + volume_delta;
+        if (new_percent < 0) new_percent = 0;
+        if (new_percent > 100) new_percent = 100;
+        gui_player_set_volume_percent(new_percent);
+        audio_set_volume((float) new_percent / 100.0f);
+        gui_player_remember_volume_percent(new_percent);
+        settings_save_async(&current_settings);
+        show_volume_popup(new_percent);
+        refresh_volume_topbar(new_percent);
+    }
+
+    if (played_paused_count > 0 || skipped_next || skipped_prev || volume_delta != 0 || next_seek_steps > 0) {
+        lv_display_trigger_activity(NULL);
+    }
+}
+
+static void update_timer_cb(lv_timer_t * timer) {
+    (void) timer;
+
     bool screenshot_request_pending = hw_buttons_consume_screenshot();
 
 #ifndef HOST_BUILD
@@ -539,23 +559,10 @@ static void update_timer_cb(lv_timer_t * timer) {
     if (bt_control_source_volume_sync_consume_percent(&bt_synced_volume_percent) &&
         !gui_player_volume_is_being_adjusted()) {
         gui_player_set_volume_percent(bt_synced_volume_percent);
-        current_settings.volume = (float) bt_synced_volume_percent / 100.0f;
+        gui_player_remember_volume_percent(bt_synced_volume_percent);
         settings_save_async(&current_settings);
         show_volume_popup(bt_synced_volume_percent);
         refresh_volume_topbar(bt_synced_volume_percent);
-    }
-
-    int volume_delta = hw_buttons_consume_volume_delta();
-    if (volume_delta != 0) {
-        int32_t new_percent = gui_player_get_volume_percent() + volume_delta;
-        if (new_percent < 0) new_percent = 0;
-        if (new_percent > 100) new_percent = 100;
-        gui_player_set_volume_percent(new_percent);
-        audio_set_volume((float) new_percent / 100.0f);
-        current_settings.volume = (float) new_percent / 100.0f;
-        settings_save_async(&current_settings);
-        show_volume_popup(new_percent);
-        refresh_volume_topbar(new_percent);
     }
 
     /* Phone remote-control (Phase 2, remote_control.h): same "background
@@ -604,7 +611,7 @@ static void update_timer_cb(lv_timer_t * timer) {
         !gui_player_volume_is_being_adjusted()) {
         gui_player_set_volume_percent(remote_volume_percent);
         audio_set_volume((float) remote_volume_percent / 100.0f);
-        current_settings.volume = (float) remote_volume_percent / 100.0f;
+        gui_player_remember_volume_percent(remote_volume_percent);
         settings_save_async(&current_settings);
         show_volume_popup(remote_volume_percent);
         refresh_volume_topbar(remote_volume_percent);
@@ -626,6 +633,17 @@ static void update_timer_cb(lv_timer_t * timer) {
         gui_player_remote_queue_remove(remote_queue_remove_offset, remote_queue_revision);
     if (remote_control_consume_queue_clear(&remote_queue_revision))
         gui_player_remote_queue_clear(remote_queue_revision);
+    int remote_queue_from, remote_queue_to;
+    if (remote_control_consume_queue_move(&remote_queue_from, &remote_queue_to, &remote_queue_revision))
+        gui_player_remote_queue_move(remote_queue_from, remote_queue_to, remote_queue_revision);
+    int remote_queue_play_offset;
+    if (remote_control_consume_queue_play(&remote_queue_play_offset, &remote_queue_revision))
+        gui_player_remote_queue_play(remote_queue_play_offset, remote_queue_revision);
+    if (remote_control_consume_favorite_changed()) gui_player_refresh_favorite();
+    char remote_folder_track[REMOTE_CONTROL_PATH_MAX];
+    if (remote_control_consume_folder_play(remote_folder_track, sizeof(remote_folder_track)) &&
+        !gui_player_play_folder_track(remote_folder_track))
+        show_error_toast("Cannot play folder");
     int64_t remote_play_id;
     char remote_play_playlist[128], remote_play_artist[128], remote_play_album_artist[128], remote_play_album[128];
     char remote_play_catalog_revision[METADATA_DB_CATALOG_REVISION_SIZE] = {0};
@@ -806,12 +824,6 @@ static void update_timer_cb(lv_timer_t * timer) {
         }
     }
 #endif
-
-    /* Feed button activity into the inactivity clock so physical button presses
-     * delay auto-timeout during active use without waking an already-off screen. */
-    if (played_paused_count > 0 || skipped_next || skipped_prev || volume_delta != 0) {
-        lv_display_trigger_activity(NULL);
-    }
 
     bool screen_was_on = backlight_screen_is_on();
 
@@ -1010,7 +1022,8 @@ static void update_timer_cb(lv_timer_t * timer) {
         remote_control_notify_status(audio_is_playing(), audio_is_paused(), gui_player_get_now_playing_title(),
                                       gui_player_get_now_playing_folder(), gui_player_get_now_playing_album(), now_playing_path,
                                       (int) audio_get_position_seconds(), (int) audio_get_duration_seconds(),
-                                      audio_get_volume(), current_settings.play_mode);
+                                      audio_get_volume(), current_settings.play_mode,
+                                      now_playing_path && favorite_is_set);
     }
 
     /* Polling for in-flight async operations (wifi/bt connect, library scan,
@@ -1019,6 +1032,9 @@ static void update_timer_cb(lv_timer_t * timer) {
      * pending, so gating them on screen state would leave that operation
      * stuck until the user wakes the screen back up. */
     poll_subsonic_download();
+    poll_firmware_ota();
+    poll_plugin_store();
+    gui_plugin_manage_poll();
     poll_subsonic_library_download();
     poll_dlna_control();
     poll_subsonic_connect();
@@ -1086,7 +1102,7 @@ static void update_timer_cb(lv_timer_t * timer) {
 
     /* The slide displays frozen frames; defer purely visual refreshes until
      * it settles, while keeping the playback/hardware polling above live. */
-    if (gui_navigation_transition_in_progress()) return;
+    if (gui_navigation_transition_in_progress() || gui_player_lyrics_animation_in_progress()) return;
 
     if (!gui_player_has_active_track() || gui_player_is_seeking()) return;
 
@@ -1374,7 +1390,7 @@ static void poll_dlna_control(void) {
 
 static lv_obj_t * build_stream_media_screen(void) {
     static icon_grid_item_t items[1 + PLUGIN_MAX_STREAM_TILES];
-    items[0] = (icon_grid_item_t){ "submenu/subsonic.png", NULL, "Subsonic", subsonic_tile_cb, NULL };
+    items[0] = (icon_grid_item_t){ "stream_media/subsonic_row.png", "stream_media/subsonic_row_s.png", "Subsonic", subsonic_tile_cb, NULL };
 
     int count = 1;
     int plugin_count = plugin_manager_get_stream_tile_count();
@@ -1433,8 +1449,11 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
     boot_checkpoint("gui_init entered");
 #endif
     settings_load(&current_settings);
+    gui_display_apply_rotation(current_settings.screen_upside_down);
     bt_control_restore_codec_preference(current_settings.bt_codec);
     bt_control_set_speexrate_enabled(current_settings.bt_speexrate_enabled);
+    bt_control_set_dac_all_codecs(current_settings.dev_bt_dac_all_codecs);
+    gui_library_set_covers_during_playback(current_settings.dev_covers_during_playback);
     bt_control_set_sample_rate(current_settings.bt_sample_rate);
     db_log_set_enabled(current_settings.db_logging_enabled);
     hw_buttons_set_screenshot_combo_enabled(current_settings.screenshot_combo_enabled);
@@ -1491,9 +1510,13 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
      * RELEASED case during the session), so turning startup_volume_fixed_enabled
      * back off later resumes from wherever the slider was really last left,
      * not from stale fixed-mode state. */
-    audio_set_volume(current_settings.startup_volume_fixed_enabled
-                          ? (float) current_settings.startup_volume_fixed_percent / 100.0f
-                          : current_settings.volume); /* picked up below when the volume slider reads audio_get_volume() */
+    if (current_settings.car_mode_enabled) {
+        audio_set_volume((float) current_settings.car_mode_volume_percent / 100.0f);
+    } else {
+        audio_set_volume(current_settings.startup_volume_fixed_enabled
+                              ? (float) current_settings.startup_volume_fixed_percent / 100.0f
+                              : current_settings.volume); /* picked up below when the volume slider reads audio_get_volume() */
+    }
     audio_set_crossfade_enabled(current_settings.crossfade_enabled);
 
     /* Apply saved brightness level at startup. */
@@ -1576,6 +1599,7 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
 
 /* files_search and artist_albums initialized in gui_library_init */
     gui_text_input_init();
+    gui_text_view_init();
     stream_media_screen = build_stream_media_screen();
 
 
@@ -1615,6 +1639,7 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
     gui_network_init();
     gui_settings_init();
     gui_plugin_manage_init();
+    gui_plugin_store_init();
     gui_books_init();
     build_power_off_countdown_popup();
     gui_queue_init();
@@ -1663,6 +1688,7 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
      * start runtime update timer, and install gesture indev hooks. */
     gui_reset_interactive_timeout_baseline();
     lv_timer_create(power_button_timer_cb, 25, NULL);
+    lv_timer_create(media_button_timer_cb, 16, NULL);
     lv_timer_create(update_timer_cb, 500, NULL);
     lv_indev_t * gesture_indev = find_pointer_indev();
     gui_shell_install_indev_hooks(gesture_indev);
@@ -1672,8 +1698,8 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
 
     /* Auto-resume playback on startup:
      * If an SD card is mounted and contains a saved queue checkpoint, restore it
-     * first. Otherwise fall back to Car Mode and the opt-in "Resume Last Track"
-     * setting from internal storage / metadata database.
+     * first. Otherwise fall back to the saved track in internal storage /
+     * metadata database. Both paths use the same Car Mode / general resume policy.
      * Tracks in SUBSONIC_STREAM_CACHE_DIR are skipped to prevent resuming into
      * transient cache files without network connectivity. */
     bool sd_restored = false;
@@ -1681,40 +1707,14 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
         sd_restored = gui_player_restore_sd_queue(true);
     }
 
-    if (!sd_restored && current_settings.car_mode_enabled && current_settings.last_track[0] != '\0' &&
+    int boot_resume_mode = gui_player_boot_resume_mode();
+    if (!sd_restored && boot_resume_mode != 0 && current_settings.last_track[0] != '\0' &&
         strncmp(current_settings.last_track, SUBSONIC_STREAM_CACHE_DIR, strlen(SUBSONIC_STREAM_CACHE_DIR)) != 0) {
-#ifndef HOST_BUILD
-        /* Car Mode expects a connected headphone/aux jack to resume into.
-         * If no headphone is connected at boot, skip auto-resume and disable
-         * Car Mode to prevent unexpected playback or boot issues. */
-        if (get_headphone_state() == HEADPHONE_STATE_NONE) {
-            current_settings.car_mode_enabled = false;
-            settings_save_async(&current_settings);
-            show_info_toast("Car Mode disabled: no headphone detected at boot");
-        } else
-#endif
-        {
-            char ** resume_playlist;
-            int resume_count, resume_index;
-            if (build_saved_resume_playlist(&resume_playlist, &resume_count, &resume_index)) {
-                if (install_saved_resume_playlist(resume_playlist, resume_count)) {
-                    /* play_track_at_from() itself nav_push()es gui_player_get_screen() on top
-                     * of the seeded root, so a back-swipe from the resumed player
-                     * correctly lands back on the home screen. */
-                    play_track_at_from(resume_index, current_settings.last_position);
-                }
-            }
-        }
-    } else if (!sd_restored && current_settings.resume_mode != 0 && current_settings.last_track[0] != '\0' &&
-               strncmp(current_settings.last_track, SUBSONIC_STREAM_CACHE_DIR, strlen(SUBSONIC_STREAM_CACHE_DIR)) != 0) {
-        /* General "Resume Last Track" (Settings -> Playback):
-         * Resumes the last played local track on launch without requiring
-         * headphone presence. */
         char ** resume_playlist;
         int resume_count, resume_index;
         if (build_saved_resume_playlist(&resume_playlist, &resume_count, &resume_index)) {
             if (install_saved_resume_playlist(resume_playlist, resume_count)) {
-                if (current_settings.resume_mode == 2) {
+                if (boot_resume_mode == 2) {
                     /* Do not open ALSA at all until the user presses Play.  On
                      * a headphone-less boot, start-then-pause could lose the
                      * race to an output-open failure and consume this queue. */

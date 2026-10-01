@@ -221,7 +221,7 @@ endif
 LVGL_PATCH := patches/lvgl_fbdev_compositor.patch
 LVGL_RUNTIME_FIXES_PATCH := patches/lvgl_runtime_fixes.patch
 LVGL_GENERATED_FONTS_DIR := patches/lvgl_generated_fonts
-LVGL_GENERATED_FONTS := lv_font_montserrat_16.c lv_font_montserrat_20.c lv_font_montserrat_22.c lv_font_montserrat_24.c lv_font_montserrat_26.c lv_font_montserrat_28.c lv_font_montserrat_30.c lv_font_montserrat_32.c lv_font_montserrat_34.c lv_font_montserrat_40.c
+LVGL_GENERATED_FONTS := lv_font_montserrat_12.c lv_font_montserrat_14.c lv_font_montserrat_16.c lv_font_montserrat_18.c lv_font_montserrat_20.c lv_font_montserrat_22.c lv_font_montserrat_24.c lv_font_montserrat_26.c lv_font_montserrat_28.c lv_font_montserrat_30.c lv_font_montserrat_32.c lv_font_montserrat_34.c lv_font_montserrat_40.c
 LVGL_PINNED_COMMIT := 85aa60d18b3d5e5588d7b247abf90198f07c8a63
 LVGL_FBDEV_C := $(LVGL_DIR)/src/drivers/display/fb/lv_linux_fbdev.c
 LVGL_FBDEV_H := $(LVGL_DIR)/src/drivers/display/fb/lv_linux_fbdev.h
@@ -571,21 +571,40 @@ TARGET_LDFLAGS = -static -no-pie -lpthread -lm
 # streaming), library/ (metadata/file browsing/playlists), hardware/ (device
 # control), ui/ (gui/screens/assets/fonts), core/ (settings, subprocess,
 # misc). main.c stays at src/ root as the entry point.
-APP_SRCS = src/main.c src/ui/gui.c src/ui/gui_subsonic.c src/ui/gui_settings.c src/ui/gui_network.c src/ui/gui_theme.c src/ui/gui_notifications.c src/ui/gui_library.c src/ui/gui_queue.c src/ui/gui_player.c src/ui/gui_track_info.c src/ui/gui_plugins.c src/ui/gui_shell.c src/ui/gui_navigation.c src/ui/gui_books.c src/ui/gui_text_input.c src/ui/gui_lyrics.c src/ui/gui_reload.c src/audio/audio.c src/library/file_browser.c src/hardware/hw_buttons.c src/hardware/input_device_utils.c src/library/metadata.c src/library/metadata_db.c src/core/settings.c src/core/screenshot.c src/core/app_version.c src/audio/aiff_decoder.c src/audio/dsd_filter.c src/audio/dsd_decoder.c src/audio/aac_decoder.c src/audio/mp4_demux.c src/audio/ape_demux.c src/audio/ape_decoder.c src/audio/peq.c src/ui/assets.c src/ui/screen_builders.c src/hardware/battery.c src/network/wifi_status.c src/network/ca_bundle.c src/network/http_conn.c src/network/http_client.c src/network/http_stream.c src/network/subsonic_client.c src/library/cover_decode.c src/library/lyrics.c src/audio/asf_demux.c src/audio/wma_decoder.c src/audio/ogg_demux.c src/audio/opus_decoder.c src/audio/vorbis_decoder.c src/library/cue_parser.c src/ui/fallback_font.c \
-src/core/subprocess.c src/network/wifi_control.c src/network/bluetooth_control.c src/network/hiby_sys_server.c src/hardware/backlight.c src/network/import_web.c src/network/airplay_control.c src/network/airplay_bridge.c src/network/airplay_metadata.c src/hardware/headphone_status.c src/hardware/device_config.c src/hardware/led_control.c src/hardware/charge_limiter.c src/core/idle_shutdown.c src/hardware/power_suspend.c src/core/text_reader.c src/hardware/usb_mode_control.c src/hardware/usb_dac_bridge.c src/hardware/usb_audio_output.c src/core/firmware_update.c src/library/playlist_files.c src/core/timezone_data.c src/core/timezone_apply.c src/core/hostname_apply.c src/network/dlna_control.c src/network/remote_control.c src/network/catalog_source_cache.c src/network/remote_control_mdns.c src/plugins/plugin_manager.c
+APP_SRCS = src/main.c src/ui/gui.c src/ui/gui_subsonic.c src/ui/gui_settings.c src/ui/gui_network.c src/ui/gui_theme.c src/ui/gui_notifications.c src/ui/gui_library.c src/ui/gui_queue.c src/ui/gui_player.c src/ui/gui_track_info.c src/ui/gui_plugins.c src/ui/gui_shell.c src/ui/gui_navigation.c src/ui/gui_books.c src/ui/gui_text_input.c src/ui/gui_lyrics.c src/ui/gui_reload.c src/audio/audio.c src/library/file_browser.c src/hardware/hw_buttons.c src/hardware/input_device_utils.c src/library/metadata.c src/library/metadata_db.c src/core/settings.c src/core/screenshot.c src/core/app_version.c src/audio/aiff_decoder.c src/audio/dsd_filter.c src/audio/dsd_decoder.c src/audio/aac_decoder.c src/audio/mp4_demux.c src/audio/ape_demux.c src/audio/ape_decoder.c src/audio/peq.c src/ui/assets.c src/ui/screen_builders.c src/hardware/battery.c src/network/wifi_status.c src/network/ca_bundle.c src/network/http_conn.c src/network/http_client.c src/network/http_stream.c src/network/subsonic_client.c src/library/cover_decode.c src/library/image_thumb.c src/library/lyrics.c src/audio/asf_demux.c src/audio/wma_decoder.c src/audio/ogg_demux.c src/audio/opus_decoder.c src/audio/vorbis_decoder.c src/library/cue_parser.c src/ui/fallback_font.c src/ui/gui_text_view.c \
+src/core/subprocess.c src/network/wifi_control.c src/network/bluetooth_control.c src/network/hiby_sys_server.c src/hardware/backlight.c src/network/import_web.c src/network/airplay_control.c src/network/airplay_bridge.c src/network/airplay_metadata.c src/hardware/headphone_status.c src/hardware/device_config.c src/hardware/led_control.c src/hardware/charge_limiter.c src/core/idle_shutdown.c src/hardware/power_suspend.c src/core/text_reader.c src/hardware/usb_mode_control.c src/hardware/usb_dac_bridge.c src/hardware/usb_audio_output.c src/core/firmware_update.c src/library/playlist_files.c src/library/favorite_writer.c src/network/firmware_ota.c src/network/plugin_store.c src/core/timezone_data.c src/core/timezone_apply.c src/core/hostname_apply.c src/network/dlna_control.c src/network/remote_control.c src/network/catalog_source_cache.c src/network/remote_control_mdns.c src/plugins/plugin_manager.c
 APP_SRCS += src/ui/lyrics_layout.c src/ui/transition_compositor.c src/ui/frosted_glass.c src/ui/hw_volume_coalesce.c
 APP_SRCS += src/core/storage_migration.c src/core/sd_fsck.c src/core/sd_fsck_run.c
 APP_SRCS += src/plugins/plugin_json.c src/plugins/plugin_storage.c src/plugins/plugin_disabled_list.c
-APP_SRCS += src/ui/gui_plugin_manage.c src/ui/gui_lock_screen.c
+APP_SRCS += src/ui/gui_plugin_manage.c src/ui/gui_plugin_store.c src/ui/gui_lock_screen.c
 APP_SRCS += src/library/remote_track.c
 APP_SRCS += src/library/queue_resume.c
 APP_SRCS += src/audio/track_probe.c
 APP_SRCS += src/library/albumart.c src/library/tagcache.c src/library/path_cache.c src/library/remote_state.c src/library/subsonic_saved_servers.c src/library/artwork_coordinator.c
-APP_SRCS += src/core/utf8_util.c src/core/app_clock.c src/core/db_log.c
+APP_SRCS += src/core/utf8_util.c src/core/app_clock.c src/core/db_log.c src/core/zip_reader.c src/core/html_blocks.c
 APP_SRCS += src/ui/gesture_detector.c
+APP_SRCS += src/ui/player_layouts.c
 APP_SRCS += src/network/bluetooth_reconnect.c
 APP_CXX_SRCS = src/audio/alac_decoder.cpp
 LVGL_SRCS = $(sort $(shell find $(LVGL_DIR)/src -type f -name '*.c'))
+# LVGL 9.5 dropped the XML engine; v9.4.0's is vendored (see
+# third_party/lv_xml/README.md). The expat *_impl/*_ns files are #included by
+# xmltok.c, so they are not compiled on their own (lv_xml_test.c, which needs
+# LV_USE_TEST, is not part of the vendored copy).
+LV_XML_DIR = third_party/lv_xml
+LV_XML_SRCS = $(sort $(filter-out %/lv_xml_test.c %/xmltok_impl.c %/xmltok_ns.c, \
+                $(shell find $(LV_XML_DIR)/src -type f -name '*.c')))
+# The vendored sources include LVGL internals by 9.4 relative paths
+# ("../../misc/lv_types.h", "../../../lvgl.h", "../../lv_conf_internal.h").
+# Files the shims under third_party/lv_xml/src do not provide resolve through
+# this directory: two levels below lvgl/src, so those paths land on the real
+# 9.5 headers without editing upstream files.
+LV_XML_INC = -I$(LVGL_DIR)/src/others/translation
+LV_XML_CFLAGS = -Os $(LV_XML_INC)
+# The one application file that includes the vendored XML headers needs the
+# same include directory.
+$(BUILD_HOST_DIR)/ui/player_layouts.o: HOST_CFLAGS += $(LV_XML_INC)
+$(BUILD_TARGET_DIR)/ui/player_layouts.o: TARGET_CFLAGS += $(LV_XML_INC)
 TINYALSA_SRCS = $(sort $(shell find $(TINYALSA_DIR)/src -type f -name '*.c'))
 FAAD2_SRCS = $(sort $(shell find $(FAAD2_DIR)/libfaad -type f -name '*.c'))
 # Decoder-only ALAC sources (the repo also ships an encoder we don't need)
@@ -676,7 +695,7 @@ LIBEXECINFO_SRCS = $(LIBEXECINFO_DIR)/execinfo.c $(LIBEXECINFO_DIR)/stacktravers
 
 # Object files
 HOST_OBJS = $(APP_SRCS:src/%.c=$(BUILD_HOST_DIR)/%.o) $(APP_CXX_SRCS:src/%.cpp=$(BUILD_HOST_DIR)/%.o) \
-            $(LVGL_SRCS:$(LVGL_DIR)/%.c=$(BUILD_HOST_DIR)/lvgl/%.o) $(FAAD2_SRCS:$(FAAD2_DIR)/libfaad/%.c=$(BUILD_HOST_DIR)/faad2/%.o) \
+            $(LVGL_SRCS:$(LVGL_DIR)/%.c=$(BUILD_HOST_DIR)/lvgl/%.o) $(LV_XML_SRCS:$(LV_XML_DIR)/%.c=$(BUILD_HOST_DIR)/lv_xml/%.o) $(FAAD2_SRCS:$(FAAD2_DIR)/libfaad/%.c=$(BUILD_HOST_DIR)/faad2/%.o) \
             $(ALAC_C_SRCS:$(ALAC_DIR)/codec/%.c=$(BUILD_HOST_DIR)/alac/%.o) $(ALAC_CXX_SRCS:$(ALAC_DIR)/codec/%.cpp=$(BUILD_HOST_DIR)/alac/%.o) \
             $(MBEDTLS_SRCS:$(MBEDTLS_DIR)/library/%.c=$(BUILD_HOST_DIR)/mbedtls/%.o) $(CJSON_SRCS:$(CJSON_DIR)/%.c=$(BUILD_HOST_DIR)/cjson/%.o) \
             $(OPUS_SRCS:$(OPUS_DIR)/%.c=$(BUILD_HOST_DIR)/opus/%.o) \
@@ -686,7 +705,7 @@ HOST_OBJS = $(APP_SRCS:src/%.c=$(BUILD_HOST_DIR)/%.o) $(APP_CXX_SRCS:src/%.cpp=$
             $(TINFL_SRCS:$(TINFL_DIR)/%.c=$(BUILD_HOST_DIR)/tinfl/%.o)
 TARGET_OBJS = $(APP_SRCS:src/%.c=$(BUILD_TARGET_DIR)/%.o) $(APP_CXX_SRCS:src/%.cpp=$(BUILD_TARGET_DIR)/%.o) \
               $(TARGET_ONLY_APP_SRCS:src/%.c=$(BUILD_TARGET_DIR)/%.o) \
-              $(LVGL_SRCS:$(LVGL_DIR)/%.c=$(BUILD_TARGET_DIR)/lvgl/%.o) $(TINYALSA_SRCS:$(TINYALSA_DIR)/%.c=$(BUILD_TARGET_DIR)/tinyalsa/%.o) \
+              $(LVGL_SRCS:$(LVGL_DIR)/%.c=$(BUILD_TARGET_DIR)/lvgl/%.o) $(LV_XML_SRCS:$(LV_XML_DIR)/%.c=$(BUILD_TARGET_DIR)/lv_xml/%.o) $(TINYALSA_SRCS:$(TINYALSA_DIR)/%.c=$(BUILD_TARGET_DIR)/tinyalsa/%.o) \
               $(FAAD2_SRCS:$(FAAD2_DIR)/libfaad/%.c=$(BUILD_TARGET_DIR)/faad2/%.o) \
               $(ALAC_C_SRCS:$(ALAC_DIR)/codec/%.c=$(BUILD_TARGET_DIR)/alac/%.o) $(ALAC_CXX_SRCS:$(ALAC_DIR)/codec/%.cpp=$(BUILD_TARGET_DIR)/alac/%.o) \
               $(MBEDTLS_SRCS:$(MBEDTLS_DIR)/library/%.c=$(BUILD_TARGET_DIR)/mbedtls/%.o) $(CJSON_SRCS:$(CJSON_DIR)/%.c=$(BUILD_TARGET_DIR)/cjson/%.o) \
@@ -796,6 +815,10 @@ $(BUILD_HOST_DIR)/%.o: src/%.cpp $(LVGL_PATCH_STAMP)
 $(BUILD_HOST_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c $(LVGL_PATCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(HOST_CFLAGS) -c $< -o $@
+
+$(BUILD_HOST_DIR)/lv_xml/%.o: $(LV_XML_DIR)/%.c $(LVGL_PATCH_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(HOST_CFLAGS) $(LV_XML_CFLAGS) -c $< -o $@
 
 $(BUILD_HOST_DIR)/faad2/%.o: $(FAAD2_DIR)/libfaad/%.c
 	@mkdir -p $(dir $@)
@@ -939,6 +962,63 @@ remote-control-pin-selftest:
 	    -o $(BUILD_TARGET_DIR)/remote_control_pin_test
 	./$(BUILD_TARGET_DIR)/remote_control_pin_test
 
+# Remote Control v1 extension routes (folders, recently played, favorites,
+# queue move/play, playlist management and import) over a socketpair, with a
+# fake library and Files index. Includes the real remote_control.c and links
+# the real playlist_files.c; section GC discards the unreached server code.
+.PHONY: remote-control-api-selftest
+remote-control-api-selftest:
+	@mkdir -p $(BUILD_TARGET_DIR)
+	$(CC) -O0 -g -Wall -Wextra -ffunction-sections -fdata-sections -DHOST_BUILD=1 \
+	    -I. -Isrc/network -Isrc/core -Isrc/audio -Isrc/library -Isrc/ui \
+	    -Ilvgl -Idr_libs -Ifaad2/include -Ialac/codec -Imbedtls/include -IcJSON -Iopus/include \
+	    -Ilua/src -Istb_vorbis -Ijpeg_vendor_config -Ijpeg -Itinfl -DLV_CONF_INCLUDE_SIMPLE=1 \
+	    src/network/remote_control_api_test.c src/library/playlist_files.c src/library/favorite_writer.c -Wl,--gc-sections -lpthread \
+	    -o $(BUILD_TARGET_DIR)/remote_control_api_test
+	./$(BUILD_TARGET_DIR)/remote_control_api_test
+
+# Ordering of the shared favorite writer (player heart vs Remote Control).
+.PHONY: favorite-writer-selftest
+favorite-writer-selftest:
+	@mkdir -p $(BUILD_TARGET_DIR)
+	$(CC) -O0 -g -Wall -Wextra -Isrc/library src/library/favorite_writer.c src/library/favorite_writer_test.c \
+	    -lpthread -o $(BUILD_TARGET_DIR)/favorite_writer_test
+	./$(BUILD_TARGET_DIR)/favorite_writer_test
+
+# DSD decoder: synthetic DSF/DFF tones for level, noise, bit order, seek
+# continuity, rates, malformed headers and 64-bit offsets. The same test
+# also runs as a MIPS build under qemu-mipsel when available (32-bit long).
+.PHONY: dsd-decoder-selftest
+dsd-decoder-selftest:
+	@mkdir -p $(BUILD_TARGET_DIR)
+	$(CC) -O2 -g -Wall -Wextra -Isrc/audio src/audio/dsd_decoder.c src/audio/dsd_filter.c \
+	    src/audio/dsd_decoder_test.c -lm -lpthread -o $(BUILD_TARGET_DIR)/dsd_decoder_test
+	./$(BUILD_TARGET_DIR)/dsd_decoder_test
+	@if command -v qemu-mipsel >/dev/null 2>&1; then \
+	    $(CROSS_CC) -O2 -static -Wall -Isrc/audio src/audio/dsd_decoder.c src/audio/dsd_filter.c \
+	        src/audio/dsd_decoder_test.c -lm -lpthread -o $(BUILD_TARGET_DIR)/dsd_decoder_test_mips && \
+	    qemu-mipsel ./$(BUILD_TARGET_DIR)/dsd_decoder_test_mips; fi
+
+# Online firmware update helpers: weekly release selection, SHA256SUMS
+# parsing and installed-version dates. No network.
+.PHONY: firmware-ota-selftest
+firmware-ota-selftest:
+	@mkdir -p $(BUILD_TARGET_DIR)
+	$(CC) -O0 -g -Wall -Wextra -ffunction-sections -fdata-sections -DHOST_BUILD=1 \
+	    -I. -Isrc/network -Isrc/core -Isrc/hardware -Isrc/ui -Isrc/library -Ilvgl -IcJSON -Imbedtls/include \
+	    src/network/firmware_ota_test.c src/network/firmware_ota.c cJSON/cJSON.c \
+	    -Wl,--gc-sections -lpthread -lm -o $(BUILD_TARGET_DIR)/firmware_ota_test
+	./$(BUILD_TARGET_DIR)/firmware_ota_test
+
+.PHONY: plugin-store-selftest
+plugin-store-selftest:
+	@mkdir -p $(BUILD_TARGET_DIR)
+	$(CC) -O0 -g -Wall -Wextra -ffunction-sections -fdata-sections -DHOST_BUILD=1 \
+	    -I. -Isrc/network -Isrc/core -Isrc/hardware -Isrc/ui -Isrc/library -Isrc/plugins -Ilvgl -IcJSON -Imbedtls/include \
+	    src/network/plugin_store_test.c src/network/plugin_store.c cJSON/cJSON.c mbedtls/library/sha256.c mbedtls/library/platform_util.c \
+	    -Wl,--gc-sections -lpthread -lm -o $(BUILD_TARGET_DIR)/plugin_store_test
+	./$(BUILD_TARGET_DIR)/plugin_store_test
+
 subprocess-timeout-selftest:
 	@mkdir -p $(BUILD_TARGET_DIR)
 	$(CC) -O0 -g -Wall -Wextra -Isrc/core src/core/subprocess.c src/core/subprocess_timeout_test.c -o $(BUILD_TARGET_DIR)/subprocess_timeout_test
@@ -967,6 +1047,30 @@ bluetooth-reconnect-selftest:
 	    -o $(BUILD_TARGET_DIR)/bluetooth_reconnect_backend_test
 	./$(BUILD_TARGET_DIR)/bluetooth_reconnect_backend_test
 
+.PHONY: subsonic-client-selftest
+subsonic-client-selftest:
+	@mkdir -p $(BUILD_HOST_DIR)
+	$(CC) -O0 -g -Wall -Wextra -ffunction-sections -fdata-sections -DLV_CONF_INCLUDE_SIMPLE=1 \
+	    -I. -Isrc/network -Isrc/core -Isrc/ui -Ilvgl -Imbedtls/include -IcJSON \
+	    src/network/subsonic_client_test.c src/network/subsonic_client.c src/core/utf8_util.c \
+	    cJSON/cJSON.c mbedtls/library/md5.c mbedtls/library/platform_util.c \
+	    -Wl,--gc-sections -lpthread -o $(BUILD_HOST_DIR)/subsonic_client_test
+	./$(BUILD_HOST_DIR)/subsonic_client_test
+
+.PHONY: subsonic-ui-selftest
+subsonic-ui-selftest:
+	@mkdir -p $(BUILD_HOST_DIR)
+	$(CC) -O0 -g -Wall -ffunction-sections -fdata-sections -DLV_CONF_INCLUDE_SIMPLE=1 \
+	    -I. -Isrc/network -Isrc/core -Isrc/ui -Isrc/library -Isrc/audio -Isrc/plugins -Isrc/hardware -Ilvgl \
+	    src/ui/subsonic_queue_identity_test.c src/core/utf8_util.c \
+	    -Wl,--gc-sections -lpthread -lm -o $(BUILD_HOST_DIR)/subsonic_queue_identity_test
+	./$(BUILD_HOST_DIR)/subsonic_queue_identity_test
+	$(CC) -O0 -g -Wall -ffunction-sections -fdata-sections -DLV_CONF_INCLUDE_SIMPLE=1 \
+	    -I. -Isrc/network -Isrc/core -Isrc/ui -Isrc/library -Isrc/audio -Isrc/plugins -Isrc/hardware -Ilvgl \
+	    -Imbedtls/include -IcJSON src/ui/subsonic_download_filename_test.c src/core/utf8_util.c \
+	    -Wl,--gc-sections -lpthread -lm -o $(BUILD_HOST_DIR)/subsonic_download_filename_test
+	./$(BUILD_HOST_DIR)/subsonic_download_filename_test
+
 bluetooth-monitor-selftest:
 	@mkdir -p $(BUILD_TARGET_DIR)
 	$(CC) -O0 -g -Wall -Wextra -ffunction-sections -fdata-sections -Isrc/network -Isrc/core -Isrc/audio \
@@ -987,18 +1091,59 @@ bluetooth-codec-selftest:
 # Headless real-LVGL layout tests: no SDL development package or device
 # required. Keep these objects separate from both production configurations.
 UI_STYLE_TEST_SRCS = $(LVGL_SRCS) src/ui/screen_builders.c src/ui/gui_theme.c src/ui/gui_notifications.c src/ui/gui_plugins.c src/ui/transition_compositor.c src/ui/frosted_glass.c src/ui/screen_builders_test.c
-UI_STYLE_TEST_OBJS = $(UI_STYLE_TEST_SRCS:%.c=build_ui_test/%.o)
-ui-style-selftest: build_ui_test/ui_style_test
-	./build_ui_test/ui_style_test
+ifeq ($(BOARD),r1)
+UI_STYLE_TEST_DIR = build_ui_test
+else
+UI_STYLE_TEST_DIR = build_ui_test_$(BOARD)
+endif
+UI_STYLE_TEST_OBJS = $(UI_STYLE_TEST_SRCS:%.c=$(UI_STYLE_TEST_DIR)/%.o)
+ui-style-selftest: $(UI_STYLE_TEST_DIR)/ui_style_test
+	./$(UI_STYLE_TEST_DIR)/ui_style_test
 
-build_ui_test/ui_style_test: $(UI_STYLE_TEST_OBJS)
+$(UI_STYLE_TEST_DIR)/ui_style_test: $(UI_STYLE_TEST_OBJS)
 	$(CC) $^ -Wl,--gc-sections -lpthread -lm -o $@
 
-build_ui_test/%.o: %.c
+$(UI_STYLE_TEST_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -O0 -ffunction-sections -fdata-sections -c $< -o $@
+	$(CC) $(CFLAGS) $(BOARD_DEFINE) -O0 -ffunction-sections -fdata-sections -c $< -o $@
 
 -include $(UI_STYLE_TEST_OBJS:.o=.d)
+
+# Headless Player layout registry + XML loader test. Logging is on so a layout
+# attribute the vendored XML engine does not understand shows up as a warning.
+# Own object directory: the LVGL objects here are built with different flags
+# than the ui-style-selftest ones.
+.PHONY: player-layouts-selftest
+# Per-board object directory (the layouts depend on the screen size).
+LT_DIR = build_layouts_test$(if $(filter-out r1,$(BOARD)),_$(BOARD))
+PLAYER_LAYOUTS_TEST_SRCS = $(LVGL_SRCS) $(LV_XML_SRCS) src/ui/player_layouts.c src/ui/player_layouts_test.c
+PLAYER_LAYOUTS_TEST_OBJS = $(PLAYER_LAYOUTS_TEST_SRCS:%.c=$(LT_DIR)/%.o)
+player-layouts-selftest: $(LT_DIR)/player_layouts_test
+	./$(LT_DIR)/player_layouts_test
+
+$(LT_DIR)/player_layouts_test: $(PLAYER_LAYOUTS_TEST_OBJS)
+	$(CC) $^ -Wl,--gc-sections -lpthread -lm -o $@
+
+$(LT_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(BOARD_DEFINE) $(LV_XML_INC) -O0 -DLV_USE_LOG=1 -DLV_LOG_LEVEL=LV_LOG_LEVEL_WARN \
+	    -ffunction-sections -fdata-sections -c $< -o $@
+
+-include $(PLAYER_LAYOUTS_TEST_OBJS:.o=.d)
+
+# The same screen-building code the device runs, including gui_player.c, against
+# real LVGL and the XML engine. Event callbacks keep playback code referenced
+# that this test never fires, so those references stay unresolved at link time.
+.PHONY: player-layout-bind-selftest
+PLAYER_BIND_TEST_OBJS = $(filter-out $(LT_DIR)/src/ui/player_layouts_test.o,$(PLAYER_LAYOUTS_TEST_OBJS)) \
+                        $(LT_DIR)/src/ui/player_layout_bind_test.o
+player-layout-bind-selftest: $(LT_DIR)/player_layout_bind_test
+	./$(LT_DIR)/player_layout_bind_test
+
+$(LT_DIR)/player_layout_bind_test: $(PLAYER_BIND_TEST_OBJS)
+	$(CC) $^ -Wl,--gc-sections -Wl,--unresolved-symbols=ignore-all -lpthread -lm -o $@
+
+-include $(LT_DIR)/src/ui/player_layout_bind_test.d
 
 PLAYLIST_TEST_SANITIZERS ?=
 playlist-selftest:
@@ -1023,6 +1168,24 @@ sd-fsck-selftest:
 	    src/core/sd_fsck_test.c src/core/sd_fsck.c \
 	    -o $(BUILD_TARGET_DIR)/sd_fsck_test
 	./$(BUILD_TARGET_DIR)/sd_fsck_test
+
+.PHONY: zip-reader-selftest
+zip-reader-selftest:
+	@mkdir -p $(BUILD_TARGET_DIR)
+	$(CC) -std=gnu11 -O0 -g -Wall -Wextra -Werror -DHOST_BUILD=1 -D_FILE_OFFSET_BITS=64 \
+	    -I. -Isrc/core -Itinfl -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ARCHIVE_APIS \
+	    src/core/zip_reader_test.c src/core/zip_reader.c tinfl/miniz_tinfl.c \
+	    -o $(BUILD_TARGET_DIR)/zip_reader_test
+	./$(BUILD_TARGET_DIR)/zip_reader_test
+
+.PHONY: html-blocks-selftest
+html-blocks-selftest:
+	@mkdir -p $(BUILD_TARGET_DIR)
+	$(CC) -std=gnu11 -O0 -g -Wall -Wextra -Werror -DHOST_BUILD=1 \
+	    -I. -Isrc/core \
+	    src/core/html_blocks_test.c src/core/html_blocks.c src/core/utf8_util.c \
+	    -o $(BUILD_TARGET_DIR)/html_blocks_test
+	./$(BUILD_TARGET_DIR)/html_blocks_test
 
 .PHONY: storage-migration-selftest
 storage-migration-selftest:
@@ -1134,6 +1297,20 @@ metadata-artwork-selftest:
 # rule, which already carries this dependency), and tjpgd's decoded pixel
 # format/geometry depend on lvgl/src/libs/tjpgd/tjpgdcnf.h's project-specific
 # customization, one of the golden files the patch stamp installs.
+# Host image_thumb tests: size detection, fit math, and a BMP decoded,
+# fitted and written as an LVGL RGB565 .bin file.
+image-thumb-selftest: $(LVGL_PATCH_STAMP)
+	@mkdir -p $(BUILD_TARGET_DIR)
+	$(CC) -O0 -g -Wall -DHOST_BUILD=1 -DLV_CONF_INCLUDE_SIMPLE=1 \
+	    -I. -Isrc/library -Isrc/core -Isrc/audio -Ilvgl \
+	    -Ijpeg_vendor_config -I$(JPEG_DIR) -I$(TINFL_DIR) \
+	    -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ARCHIVE_APIS \
+	    src/library/image_thumb_test.c src/library/image_thumb.c src/library/cover_decode.c \
+	    src/library/artwork_coordinator.c lvgl/src/libs/tjpgd/tjpgd.c \
+	    $(JPEG_SRCS) $(TINFL_SRCS) \
+	    -lpthread -lm -o $(BUILD_TARGET_DIR)/image_thumb_test
+	./$(BUILD_TARGET_DIR)/image_thumb_test
+
 cover_decode_scale_test: $(LVGL_PATCH_STAMP)
 	@mkdir -p $(BUILD_TARGET_DIR)
 	$(CC) -O0 -g -Wall -DHOST_BUILD=1 -DLV_CONF_INCLUDE_SIMPLE=1 \
@@ -1198,6 +1375,10 @@ $(BUILD_TARGET_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c $(LVGL_PATCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CROSS_CC) $(TARGET_CFLAGS) -c $< -o $@
 
+$(BUILD_TARGET_DIR)/lv_xml/%.o: $(LV_XML_DIR)/%.c $(LVGL_PATCH_STAMP)
+	@mkdir -p $(dir $@)
+	$(CROSS_CC) $(TARGET_CFLAGS) $(LV_XML_CFLAGS) -c $< -o $@
+
 $(BUILD_TARGET_DIR)/tinyalsa/%.o: $(TINYALSA_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CROSS_CC) $(TINYALSA_CFLAGS) -c $< -o $@
@@ -1255,7 +1436,7 @@ compile_commands.json:
 	@python3 generate_compile_commands.py
 
 clean:
-	rm -rf build_host build_host_* build_target build_target_* build_ui_test \
+	rm -rf build_host build_host_* build_target build_target_* build_ui_test build_layouts_test* \
 	    compas_player_host compas_player_host_* \
 	    compas_player_target compas_player_target_* \
 	    compile_commands.json compile_flags.txt

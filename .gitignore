@@ -31,9 +31,17 @@
 # directory that is still itself excluded, so each level needs its own `!`
 # before the next.
 /assets/theme2/*
+/assets/theme1/*
+!/assets/theme1/pull_down/
+/assets/theme1/pull_down/*
+!/assets/theme1/pull_down/car_mode.png
+!/assets/theme1/pull_down/car_mode_s.png
+!/assets/theme1/pull_down/CAR_MODE_SOURCES.txt
 
 # Wholly ours, minus the stock files that happen to share the directory.
 !/assets/theme2/power_action/
+# Player layout XML files (src/ui/player_layouts.c scans this directory).
+!/assets/theme2/player_layouts/
 !/assets/theme2/pull_down/
 /assets/theme2/pull_down/bg.png
 !/assets/theme2/topbar/
@@ -67,6 +75,17 @@
 !/assets/theme2/stream_media/subsonic.png
 !/assets/theme2/stream_media/subsonic_s.png
 !/assets/theme2/stream_media/download.png
+!/assets/theme2/stream_media/subsonic_row.png
+!/assets/theme2/stream_media/subsonic_row_s.png
+!/assets/theme2/stream_media/radio_row.png
+!/assets/theme2/stream_media/radio_row_s.png
+!/assets/theme2/stream_media/podcasts_row.png
+!/assets/theme2/stream_media/podcasts_row_s.png
+!/assets/theme2/stream_media/qobuz_row.png
+!/assets/theme2/stream_media/qobuz_row_s.png
+!/assets/theme2/stream_media/tidal_row.png
+!/assets/theme2/stream_media/tidal_row_s.png
+!/assets/theme2/stream_media/SOURCES.txt
 !/assets/theme2/playing_plane/
 /assets/theme2/playing_plane/*
 !/assets/theme2/playing_plane/airplay_logo_white.png
@@ -136,6 +155,9 @@
 !/assets/theme2/settings/power.png
 !/assets/theme2/settings/system.png
 !/assets/theme2/settings/about.png
+!/assets/theme2/settings/sound.png
+!/assets/theme2/settings/playback.png
+!/assets/theme2/settings/library.png
 !/assets/theme2/settings/bg_music.png
 !/assets/theme2/settings/bg_display.png
 !/assets/theme2/settings/bg_power.png
@@ -166,7 +188,8 @@
 
 # Build outputs
 /build_host/
-/build_ui_test/
+/build_ui_test*/
+/build_layouts_test*/
 /build_bootloader_test/
 /build_test/
 /build_host_*/
@@ -216,6 +239,8 @@
 # `compile_commands.json` target invokes -- this one ships with the repo.
 !/generate_compile_commands.py
 !/scripts/offline_library_scan.py
+!/scripts/generate_car_mode_toggle.py
+!/scripts/generate_stream_media_icons.py
 
 # Standalone development self-tests are local-only and are not shipped in
 # the public source/release tree. Match future files in any directory too.
@@ -230,9 +255,14 @@
 # gitignore never affects files git already tracks; `git rm --cached` them
 # too if the intent is to stop tracking those as well.
 *_test.c
+!src/network/subsonic_client_test.c
+!/src/ui/subsonic_queue_identity_test.c
+!/src/ui/subsonic_download_filename_test.c
 !/src/library/path_cache_migration_test.c
 !/src/core/storage_migration_test.c
 !/src/core/sd_fsck_test.c
+!/src/core/zip_reader_test.c
+!/src/core/html_blocks_test.c
 !/src/library/albumart_migration_test.c
 !/src/library/metadata_migration_retry_test.c
 !/src/network/remote_control_mdns_test.c
@@ -250,11 +280,21 @@
 # Local GUI-refactor extraction workspace
 /scratch/
 
+# Reproducible sources and renderer for the added main Settings icons.
+!/scripts/assets/
+!/scripts/assets/settings_category_icons/
+!/scripts/assets/settings_category_icons/*.svg
+!/scripts/generate_settings_category_icons.py
+!/scripts/assets/submenu_icons/
+!/scripts/assets/submenu_icons/*.svg
+!/scripts/generate_submenu_genres_icon.py
+
 # Local-only known-issues tracker (not part of the public docs)
 /ISSUES.md
 /TESTING.md
 /TECHNICAL_NOTES.md
 /WHATS_NEW_NEXT.md
+/POSSIBLE_IMPROVEMENTS.md
 /Screenshots/
 /tools/
 
@@ -319,6 +359,8 @@ repomix-output.xml
 src/library/cover_decode_scale_test.c
 inline remote follow-up fixes.diff
 src/ui/screen_builders_test.c
+!scripts/generate_power_action_icons.py
+!/assets/theme1/power_action/
 print_heights.c
 final_diff.patch
 
@@ -328,3 +370,11 @@ final_diff.patch
 /scripts/__pycache__/
 src/library/metadata_artwork_test.c
 docs/INCREMENTAL_DATABASE.md
+*.md
+
+# Player layouts: the docs and tests belong to the feature, so they are
+# exempt from the blanket *.md and *_test.c rules above.
+!/docs/PLAYER_LAYOUTS.md
+!/third_party/lv_xml/README.md
+!/src/ui/player_layouts_test.c
+!/src/ui/player_layout_bind_test.c

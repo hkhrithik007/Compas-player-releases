@@ -66,11 +66,14 @@ void gui_reset_interactive_timeout_baseline(void);
  * anywhere in this call keeps today's exact plain-label rendering. height
  * (0 = default 84px, or 96px for icon lists, scaled for the board) applies
  * to every row in this call, not per-row. Icon rows inherit native category
- * gradients and use 44px reference icons. Returns
+ * gradients and use 44px reference icons. wrap_labels opts individual rows
+ * into multiline text and grows them beyond the minimum height to fit. Returns
  * the selected screen-pool slot so callbacks can be stored per slot. */
 int gui_plugin_show_list(const char * title, const char * const * labels, const char * const * icon_paths,
-                          const char * const * text_sizes, int32_t height, int32_t width,
-                          int selected_index, int count);
+                          const char * const * text_sizes, const bool * wrap_labels, int32_t height, int32_t width,
+                          int selected_index, int count, int columns);
+/* True while pool slot's list screen is the top of the navigation stack. */
+bool gui_plugin_list_is_top(int slot);
 
 /* Repopulates and pushes a shared plugin-settings-list screen -- a SEPARATE
  * pool from gui_plugin_show_list()'s own (PLUGIN_SETTINGS_LIST_SCREEN_POOL_
@@ -89,7 +92,8 @@ int gui_plugin_show_list(const char * title, const char * const * labels, const 
 int gui_plugin_show_settings_list(const char * title, const int * row_types, const char * const * labels,
                                    const bool * toggle_initial, const int * slider_min, const int * slider_max,
                                    const int * slider_value, const char * const * icon_paths, const int32_t * heights,
-                                   const int32_t * widths, const char * const * text_sizes, int count);
+                                   const int32_t * widths, const char * const * text_sizes,
+                                   const bool * wrap_labels, int count);
 
 /* Starts playback of a brand-new playlist built from `paths[0..count)`,
  * starting at paths[start_index] -- same "starting something new clears
@@ -328,6 +332,8 @@ typedef enum {
     SEARCH_BINDING_FILES,
     SEARCH_BINDING_SUBSONIC_ARTISTS,
     SEARCH_BINDING_SUBSONIC_ALBUMS,
+    SEARCH_BINDING_RECENTLY_ADDED,
+    SEARCH_BINDING_GROUP_SONGS,
     SEARCH_BINDING_COUNT
 } search_binding_id_t;
 
@@ -340,6 +346,7 @@ typedef struct {
     const char * label;
     lv_event_cb_t cb;
     bool destructive;
+    bool cancel;
 } menu_popup_row_t;
 
 lv_obj_t * build_menu_popup(const menu_popup_row_t * rows, int row_count, lv_event_cb_t backdrop_cb, lv_obj_t ** out_backdrop);

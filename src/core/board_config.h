@@ -12,7 +12,8 @@
  *     logo2.jpeg all measuring exactly 480x720 -- the same evidentiary
  *     standard src/bootloader/fb_draw.h's own comment already relies on:
  *     the boot splash is authored to exactly match the real panel).
- *   - R3II 2025: 320x480 from the specs in hiby wiki. */
+ *   - R3II 2025: extracted v1.3 firmware's gt9xx_touch.sh sets the touch
+ *     limits to 320x480, corroborated by its 320x480 boot logos. */
 #if defined(BOARD_R3PROII)
   #define BOARD_SCREEN_WIDTH  480
   #define BOARD_SCREEN_HEIGHT 720
@@ -119,9 +120,11 @@
  * the register at some other value):
  *   R1:        charge_voltage_limit=4350 -> AXP2101 enum 4 (4.35V)
  *   R3 Pro II: charge_voltage_limit=4400 -> AXP2101 enum 5 (4.40V)
+ *   R3II 2025: charge_voltage_limit=4400 -> AXP2101 enum 5 (4.40V), from
+ *              the stock V1.3 r3ii_2025.upt
  * AXP_REG_VOLTAGE's low 3 bits (src/hardware/charge_limiter.c): 1=4.0V
  * 2=4.1V 3=4.2V 4=4.35V 5=4.4V. */
-#if defined(BOARD_R3PROII)
+#if defined(BOARD_R3PROII) || defined(BOARD_R3II_2025)
   #define AXP_VOLTAGE_BASELINE 5u
 #else
   #define AXP_VOLTAGE_BASELINE 4u

@@ -2,6 +2,7 @@
 #define SETTINGS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Discrete screen-timeout presets. The original useful coarse progression
@@ -25,6 +26,7 @@ extern const int IDLE_SHUTDOWN_STEPS[];
 extern const int SLEEP_TIMER_STEPS[];
 #define SLEEP_TIMER_STEP_COUNT 10
 #define SETTINGS_SUBSONIC_SAVED_MAX 16
+#define SETTINGS_SUBSONIC_DOWNLOAD_SUBFOLDER_MAX 256
 #define REMOTE_CONTROL_PIN_MAX_LENGTH 12
 
 #define BT_DEVICE_RATE_MAX 8
@@ -52,6 +54,7 @@ typedef struct {
     int play_pause_button_mode;
 
     uint32_t accent_color;     /* packed 0xRRGGBB, applied to sliders/switches app-wide */
+    bool accent_dynamic;       /* "Match album art": the playing cover's color replaces accent_color while shown */
     bool crossfade_enabled;    /* if true, fade into the next queued track near the current one's end */
 
     /* Default true -- gapless is this pipeline's normal behavior, not an
@@ -76,10 +79,16 @@ typedef struct {
      * that field's old on-disk key. */
     int replaygain_mode;
 
+    /* Settings -> Display -> Animation Speed. Duration multiplier in
+     * percent: 0 = Off, 25/50/75 = faster, 100 = today's timing. */
+    int animation_scale;
+
     /* Car Mode: unplugging power while something is loaded checkpoints position
      * and powers the device off; plugging power back in powers it back on and
-     * resumes automatically. Off by default. */
+     * can resume automatically. Off by default. */
     bool car_mode_enabled;
+    /* Start playback on external-power boot while Car Mode is enabled. */
+    bool car_mode_autoresume_enabled;
 
     /* In-line remote: Enables the use of Volume +/- buttons on the headphones,
      * along with single tapping the play/pause button to play/pause,
@@ -100,6 +109,9 @@ typedef struct {
     char subsonic_username[128];
     char subsonic_password[128];
     bool subsonic_verify_tls;    /* false = accept self-signed certs for this server (opt-in, see http_client.h) */
+    int subsonic_stream_quality; /* 0 Original, 1 Low (96), 2 Medium (192), 3 High (320 kbps). */
+    char subsonic_download_subfolder[SETTINGS_SUBSONIC_DOWNLOAD_SUBFOLDER_MAX]; /* relative to SD root; empty means SD root */
+    int subsonic_download_layout; /* 0 Album Artist/Album, 1 Album Artist - Album. */
 
     /* Saved Subsonic server profiles (the "Saved Servers" list). Tagcache
      * cannot store these. The live list is the /usr/data sidecar
@@ -200,6 +212,11 @@ typedef struct {
      * view is active. Other screens retain their status information. */
     bool hide_player_topbar;
 
+    /* Settings -> Display -> Upside Down Screen. Rotates the screen 180
+     * degrees so the device can be used with the headphone jack on top. */
+    bool screen_upside_down;
+    bool quick_drawer_volume_visible;
+
     /* Charge-status LEDs (/sys/class/leds/{red,blue}, see led_control.h) --
      * false forces both off regardless of charge state, for e.g. leaving the
      * device charging overnight in a dark room. */
@@ -211,10 +228,19 @@ typedef struct {
      * on the SD card (see db_log.h), and also gates the USB DAC bridge's own
      * diagnostic log to .logs/usb_dac_bridge.log (see usb_dac_bridge.h). */
     bool db_logging_enabled;
-    /* Power + Volume Down takes a screenshot. Off by default: the combination
-     * is easy to hit by accident in a pocket, and nobody who does not know it
-     * exists should find the card filling with images. */
+    /* Power + Volume Down (Power + Previous on the R3II 2025) takes a
+     * screenshot. Off by default: the combination is easy to hit by accident
+     * in a pocket, and nobody who does not know it exists should find the
+     * card filling with images. */
     bool screenshot_combo_enabled;
+    /* Developer Options, experimental, off by default. dev_bt_dac_all_codecs
+     * (key kept from when it also covered aptX) adds LDAC to the Bluetooth
+     * DAC-mode sink, only with the rebuilt decoder, as the stock firmware
+     * one crashes; aptX and aptX-HD are always offered. dev_covers_during_playback lets the cover
+     * warmer keep reading already generated thumbnails while audio plays;
+     * extracting new covers still waits for playback to stop. */
+    bool dev_bt_dac_all_codecs;
+    bool dev_covers_during_playback;
 
     /* Caps the PMIC's charge-termination voltage to 4.2V to extend battery
      * longevity, rather than a literal state-of-charge cutoff -- see
@@ -234,6 +260,10 @@ typedef struct {
      * default, matching the always-on behavior every previous version of
      * this app had. */
     bool show_battery_percent;
+
+    /* Show artist and album-artist artwork in their library rows. Album and
+     * song artwork is independent. Defaults on to preserve the existing UI. */
+    bool show_artist_images;
 
     /* Idle action after a long stretch idle (screen off, not playing, not
      * charging) -- either power_suspend_now() (suspend-to-RAM, see
@@ -315,6 +345,9 @@ typedef struct {
     bool startup_volume_fixed_enabled;
     int startup_volume_fixed_percent;
 
+    /* Dedicated volume applied whenever Car Mode is enabled. */
+    int car_mode_volume_percent;
+
     /* Duration the quick-drawer sleep icon arms next time it's tapped --
      * see gui.c's quick_drawer_sleep_event_cb()/poll_sleep_timer(). Always
      * one of SLEEP_TIMER_STEPS (settings_load() snaps any hand-edited or
@@ -362,7 +395,17 @@ typedef struct {
      * TTF font from <SD>/Fonts (e.g. "Roboto-Regular.ttf"). Empty string means
      * built-in Montserrat default. */
     char custom_font[64];
+
+    /* Settings -> Display -> Player layout. Registry id of the layout the
+     * Player screen is built from (src/ui/player_layouts.h). Empty means the
+     * built-in layout. An id that is no longer registered (a deleted XML
+     * file) also falls back to the built-in one at build time. */
+    char player_layout[64];
 } player_settings_t;
+
+/* Validate a relative Subsonic download folder. Empty is a valid setting;
+ * rejected values never alter out. */
+bool settings_validate_subsonic_download_subfolder(const char *value, char *out, size_t out_size);
 
 /* Loads settings from disk into *out. If the settings file doesn't exist or
  * can't be parsed, *out is populated with sensible defaults (volume 1.0, no
