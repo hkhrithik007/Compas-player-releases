@@ -230,10 +230,10 @@ lv_obj_t * build_header_back_button(lv_obj_t * scr, lv_event_cb_t cb);
 /* Align existing text actions/switches by their actual height, not an
  * assumed font or asset size. Position remains centered when size changes. */
 void align_screen_header_action(lv_obj_t * action, int32_t right_inset);
-/* Top-right refresh glyph (LV_SYMBOL_REFRESH, accent color) for list screens
- * whose contents come from a cached scan; busy greys it out and blocks taps. */
+/* Top-right refresh action with a generous header hitbox. Busy state spins
+ * the glyph, greys out the action, and blocks taps until refresh completes. */
 lv_obj_t * build_header_refresh_action(lv_obj_t * scr, lv_event_cb_t click_cb);
-void set_header_refresh_action_busy(lv_obj_t * icon, bool busy);
+void set_header_refresh_action_busy(lv_obj_t * button, bool busy);
 /* Fits a header title built by build_screen_header() to its single line
  * (smaller font, then ellipsis). Call again after changing its width. */
 void screen_title_fit(lv_obj_t * label);
@@ -375,19 +375,9 @@ const lv_font_t * pill_row_resolve_text_size(const char * text_size);
  * touch_list/item_bg.png pill rows, each with a label and an optional
  * right-side chevron or toggle. toggle_accent_style is applied (via
  * lv_obj_add_style(), not read as a plain value) to every PILL_ACCESSORY_
- * TOGGLE row's own lv_switch (LV_PART_INDICATOR|LV_STATE_CHECKED) -- a
- * style pointer rather than a
- * resolved lv_color_t like build_compact_list_widget()'s own
- * now_playing_color, specifically because these pill-list screens are each
- * built once at startup and never rebuilt (see e.g.
- * build_timezone_region_screen()'s own comment), unlike the list screens
- * now_playing_color feeds -- a plain color captured once here would go
- * stale forever after the very next accent color change, where a shared,
- * in-place-updated style (gui.c's style_accent, kept live via
- * lv_obj_report_style_change()) doesn't. Caller owns the style object's
- * lifetime; screen_builders.c never reads its properties directly, only
- * attaches it (same "no visibility into gui.c's accent state" boundary as
- * now_playing_color's own doc comment describes). */
+ * TOGGLE row's own lv_switch (LV_PART_INDICATOR|LV_STATE_CHECKED). The
+ * caller owns the style object's lifetime; screen_builders.c only attaches
+ * the style and never reads its properties directly. */
 /* row_gap: vertical spacing between rows, in px (every existing caller
  * passes 6, today's exact hardcoded value -- see build_pill_list_screen()'s
  * own history). Only plugin.set_home_layout()'s options.row_gap
@@ -502,7 +492,7 @@ lv_obj_t * build_compact_list_screen(const char * title, lv_event_cb_t back_btn_
                                       const compact_list_item_t * items, int item_count,
                                       compact_list_click_cb_t on_click, compact_list_click_cb_t on_long_press,
                                       lv_obj_t ** out_list, lv_obj_t ** out_title_label, int32_t row_width,
-                                      bool enable_now_playing, lv_color_t now_playing_color);
+                                      bool enable_now_playing, lv_style_t * now_playing_style);
 
 /* The virtualized list widget itself (what build_compact_list_screen()
  * builds internally), with no screen/back-button/title wrapper -- for a
@@ -513,15 +503,14 @@ lv_obj_t * build_compact_list_screen(const char * title, lv_event_cb_t back_btn_
  * row_width overrides list_row_style's own LIST_ROW_WIDTH per-instance (pass
  * LIST_ROW_WIDTH for the shared default, or LIST_ROW_WIDTH_WIDE to match a
  * widened parent screen -- e.g. the Files search overlay matching Files'
- * own now-wider rows). enable_now_playing/now_playing_color: see
- * compact_list_set_now_playing()'s own doc comment below -- pass false/
- * anything when a list has no now-playing concept (e.g. the Files search
- * overlay, the timezone city list). Color is threaded through as a
- * parameter rather than read directly (screen_builders.c has no visibility
- * into gui.c's current_settings.accent_color/accent_lv_color()). */
+ * own now-wider rows). enable_now_playing/now_playing_style: pass true and
+ * a shared style when the list needs a now-playing marker, or false/NULL
+ * when it does not (e.g. the Files search overlay or timezone city list).
+ * The style pointer is attached to the marker and can remain live as its
+ * properties change; screen_builders.c never resolves its color itself. */
 lv_obj_t * build_compact_list_widget(lv_obj_t * parent, const compact_list_item_t * items, int item_count,
                                       compact_list_click_cb_t on_click, compact_list_click_cb_t on_long_press,
-                                      int32_t row_width, bool enable_now_playing, lv_color_t now_playing_color);
+                                      int32_t row_width, bool enable_now_playing, lv_style_t * now_playing_style);
 
 /* Shows/moves/hides a thin accent-colored bar flush against the screen's
  * far-left edge (independent of row_width/any row's own inset -- this is a
@@ -591,6 +580,12 @@ bool compact_list_shows_artwork_key(lv_obj_t * list, uint64_t key);
 void compact_list_set_trailing_click(lv_obj_t * list, compact_list_click_cb_t cb);
 void compact_list_refresh_visible(lv_obj_t * list);
 void compact_list_refresh_all(void);
+/* Re-runs only the visible row decorators and image alignment for already
+ * bound compact-list rows. Does not fetch a paged provider, move the virtual
+ * window, or rewrite row labels/identity; use for artwork/cache changes. */
+void compact_list_refresh_decorations(lv_obj_t * list);
+/* Rebinds artwork on entry, retrying an uncovered failed page when needed. */
+void compact_list_refresh_on_show(lv_obj_t * list);
 
 /* Recomputes the shared list padding, any icon-caption coordinates, and
  * every bounded scrolling row label's box height (see row_label_apply_

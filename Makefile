@@ -1,5 +1,7 @@
 # Makefile for compas_player
 
+.DEFAULT_GOAL := all
+
 # Board selector -- `make target BOARD=r3proii` (default r1 if unset). Gates
 # BOARD_DEFINE (-DBOARD_R1 / -DBOARD_R3PROII, consumed by src/core/
 # board_config.h) and suffixes every output binary/object directory below so
@@ -42,6 +44,10 @@ CXX = g++
 CROSS_CC = mipsel-linux-musl-gcc
 CROSS_CXX = mipsel-linux-musl-g++
 CROSS_STRIP = mipsel-linux-musl-strip
+# X1600 targets advertise MIPS32r2. Keep the existing o32/FP32 register
+# contract explicit and disable FP contraction while GCC uses the target ISA.
+# Pass TARGET_CPU_FLAGS=-march=mips1 to rebuild against the old baseline for A/B.
+TARGET_CPU_FLAGS ?= -march=mips32r2 -mabi=32 -mfp32 -mno-odd-spreg -ffp-contract=off
 
 # Dependency directory names
 LVGL_DIR = lvgl
@@ -108,7 +114,7 @@ endif
 #   2. runtime fixes (patches/lvgl_runtime_fixes.patch): a null-parent guard
 #      in layout invalidation prevents the 9.5 splash-to-UI crash when
 #      unhiding the parentless top layer; plus genuine upstream
-#      bugs/limitations this app hit in practice, not feature work --
+#      bugs/limitations and renderer costs this app hit in practice --
 #      lv_tiny_ttf_create() still leaks an open font-file handle on two
 #      error paths (stbtt_InitFont failure and out-of-memory allocating
 #      the lv_font_t); 9.5 dropped the old global lv_tiny_ttf_init() cache
@@ -143,6 +149,9 @@ endif
 #      later as a segfault inside an unrelated free() call and a reboot-on-
 #      crash loop. Fixed by sizing that buffer's stride to the larger of
 #      the native row width and the ARGB8888 row width.
+#      Opaque RGB565 nearest scaling copies a proven interior without an
+#      alpha tile; the original renderer preserves edge blending and every
+#      unsupported descriptor. This shares the existing centered sampler.
 #   3. evdev pointer frames (patches/lvgl_evdev_frames.patch): return at
 #      each complete pointer SYN_REPORT with continue_reading set, so a
 #      queued press and release remain separate samples while keypad reads
@@ -221,6 +230,8 @@ LVGL_TJPGDCNF := $(LVGL_DIR)/src/libs/tjpgd/tjpgdcnf.h
 LVGL_LRU_RB := $(LVGL_DIR)/src/misc/cache/class/lv_cache_lru_rb.c
 LVGL_LODEPNG := $(LVGL_DIR)/src/libs/lodepng/lodepng.c
 LVGL_OBJ_POS := $(LVGL_DIR)/src/core/lv_obj_pos.c
+LVGL_DRAW_IMAGE := $(LVGL_DIR)/src/draw/lv_draw_image.c
+LVGL_SW_TRANSFORM := $(LVGL_DIR)/src/draw/sw/lv_draw_sw_transform.c
 LVGL_FONT_TARGETS := $(LVGL_GENERATED_FONTS:%=$(LVGL_DIR)/src/font/%)
 LVGL_FONT_GOLDEN := $(LVGL_GENERATED_FONTS:%=$(LVGL_GENERATED_FONTS_DIR)/%)
 LVGL_PATCH_STAMP := $(LVGL_DIR)/.lvgl_fbdev_patch_applied
@@ -497,7 +508,8 @@ BUILD_STAMP_DEFINE = -DBUILD_STAMP=\"$(shell date +%Y-%m-%d_%H:%M)\"
 # ships no execinfo.h/backtrace() of its own, which is what main.c's SIGSEGV
 # handler needs. Host build doesn't need this -- glibc already provides it.
 TARGET_CFLAGS = $(CFLAGS) -I$(LIBEXECINFO_DIR) -I$(LVGL_DIR)/src -I$(TINYALSA_DIR)/include -Idbus_vendor_config -I$(DBUS_DIR) $(BOARD_DEFINE) $(TEST_BUILD_TAG_DEFINE) $(RELEASE_LABEL_DEFINE) $(UI_PERF_TRACE_DEFINE) $(UI_GESTURE_TRACE_DEFINE) $(UI_HITBOX_DEBUG_DEFINE) $(BUILD_STAMP_DEFINE) -I$(TINFL_DIR) -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ARCHIVE_APIS
-TARGET_CXXFLAGS = $(CXXFLAGS) -I$(LIBEXECINFO_DIR) -I$(LVGL_DIR)/src -I$(TINYALSA_DIR)/include -Idbus_vendor_config -I$(DBUS_DIR) $(BOARD_DEFINE) $(TEST_BUILD_TAG_DEFINE) $(RELEASE_LABEL_DEFINE) $(UI_PERF_TRACE_DEFINE) $(UI_GESTURE_TRACE_DEFINE) $(UI_HITBOX_DEBUG_DEFINE) $(BUILD_STAMP_DEFINE) -I$(TINFL_DIR) -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ARCHIVE_APIS
+TARGET_CFLAGS += $(TARGET_CPU_FLAGS)
+TARGET_CXXFLAGS = $(CXXFLAGS) -I$(LIBEXECINFO_DIR) -I$(LVGL_DIR)/src -I$(TINYALSA_DIR)/include -Idbus_vendor_config -I$(DBUS_DIR) $(BOARD_DEFINE) $(TEST_BUILD_TAG_DEFINE) $(RELEASE_LABEL_DEFINE) $(UI_PERF_TRACE_DEFINE) $(UI_GESTURE_TRACE_DEFINE) $(UI_HITBOX_DEBUG_DEFINE) $(BUILD_STAMP_DEFINE) -I$(TINFL_DIR) -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ARCHIVE_APIS $(TARGET_CPU_FLAGS)
 TINYALSA_CFLAGS = -O3 -g -Wall -I$(TINYALSA_DIR)/include -I$(TINYALSA_DIR)/src
 # DBUS_COMPILATION/DBUS_STATIC_BUILD: libdbus's own headers gate some
 # declarations on these (matching how its own build always defines them
@@ -557,12 +569,25 @@ LUA_CFLAGS = -O2 -g -Wall -I$(LUA_DIR)/src
 HOST_LDFLAGS = $(shell sdl2-config --libs) -lpthread -lm
 TARGET_LDFLAGS = -static -no-pie -lpthread -lm
 
+# Record target CPU flags in the board-specific object directory. The FORCE
+# prerequisite checks the requested string on every invocation, but only
+# changes the stamp timestamp when the flags actually differ; target objects
+# then rebuild normally without contaminating host objects.
+TARGET_CPU_FLAGS_STAMP = $(BUILD_TARGET_DIR)/.target_cpu_flags
+.PHONY: FORCE_TARGET_CPU_FLAGS
+FORCE_TARGET_CPU_FLAGS:
+
+$(TARGET_CPU_FLAGS_STAMP): FORCE_TARGET_CPU_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(TARGET_CPU_FLAGS)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
 # Source files -- organized under src/ by category: audio/ (playback engine +
 # format decoders/demuxers), network/ (wifi/bluetooth/dlna/remote-control/
 # streaming), library/ (metadata/file browsing/playlists), hardware/ (device
 # control), ui/ (gui/screens/assets/fonts), core/ (settings, subprocess,
 # misc). main.c stays at src/ root as the entry point.
-APP_SRCS = src/main.c src/ui/gui.c src/ui/gui_subsonic.c src/ui/gui_settings.c src/ui/gui_network.c src/ui/gui_theme.c src/ui/gui_notifications.c src/ui/gui_library.c src/ui/gui_queue.c src/ui/gui_player.c src/ui/gui_track_info.c src/ui/gui_plugins.c src/ui/gui_shell.c src/ui/gui_navigation.c src/ui/gui_books.c src/ui/gui_text_input.c src/ui/gui_lyrics.c src/ui/gui_reload.c src/audio/audio.c src/library/file_browser.c src/hardware/hw_buttons.c src/hardware/input_device_utils.c src/library/metadata.c src/library/metadata_db.c src/core/settings.c src/core/screenshot.c src/core/app_version.c src/audio/aiff_decoder.c src/audio/dsd_filter.c src/audio/dsd_decoder.c src/audio/aac_decoder.c src/audio/mp4_demux.c src/audio/ape_demux.c src/audio/ape_decoder.c src/audio/peq.c src/ui/assets.c src/ui/screen_builders.c src/hardware/battery.c src/network/wifi_status.c src/network/ca_bundle.c src/network/http_conn.c src/network/http_client.c src/network/http_stream.c src/network/subsonic_client.c src/library/cover_decode.c src/library/image_thumb.c src/library/lyrics.c src/audio/asf_demux.c src/audio/wma_decoder.c src/audio/ogg_demux.c src/audio/opus_decoder.c src/audio/vorbis_decoder.c src/library/cue_parser.c src/ui/fallback_font.c src/ui/gui_text_view.c \
+APP_SRCS = src/main.c src/ui/gui.c src/ui/gui_subsonic.c src/ui/gui_settings.c src/ui/gui_network.c src/ui/gui_theme.c src/ui/gui_notifications.c src/ui/gui_library.c src/ui/gui_queue.c src/ui/gui_player.c src/ui/gui_track_info.c src/ui/gui_plugins.c src/ui/gui_shell.c src/ui/gui_navigation.c src/ui/gui_books.c src/ui/gui_text_input.c src/ui/gui_lyrics.c src/ui/gui_reload.c src/audio/audio.c src/library/file_browser.c src/hardware/hw_buttons.c src/hardware/input_device_utils.c src/library/metadata.c src/library/metadata_db.c src/core/settings.c src/core/screenshot.c src/core/app_version.c src/audio/aiff_decoder.c src/audio/dsd_filter.c src/audio/dsd_decoder.c src/audio/aac_decoder.c src/audio/mp4_demux.c src/audio/ape_demux.c src/audio/ape_decoder.c src/audio/peq.c src/ui/assets.c src/ui/screen_builders.c src/ui/cover_card_preview.c src/hardware/battery.c src/network/wifi_status.c src/network/ca_bundle.c src/network/http_conn.c src/network/http_client.c src/network/http_stream.c src/network/subsonic_client.c src/library/cover_decode.c src/library/image_thumb.c src/library/lyrics.c src/audio/asf_demux.c src/audio/wma_decoder.c src/audio/ogg_demux.c src/audio/opus_decoder.c src/audio/vorbis_decoder.c src/library/cue_parser.c src/ui/fallback_font.c src/ui/gui_text_view.c \
 src/core/subprocess.c src/network/wifi_control.c src/network/bluetooth_control.c src/network/hiby_sys_server.c src/hardware/backlight.c src/network/import_web.c src/network/airplay_control.c src/network/airplay_bridge.c src/network/airplay_metadata.c src/hardware/headphone_status.c src/hardware/device_config.c src/hardware/led_control.c src/hardware/charge_limiter.c src/core/idle_shutdown.c src/hardware/power_suspend.c src/core/text_reader.c src/hardware/usb_mode_control.c src/hardware/usb_dac_bridge.c src/hardware/usb_audio_output.c src/core/firmware_update.c src/library/playlist_files.c src/library/favorite_writer.c src/network/firmware_ota.c src/network/plugin_store.c src/core/timezone_data.c src/core/timezone_apply.c src/core/hostname_apply.c src/network/dlna_control.c src/network/remote_control.c src/network/catalog_source_cache.c src/network/remote_control_mdns.c src/plugins/plugin_manager.c
 APP_SRCS += src/ui/gui_setup.c src/ui/gui_setup_plugins.c src/core/timezone_location.c
 APP_SRCS += src/ui/lyrics_layout.c src/ui/transition_compositor.c src/ui/frosted_glass.c src/ui/hw_volume_coalesce.c
@@ -735,7 +760,7 @@ $(HOST_BIN): $(HOST_OBJS)
 # on the tracked patch file (so a future change to the patch itself also
 # invalidates it), not just on $(LVGL_DIR) existing.
 $(LVGL_PATCH_STAMP): $(LVGL_FBDEV_C) $(LVGL_FBDEV_H) $(LVGL_PATCH) \
-                     $(LVGL_TINY_TTF) $(LVGL_TJPGDCNF) $(LVGL_LRU_RB) $(LVGL_LODEPNG) $(LVGL_OBJ_POS) $(LVGL_RUNTIME_FIXES_PATCH) \
+                     $(LVGL_TINY_TTF) $(LVGL_TJPGDCNF) $(LVGL_LRU_RB) $(LVGL_LODEPNG) $(LVGL_OBJ_POS) $(LVGL_DRAW_IMAGE) $(LVGL_SW_TRANSFORM) $(LVGL_RUNTIME_FIXES_PATCH) \
                      $(LVGL_EVDEV_C) $(LVGL_EVDEV_FRAMES_PATCH) \
                      $(LVGL_FONT_TARGETS) $(LVGL_FONT_GOLDEN)
 	@set -e; \
@@ -881,8 +906,8 @@ $(BUILD_HOST_DIR)/lua/%.o: $(LUA_DIR)/src/%.c
 # Build for target (MIPS HiBy Device)
 target: $(TARGET_BIN) compile_commands.json
 
-$(TARGET_BIN): $(TARGET_OBJS)
-	$(CROSS_CXX) -o $(BUILD_TARGET_DIR)/$(TARGET_BIN)_unstripped $(TARGET_OBJS) $(TARGET_LDFLAGS)
+$(TARGET_BIN): $(TARGET_OBJS) $(TARGET_CPU_FLAGS_STAMP)
+	$(CROSS_CXX) $(TARGET_CPU_FLAGS) -o $(BUILD_TARGET_DIR)/$(TARGET_BIN)_unstripped $(TARGET_OBJS) $(TARGET_LDFLAGS)
 	$(CROSS_STRIP) -s -o $@ $(BUILD_TARGET_DIR)/$(TARGET_BIN)_unstripped
 	@echo "Target build complete: File ready at '$(TARGET_BIN)'"
 
@@ -913,13 +938,13 @@ BOOTLOADER_SRCS = src/bootloader/main.c src/bootloader/fb_draw.c \
 # the statically linked mount helpers and JPEG decoder small.
 BOOTLOADER_CFLAGS = -O2 -Wall -I. -Isrc/bootloader -Isrc/core $(BOARD_DEFINE) -ffunction-sections -fdata-sections
 
-bootloader:
+bootloader: $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(BUILD_TARGET_DIR)
-	$(CROSS_CC) $(BOOTLOADER_CFLAGS) -static -no-pie $(BOOTLOADER_SRCS) -o $(BUILD_TARGET_DIR)/$(BOOTLOADER_BIN)_unstripped -Wl,--gc-sections
+	$(CROSS_CC) $(TARGET_CPU_FLAGS) $(BOOTLOADER_CFLAGS) -static -no-pie $(BOOTLOADER_SRCS) -o $(BUILD_TARGET_DIR)/$(BOOTLOADER_BIN)_unstripped -Wl,--gc-sections
 	$(CROSS_STRIP) -s -o $(BOOTLOADER_BIN) $(BUILD_TARGET_DIR)/$(BOOTLOADER_BIN)_unstripped
 	@echo "Bootloader build complete: File ready at '$(BOOTLOADER_BIN)'"
 
-$(BUILD_TARGET_DIR)/%.o: src/%.c $(LVGL_PATCH_STAMP)
+$(BUILD_TARGET_DIR)/%.o: src/%.c $(LVGL_PATCH_STAMP) $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(CROSS_CC) $(TARGET_CFLAGS) -c $< -o $@
 
@@ -929,73 +954,73 @@ $(BUILD_TARGET_DIR)/%.o: src/%.c $(LVGL_PATCH_STAMP)
 # bootloader scanner always has one current BUILD_STAMP to find.
 FORCE_VERSION:
 
-$(BUILD_TARGET_DIR)/core/app_version.o: src/core/app_version.c $(LVGL_PATCH_STAMP) FORCE_VERSION
+$(BUILD_TARGET_DIR)/core/app_version.o: src/core/app_version.c $(LVGL_PATCH_STAMP) $(TARGET_CPU_FLAGS_STAMP) FORCE_VERSION
 	@mkdir -p $(dir $@)
 	$(CROSS_CC) $(TARGET_CFLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/%.o: src/%.cpp $(LVGL_PATCH_STAMP)
+$(BUILD_TARGET_DIR)/%.o: src/%.cpp $(LVGL_PATCH_STAMP) $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(CROSS_CXX) $(TARGET_CXXFLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c $(LVGL_PATCH_STAMP)
+$(BUILD_TARGET_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c $(LVGL_PATCH_STAMP) $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(CROSS_CC) $(TARGET_CFLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/lv_xml/%.o: $(LV_XML_DIR)/%.c $(LVGL_PATCH_STAMP)
+$(BUILD_TARGET_DIR)/lv_xml/%.o: $(LV_XML_DIR)/%.c $(LVGL_PATCH_STAMP) $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(CROSS_CC) $(TARGET_CFLAGS) $(LV_XML_CFLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/tinyalsa/%.o: $(TINYALSA_DIR)/%.c
+$(BUILD_TARGET_DIR)/tinyalsa/%.o: $(TINYALSA_DIR)/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CROSS_CC) $(TINYALSA_CFLAGS) -c $< -o $@
+	$(CROSS_CC) $(TINYALSA_CFLAGS) $(TARGET_CPU_FLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/faad2/%.o: $(FAAD2_DIR)/libfaad/%.c
+$(BUILD_TARGET_DIR)/faad2/%.o: $(FAAD2_DIR)/libfaad/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CROSS_CC) $(FAAD2_CFLAGS) -c $< -o $@
+	$(CROSS_CC) $(FAAD2_CFLAGS) $(TARGET_CPU_FLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/alac/%.o: $(ALAC_DIR)/codec/%.c
+$(BUILD_TARGET_DIR)/alac/%.o: $(ALAC_DIR)/codec/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CROSS_CC) $(ALAC_CFLAGS) -c $< -o $@
+	$(CROSS_CC) $(ALAC_CFLAGS) $(TARGET_CPU_FLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/alac/%.o: $(ALAC_DIR)/codec/%.cpp
+$(BUILD_TARGET_DIR)/alac/%.o: $(ALAC_DIR)/codec/%.cpp $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CROSS_CXX) $(ALAC_CXXFLAGS) -c $< -o $@
+	$(CROSS_CXX) $(ALAC_CXXFLAGS) $(TARGET_CPU_FLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/mbedtls/%.o: $(MBEDTLS_DIR)/library/%.c
+$(BUILD_TARGET_DIR)/mbedtls/%.o: $(MBEDTLS_DIR)/library/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(CROSS_CC) $(TARGET_CFLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/cjson/%.o: $(CJSON_DIR)/%.c
+$(BUILD_TARGET_DIR)/cjson/%.o: $(CJSON_DIR)/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(CROSS_CC) $(TARGET_CFLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/stb_vorbis/%.o: $(STB_VORBIS_DIR)/%.c
+$(BUILD_TARGET_DIR)/stb_vorbis/%.o: $(STB_VORBIS_DIR)/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(CROSS_CC) $(TARGET_CFLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/dbus/%.o: $(DBUS_DIR)/dbus/%.c
+$(BUILD_TARGET_DIR)/dbus/%.o: $(DBUS_DIR)/dbus/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CROSS_CC) $(DBUS_CFLAGS) -c $< -o $@
+	$(CROSS_CC) $(DBUS_CFLAGS) $(TARGET_CPU_FLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/opus/%.o: $(OPUS_DIR)/%.c
+$(BUILD_TARGET_DIR)/opus/%.o: $(OPUS_DIR)/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CROSS_CC) $(OPUS_CFLAGS) -c $< -o $@
+	$(CROSS_CC) $(OPUS_CFLAGS) $(TARGET_CPU_FLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/tinfl/%.o: $(TINFL_DIR)/%.c
+$(BUILD_TARGET_DIR)/tinfl/%.o: $(TINFL_DIR)/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(CROSS_CC) $(TARGET_CFLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/jpeg/%.o: $(JPEG_DIR)/%.c
+$(BUILD_TARGET_DIR)/jpeg/%.o: $(JPEG_DIR)/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CROSS_CC) $(JPEG_CFLAGS) -c $< -o $@
+	$(CROSS_CC) $(JPEG_CFLAGS) $(TARGET_CPU_FLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/lua/%.o: $(LUA_DIR)/src/%.c
+$(BUILD_TARGET_DIR)/lua/%.o: $(LUA_DIR)/src/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CROSS_CC) $(LUA_CFLAGS) -c $< -o $@
+	$(CROSS_CC) $(LUA_CFLAGS) $(TARGET_CPU_FLAGS) -c $< -o $@
 
-$(BUILD_TARGET_DIR)/libexecinfo/%.o: $(LIBEXECINFO_DIR)/%.c
+$(BUILD_TARGET_DIR)/libexecinfo/%.o: $(LIBEXECINFO_DIR)/%.c $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CROSS_CC) -O2 -g -Wall -Wno-frame-address -I$(LIBEXECINFO_DIR) -c $< -o $@
+	$(CROSS_CC) $(TARGET_CPU_FLAGS) -O2 -g -Wall -Wno-frame-address -I$(LIBEXECINFO_DIR) -c $< -o $@
 
 # Generate compile_commands.json for Zed/clangd LSP autofill and hover popups
 compile_commands.json:
