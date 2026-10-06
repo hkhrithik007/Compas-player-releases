@@ -30,8 +30,13 @@ extern const int SLEEP_TIMER_STEPS[];
 #define SETTINGS_SUBSONIC_SAVED_MAX 16
 #define SETTINGS_SUBSONIC_DOWNLOAD_SUBFOLDER_MAX 256
 #define REMOTE_CONTROL_PIN_MAX_LENGTH 12
+#define SETTINGS_SETUP_PLUGIN_MAX 32
+#define SETTINGS_SETUP_PLUGIN_ID_MAX 64
 
 #define BT_DEVICE_RATE_MAX 8
+
+#define KEYBOARD_LAYOUT_T9 0
+#define KEYBOARD_LAYOUT_QWERTY 1
 
 typedef struct {
     float volume;              /* 0.0 - 1.0 */
@@ -235,13 +240,9 @@ typedef struct {
      * in a pocket, and nobody who does not know it exists should find the
      * card filling with images. */
     bool screenshot_combo_enabled;
-    /* Developer Options, experimental, off by default. dev_bt_dac_all_codecs
-     * (key kept from when it also covered aptX) adds LDAC to the Bluetooth
-     * DAC-mode sink, only with the rebuilt decoder, as the stock firmware
-     * one crashes; aptX and aptX-HD are always offered. dev_covers_during_playback lets the cover
-     * warmer keep reading already generated thumbnails while audio plays;
-     * extracting new covers still waits for playback to stop. */
-    bool dev_bt_dac_all_codecs;
+    /* Developer Options: dev_covers_during_playback lets the cover warmer
+     * keep reading already generated thumbnails while audio plays; extracting
+     * new covers still waits for playback to stop. */
     bool dev_covers_during_playback;
 
     /* Caps the PMIC's charge-termination voltage to 4.2V to extend battery
@@ -377,11 +378,16 @@ typedef struct {
 
     /* UI text size (Settings -> Display -> Font Size): 0 = Small, 1 =
      * Medium, 2 = "BlindMF" (largest). Applied at startup and live
-     * via fallback_font_apply_size_tier(). */
+     * via fallback_font_apply_size_tier(). Defaults to 1 (Medium). */
     int font_size_tier;
 
+    /* Settings -> Display -> Appearance -> Keyboard. Layout used by every text
+     * field and inline search: 0 = T9 keypad (default), 1 = QWERTY. Numeric
+     * fields always use the T9 numeric keypad. */
+    int keyboard_layout;
+
     /* Settings -> Lyrics Text Size: independent text size control for the
-     * fullscreen synchronized lyrics view (1 = Medium, 2 = Large). Defaults to 2 (Large). */
+     * fullscreen synchronized lyrics view (1 = Medium, 2 = Large). Defaults to 1 (Medium). */
     int lyrics_font_size_tier;
 
     /* Screen brightness (0-100), applied at startup and updated when adjusted.
@@ -414,7 +420,12 @@ typedef struct {
     /* False only on a fresh install or unfinished first-run setup. */
     bool setup_complete;
     bool setup_intro_played; /* Reset with settings; prevents replay during setup. */
-    int setup_step; /* 0 welcome, 1..5 quick setup, 6 complete; retained across restarts. */
+    int setup_step; /* Persisted IDs: 0 welcome, 1 language, 2 timezone, 3 Wi-Fi, 4 plugins, 5 scan, 6 complete, 7 layout; retained across restarts. */
+    /* Choices staged during first-run setup. Stored separately so restarting
+     * at the scan step does not discard plugin or layout selections. */
+    char setup_plugin_ids[SETTINGS_SETUP_PLUGIN_MAX][SETTINGS_SETUP_PLUGIN_ID_MAX];
+    char setup_layout_plugin_id[SETTINGS_SETUP_PLUGIN_ID_MAX];
+    bool setup_scan_music;
 } player_settings_t;
 
 /* Validate a relative Subsonic download folder. Empty is a valid setting;

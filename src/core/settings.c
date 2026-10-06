@@ -107,10 +107,23 @@ static bool valid_remote_control_pin(const char * value) {
     return true;
 }
 
+static bool valid_setup_plugin_id(const char * value) {
+    if (!value || !value[0] || strlen(value) >= SETTINGS_SETUP_PLUGIN_ID_MAX ||
+        !((*value >= 'a' && *value <= 'z') || (*value >= '0' && *value <= '9'))) return false;
+    for (const unsigned char * p = (const unsigned char *) value; *p; ++p) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
+              *p == '.' || *p == '_' || *p == '-')) return false;
+    }
+    return true;
+}
+
 static void set_defaults(player_settings_t * out) {
     out->setup_complete = false;
     out->setup_intro_played = false;
     out->setup_step = 0;
+    memset(out->setup_plugin_ids, 0, sizeof(out->setup_plugin_ids));
+    out->setup_layout_plugin_id[0] = '\0';
+    out->setup_scan_music = true;
     out->volume = 1.0f;
     out->last_track[0] = '\0';
     out->last_position = 0.0;
@@ -159,7 +172,6 @@ static void set_defaults(player_settings_t * out) {
     out->led_indicator_enabled = true;
     out->db_logging_enabled = false; /* opt-in developer diagnostic, off by default */
     out->screenshot_combo_enabled = false;
-    out->dev_bt_dac_all_codecs = false;
     out->dev_covers_during_playback = false;
     out->charge_limiter_enabled = false; /* opt-in -- caps max charge voltage to 4.2V, a real behavior change the user should choose, not a default surprise */
     out->safe_charging_enabled = false; /* off means leave the PMIC charge-current setting untouched */
@@ -185,8 +197,9 @@ static void set_defaults(player_settings_t * out) {
     out->sleep_timer_minutes = 15;
     out->timezone[0] = '\0';
     out->hostname[0] = '\0'; /* empty -- stock's own /usr/resource/hostname stays in effect */
-    out->font_size_tier = 0;
-    out->lyrics_font_size_tier = 2; /* Large -- see settings.h's own comment */
+    out->font_size_tier = 1;
+    out->keyboard_layout = KEYBOARD_LAYOUT_T9;
+    out->lyrics_font_size_tier = 1; /* Medium -- see settings.h's own comment */
     out->brightness_percent = 80;
     out->clock_24h = true; /* matches the app's original, only-ever clock format -- existing installs see no change */
     out->clock_automatic = true;
@@ -352,6 +365,18 @@ bool settings_load(player_settings_t * out) {
             out->setup_intro_played = strcmp(value, "1") == 0;
         } else if (strcmp(key, "setup_step") == 0) {
             out->setup_step = atoi(value);
+        } else if (strncmp(key, "setup_plugin_id_", 16) == 0) {
+            int idx = -1;
+            char extra;
+            if (sscanf(key, "setup_plugin_id_%d%c", &idx, &extra) == 1 &&
+                idx >= 0 && idx < SETTINGS_SETUP_PLUGIN_MAX && valid_setup_plugin_id(value)) {
+                snprintf(out->setup_plugin_ids[idx], sizeof(out->setup_plugin_ids[idx]), "%s", value);
+            }
+        } else if (strcmp(key, "setup_layout_plugin_id") == 0) {
+            if (valid_setup_plugin_id(value))
+                snprintf(out->setup_layout_plugin_id, sizeof(out->setup_layout_plugin_id), "%s", value);
+        } else if (strcmp(key, "setup_scan_music") == 0) {
+            out->setup_scan_music = strcmp(value, "1") == 0;
         } else if (strcmp(key, "volume") == 0) {
             out->volume = (float) atof(value);
         } else if (strcmp(key, "last_track") == 0) {
@@ -486,8 +511,6 @@ bool settings_load(player_settings_t * out) {
             out->db_logging_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "screenshot_combo_enabled") == 0) {
             out->screenshot_combo_enabled = (strcmp(value, "1") == 0);
-        } else if (strcmp(key, "dev_bt_dac_all_codecs") == 0) {
-            out->dev_bt_dac_all_codecs = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "dev_covers_during_playback") == 0) {
             out->dev_covers_during_playback = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "charge_limiter_enabled") == 0) {
@@ -536,6 +559,8 @@ bool settings_load(player_settings_t * out) {
             snprintf(out->hostname, sizeof(out->hostname), "%s", value);
         } else if (strcmp(key, "font_size_tier") == 0) {
             out->font_size_tier = atoi(value);
+        } else if (strcmp(key, "keyboard_layout") == 0) {
+            out->keyboard_layout = atoi(value);
         } else if (strcmp(key, "lyrics_font_size_tier") == 0) {
             out->lyrics_font_size_tier = atoi(value);
         } else if (strcmp(key, "brightness_percent") == 0) {
@@ -572,11 +597,12 @@ bool settings_load(player_settings_t * out) {
         }
     }
 
-    if (out->setup_step < 0 || out->setup_step > 6) out->setup_step = 0;
+    if (out->setup_step < 0 || out->setup_step > 7) out->setup_step = 0;
     if (out->usb_mode < 0 || out->usb_mode > 2) out->usb_mode = 0; /* defensive re-clamp, same reasoning as screen_timeout_seconds -- the settings file is plaintext and could be hand-edited out of range */
     if (out->play_mode < 0 || out->play_mode > 3) out->play_mode = 0;
-    if (out->font_size_tier < 0 || out->font_size_tier > 2) out->font_size_tier = 0;
-    if (out->lyrics_font_size_tier != 1 && out->lyrics_font_size_tier != 2) out->lyrics_font_size_tier = 2; /* Medium/Large only, see settings.h */
+    if (out->font_size_tier < 0 || out->font_size_tier > 2) out->font_size_tier = 1;
+    if (out->keyboard_layout != KEYBOARD_LAYOUT_T9 && out->keyboard_layout != KEYBOARD_LAYOUT_QWERTY) out->keyboard_layout = KEYBOARD_LAYOUT_T9;
+    if (out->lyrics_font_size_tier != 1 && out->lyrics_font_size_tier != 2) out->lyrics_font_size_tier = 1; /* Medium/Large only, see settings.h */
     if (out->replaygain_mode < 0 || out->replaygain_mode > 2) out->replaygain_mode = 1; /* Off/Per Track/Per Album only, see settings.h */
     if (out->animation_scale != 0 && out->animation_scale != 25 && out->animation_scale != 50 &&
         out->animation_scale != 75 && out->animation_scale != 100) out->animation_scale = 100;
@@ -703,7 +729,6 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "led_indicator_enabled=%d\n", settings->led_indicator_enabled ? 1 : 0);
     fprintf(f, "db_logging_enabled=%d\n", settings->db_logging_enabled ? 1 : 0);
     fprintf(f, "screenshot_combo_enabled=%d\n", settings->screenshot_combo_enabled ? 1 : 0);
-    fprintf(f, "dev_bt_dac_all_codecs=%d\n", settings->dev_bt_dac_all_codecs ? 1 : 0);
     fprintf(f, "dev_covers_during_playback=%d\n", settings->dev_covers_during_playback ? 1 : 0);
     fprintf(f, "charge_limiter_enabled=%d\n", settings->charge_limiter_enabled ? 1 : 0);
     fprintf(f, "safe_charging_enabled=%d\n", settings->safe_charging_enabled ? 1 : 0);
@@ -726,6 +751,7 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "timezone=%s\n", settings->timezone);
     fprintf(f, "hostname=%s\n", settings->hostname);
     fprintf(f, "font_size_tier=%d\n", settings->font_size_tier);
+    fprintf(f, "keyboard_layout=%d\n", settings->keyboard_layout == KEYBOARD_LAYOUT_QWERTY ? KEYBOARD_LAYOUT_QWERTY : KEYBOARD_LAYOUT_T9);
     fprintf(f, "lyrics_font_size_tier=%d\n", settings->lyrics_font_size_tier);
     fprintf(f, "brightness_percent=%d\n", settings->brightness_percent);
     fprintf(f, "clock_24h=%d\n", settings->clock_24h ? 1 : 0);
@@ -738,6 +764,14 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "setup_complete=%d\n", settings->setup_complete ? 1 : 0);
     fprintf(f, "setup_step=%d\n", settings->setup_step);
     fprintf(f, "setup_intro_played=%d\n", settings->setup_intro_played ? 1 : 0);
+    for (int i = 0; i < SETTINGS_SETUP_PLUGIN_MAX; ++i) {
+        const char * id = valid_setup_plugin_id(settings->setup_plugin_ids[i]) ? settings->setup_plugin_ids[i] : "";
+        fprintf(f, "setup_plugin_id_%d=%s\n", i, id);
+    }
+    const char * layout_id = valid_setup_plugin_id(settings->setup_layout_plugin_id)
+        ? settings->setup_layout_plugin_id : "";
+    fprintf(f, "setup_layout_plugin_id=%s\n", layout_id);
+    fprintf(f, "setup_scan_music=%d\n", settings->setup_scan_music ? 1 : 0);
 
     fflush(f);
     fsync(fileno(f));

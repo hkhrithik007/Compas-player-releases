@@ -77,6 +77,8 @@ static lv_obj_t * music_controls_screen;
 static lv_obj_t * settings_display_screen;
 static lv_obj_t * animation_speed_screen;
 static lv_obj_t * animation_speed_list;
+static lv_obj_t * keyboard_layout_screen;
+static lv_obj_t * keyboard_layout_list;
 static lv_obj_t * player_layout_choice_screen;
 static lv_obj_t * player_layout_choice_list;
 static lv_obj_t * language_choice_screen;
@@ -615,11 +617,11 @@ static void firmware_source_backdrop_cb(lv_event_t * e) {
     hide_firmware_source_menu();
 }
 
-static void show_ota_install_popup(const char * date) {
+static void show_ota_install_popup(const char * release_label) {
     lv_label_set_text_fmt(ota_install_title,
-                          TR("Weekly Beta %s is downloaded and verified.\n\nInstall now? The device reboots into "
+                          TR("Firmware release %s is downloaded and verified.\n\nInstall now? The device reboots into "
                           "recovery to flash it. Do not turn it off until it restarts."),
-                          date);
+                          release_label);
     gui_popup_show(&ota_install_popup);
 }
 
@@ -640,7 +642,7 @@ static void firmware_source_sd_cb(lv_event_t * e) {
      * gate and parking as installing it right after the download. */
     firmware_ota_release_t pending;
     firmware_ota_pending_t state = firmware_ota_pending(&pending);
-    if (state == FIRMWARE_OTA_PENDING_VALID) show_ota_install_popup(pending.date);
+    if (state == FIRMWARE_OTA_PENDING_VALID) show_ota_install_popup(pending.label);
     else if (state == FIRMWARE_OTA_PENDING_REJECTED)
         show_error_toast(TR("The downloaded update record is invalid. Download the update again."));
     else if (state == FIRMWARE_OTA_PENDING_UNREADABLE)
@@ -768,21 +770,21 @@ void poll_firmware_ota(void) {
             ota_ui_active = false;
             if (status.newer)
                 lv_label_set_text_fmt(ota_offer_title,
-                                      TR("Weekly Beta %s is available.\nInstalled: %s\n\nDownload it now? This may "
+                                      TR("Firmware release %s is available.\nInstalled: %s\n\nDownload it now? This may "
                                       "take a while."),
-                                      status.release.date, status.installed);
+                                      status.release.label, status.installed);
             else
                 lv_label_set_text_fmt(ota_offer_title,
-                                      TR("You have the latest weekly (%s).\n\nDownload and reinstall it anyway? "
+                                      TR("Installed version: %s\nAvailable release: %s\n\nDownload and reinstall it anyway? "
                                       "This may take a while."),
-                                      status.release.date);
+                                      status.installed, status.release.label);
             gui_popup_show(&ota_offer_popup);
             return;
         case FIRMWARE_OTA_READY:
             gui_busy_hide(ota_busy);
             ota_ui_active = false;
             firmware_ota_reset(); /* the record on the card carries it from here */
-            show_ota_install_popup(status.release.date);
+            show_ota_install_popup(status.release.label);
             return;
         case FIRMWARE_OTA_FAILED:
             gui_busy_hide(ota_busy);
@@ -907,13 +909,6 @@ static void screenshot_combo_switch_event_cb(lv_event_t * e) {
     hw_buttons_set_screenshot_combo_enabled(current_settings.screenshot_combo_enabled);
 }
 
-static void dev_bt_dac_all_codecs_switch_event_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
-    current_settings.dev_bt_dac_all_codecs = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
-    settings_save(&current_settings);
-    bt_control_set_dac_all_codecs(current_settings.dev_bt_dac_all_codecs);
-}
-
 static void dev_covers_during_playback_switch_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
     current_settings.dev_covers_during_playback = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
@@ -927,7 +922,7 @@ static void dev_covers_during_playback_switch_event_cb(lv_event_t * e) {
   #define SCREENSHOT_ROW_LABEL TR("Screenshots (Power + Vol Down)")
 #endif
 static lv_obj_t * build_dev_options_screen(void) {
-    static pill_list_item_t items[5];
+    static pill_list_item_t items[4];
     /* ADB lives here rather than on the USB Mode screen: it overrides
      * Storage/DAC while on and persists across a reboot, so it sits behind
      * Developer Options as the explicit opt-in that makes re-applying it on
@@ -940,15 +935,10 @@ static lv_obj_t * build_dev_options_screen(void) {
     items[2] = (pill_list_item_t){ SCREENSHOT_ROW_LABEL, PILL_ACCESSORY_TOGGLE,
                                     current_settings.screenshot_combo_enabled, NULL,
                                     screenshot_combo_switch_event_cb, NULL };
-    /* Experimental: off by default, see settings.h. The DAC codec switch
-     * applies the next time DAC mode starts. */
-    items[3] = (pill_list_item_t){ TR("LDAC in DAC mode (Experimental)"), PILL_ACCESSORY_TOGGLE,
-                                    current_settings.dev_bt_dac_all_codecs, NULL,
-                                    dev_bt_dac_all_codecs_switch_event_cb, NULL };
-    items[4] = (pill_list_item_t){ TR("Load covers during playback (Experimental)"), PILL_ACCESSORY_TOGGLE,
+    items[3] = (pill_list_item_t){ TR("Load covers during playback (Experimental)"), PILL_ACCESSORY_TOGGLE,
                                     current_settings.dev_covers_during_playback, NULL,
                                     dev_covers_during_playback_switch_event_cb, NULL };
-    lv_obj_t * scr = build_pill_list_screen(TR("Developer Options"), generic_back_cb, items, 5, gui_theme_accent_style(), GUI_ROW_GAP, 100);
+    lv_obj_t * scr = build_pill_list_screen(TR("Developer Options"), generic_back_cb, items, 4, gui_theme_accent_style(), GUI_ROW_GAP, 100);
     finalize_screen_navigation(scr);
     return scr;
 }
@@ -1986,6 +1976,11 @@ void gui_settings_open_playback(void) {
     nav_push(music_playback_screen);
 }
 
+void gui_settings_open_sound(void) {
+    if (!music_audio_screen) return;
+    nav_push(music_audio_screen);
+}
+
 /* Index into SLEEP_TIMER_STEPS closest to `minutes' -- same reasoning as
  * screen_timeout_seconds_to_step_index() above. */
 static int sleep_timer_minutes_to_step_index(int minutes) {
@@ -2398,7 +2393,7 @@ static void build_timezone_city_screen_items(compact_list_item_t * items, const 
 static lv_obj_t * build_timezone_city_screen(const char * region) {
     compact_list_item_t * items = malloc(sizeof(compact_list_item_t) * (size_t) TIMEZONE_TABLE_COUNT);
     build_timezone_city_screen_items(items, region);
-    lv_obj_t * scr = build_compact_list_screen(region, generic_back_cb, items, timezone_city_count, timezone_city_row_click_cb, NULL, NULL, NULL, LIST_ROW_WIDTH, false, lv_color_black());
+    lv_obj_t * scr = build_compact_list_screen(region, generic_back_cb, items, timezone_city_count, timezone_city_row_click_cb, NULL, NULL, NULL, LIST_ROW_WIDTH, false, NULL);
     free(items);
     finalize_screen_navigation(scr);
     return scr;
@@ -2780,6 +2775,49 @@ static void animation_speed_settings_row_cb(lv_event_t * e) {
     nav_push(animation_speed_screen);
 }
 
+typedef struct {
+    int layout;
+    const char * label;
+} keyboard_layout_option_t;
+
+static const keyboard_layout_option_t keyboard_layout_options[] = {
+    { KEYBOARD_LAYOUT_T9, N_("T9") }, { KEYBOARD_LAYOUT_QWERTY, N_("QWERTY") },
+};
+#define KEYBOARD_LAYOUT_OPTION_COUNT (sizeof(keyboard_layout_options) / sizeof(keyboard_layout_options[0]))
+
+static void keyboard_layout_option_row_cb(lv_event_t * e);
+
+static void populate_keyboard_layout_screen(void) {
+    if (!keyboard_layout_list) return;
+    lv_obj_clean(keyboard_layout_list);
+    for (size_t i = 0; i < KEYBOARD_LAYOUT_OPTION_COUNT; i++) {
+        bool selected = current_settings.keyboard_layout == keyboard_layout_options[i].layout;
+        add_pill_option_row(keyboard_layout_list, TR(keyboard_layout_options[i].label),
+                            selected, keyboard_layout_option_row_cb, (void *) (intptr_t) i);
+    }
+}
+
+/* Takes effect the next time a text field or inline search opens -- the
+ * shared keyboard picks its layout at session start (gui_text_input.c). */
+static void keyboard_layout_option_row_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    int index = (int) (intptr_t) lv_event_get_user_data(e);
+    current_settings.keyboard_layout = keyboard_layout_options[index].layout;
+    settings_save(&current_settings);
+    populate_keyboard_layout_screen();
+}
+
+static lv_obj_t * build_keyboard_layout_screen(void) {
+    lv_obj_t * title_label; /* unused after build -- title never changes */
+    return build_subsonic_list_screen(TR("Keyboard"), &title_label, &keyboard_layout_list);
+}
+
+static void keyboard_layout_settings_row_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    populate_keyboard_layout_screen();
+    nav_push(keyboard_layout_screen);
+}
+
 static void upside_down_screen_switch_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
     current_settings.screen_upside_down = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
@@ -2814,20 +2852,21 @@ void gui_display_apply_rotation(bool upside_down) {
 }
 
 static lv_obj_t * build_settings_appearance_screen(void) {
-    static pill_list_item_t items[6 + PLUGIN_MAX_DISPLAY_LIST_ITEMS];
+    static pill_list_item_t items[7 + PLUGIN_MAX_DISPLAY_LIST_ITEMS];
     items[0] = (pill_list_item_t){ TR("Accent Color"), PILL_ACCESSORY_CHEVRON, false, accent_color_row_cb, NULL, NULL };
     items[1] = (pill_list_item_t){ TR("Font"), PILL_ACCESSORY_CHEVRON, false, custom_font_row_cb, NULL, NULL };
     items[2] = (pill_list_item_t){ TR("Font Size"), PILL_ACCESSORY_CHEVRON, false, font_size_settings_row_cb, NULL, NULL };
-    items[3] = (pill_list_item_t){ TR("Drawer Volume Slider"), PILL_ACCESSORY_TOGGLE,
+    items[3] = (pill_list_item_t){ TR("Keyboard"), PILL_ACCESSORY_CHEVRON, false, keyboard_layout_settings_row_cb, NULL, NULL };
+    items[4] = (pill_list_item_t){ TR("Drawer Volume Slider"), PILL_ACCESSORY_TOGGLE,
                                     current_settings.quick_drawer_volume_visible, NULL,
                                     quick_drawer_volume_visible_switch_event_cb, NULL };
-    items[4] = (pill_list_item_t){ TR("Battery Percentage"), PILL_ACCESSORY_TOGGLE,
+    items[5] = (pill_list_item_t){ TR("Battery Percentage"), PILL_ACCESSORY_TOGGLE,
                                     current_settings.show_battery_percent, NULL,
                                     battery_percent_switch_event_cb, NULL };
-    items[5] = (pill_list_item_t){ TR("Artist Images"), PILL_ACCESSORY_TOGGLE,
+    items[6] = (pill_list_item_t){ TR("Artist Images"), PILL_ACCESSORY_TOGGLE,
                                     current_settings.show_artist_images, NULL,
                                     artist_images_switch_event_cb, NULL };
-    int count = append_grouped_plugin_rows(items, 6, PLUGIN_MAX_DISPLAY_LIST_ITEMS,
+    int count = append_grouped_plugin_rows(items, 7, PLUGIN_MAX_DISPLAY_LIST_ITEMS,
         "display", "appearance", plugin_manager_get_display_list_item_count,
         plugin_manager_get_display_list_item_label, plugin_manager_get_display_list_item_options,
         plugin_display_list_item_click_cb);
@@ -2859,21 +2898,35 @@ static void player_layout_download_cb(lv_event_t * e) {
     (void) gui_plugin_store_open_player_layouts();
 }
 
-static void populate_player_layout_choice_screen(void) {
-    if (!player_layout_choice_list) return;
-    lv_obj_clean(player_layout_choice_list);
+void gui_settings_populate_player_layout_picker(lv_obj_t * list, bool suggested_only) {
+    if (!list) return;
+    lv_obj_clean(list);
     player_layouts_rescan();
-    add_pill_chevron_row(player_layout_choice_list, TR("Download"), player_layout_download_cb);
+    if (!suggested_only) {
+        lv_obj_t * download = add_pill_chevron_row(list, TR("Download"), player_layout_download_cb);
+        lv_obj_set_width(download, lv_pct(100));
+    }
     const char * active = player_layouts_effective_id();
-    lv_obj_t * grid = lv_obj_create(player_layout_choice_list);
+    lv_obj_t * grid = lv_obj_create(list);
     lv_obj_remove_style_all(grid);
     lv_obj_set_width(grid, lv_pct(100));
     lv_obj_set_height(grid, LV_SIZE_CONTENT);
     lv_obj_remove_flag(grid, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     configure_cover_card_grid(grid, 2);
-    const lv_font_t * status_font = gui_theme_font(GUI_FONT_ROLE_SUBTEXT);
-    int32_t status_height = lv_font_get_line_height(status_font) + BOARD_SCALE_PX(4);
-    for (int i = 0; i < player_layouts_count(); i++) {
+    /* The outline extends outside each card. Reserve space at the grid's
+     * edges so its first and last rows retain the complete selection ring. */
+    lv_obj_set_style_pad_top(grid, BOARD_SCALE_PX(6), 0);
+    lv_obj_set_style_pad_bottom(grid, BOARD_SCALE_PX(6), 0);
+    int preferred_vinyl_index = player_layouts_find("vinyl");
+    if (preferred_vinyl_index < 0)
+        preferred_vinyl_index = player_layouts_find("plugin.vinyl_player");
+    int default_index = player_layouts_find(PLAYER_LAYOUT_ID_DEFAULT);
+    int layout_count = suggested_only ? 2 : player_layouts_count();
+    for (int selection = 0; selection < layout_count; selection++) {
+        int i = suggested_only
+            ? (selection == 0 ? default_index : preferred_vinyl_index)
+            : selection;
+        if (i < 0 || (suggested_only && selection == 1 && i == default_index)) continue;
         const player_layout_info_t * info = player_layouts_get(i);
         bool selected = strcmp(info->id, active) == 0;
         char preview[512], resolved[520];
@@ -2891,21 +2944,13 @@ static void populate_player_layout_choice_screen(void) {
         lv_obj_set_style_outline_opa(card, LV_OPA_COVER, 0);
         lv_obj_set_style_outline_pad(card, BOARD_SCALE_PX(2), 0);
 
-        lv_obj_t * status = lv_label_create(card);
-        lv_label_set_text(status, selected ? TR("Selected") : "");
-        lv_obj_set_width(status, lv_pct(100));
-        lv_obj_set_height(status, status_height);
-        lv_label_set_long_mode(status, LV_LABEL_LONG_DOT);
-        lv_obj_add_style(status, selected ? &style_theme_text_primary : &style_theme_text_muted, 0);
-        lv_obj_set_style_text_font(status, status_font, 0);
-        lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_remove_flag(status, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     }
 }
 
 static void player_layout_choice_settings_row_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    populate_player_layout_choice_screen();
+    if (!player_layout_choice_screen) return;
+    gui_settings_populate_player_layout_picker(player_layout_choice_list, false);
     nav_push(player_layout_choice_screen);
 }
 
@@ -3610,8 +3655,8 @@ static void fit_home_list_rows(icon_grid_item_t * items, const resolved_home_til
     int32_t minimum[HOME_LAYOUT_MAX_TILES];
     int32_t heights[HOME_LAYOUT_MAX_TILES];
     int32_t total_gaps = (count - 1) * row_gap;
-    int32_t viewport = display_height - STATUS_BAR_CLEARANCE - HOME_INDICATOR_CONTENT_INSET;
-    int32_t row_budget = viewport - GUI_ROW_GAP - BOARD_SCALE_PX(8) - total_gaps;
+    int32_t viewport = display_height - STATUS_BAR_CLEARANCE;
+    int32_t row_budget = viewport - total_gaps;
 
     for (int i = 0; i < count; ++i) {
         const home_tile_override_t * ov = resolved[i].override;
@@ -4802,6 +4847,7 @@ void gui_settings_init(void) {
     music_controls_screen = NULL; /* built on first open of Playback & Controls > Buttons & Remote */
     car_mode_screen = build_car_mode_screen();
     animation_speed_screen = build_animation_speed_screen();
+    keyboard_layout_screen = build_keyboard_layout_screen();
     player_layout_choice_screen = build_player_layout_choice_screen();
     language_choice_screen = build_language_choice_screen();
     settings_display_screen = build_settings_display_screen();
@@ -4890,6 +4936,8 @@ void gui_settings_teardown(void) {
     car_mode_volume_slider = NULL;
     if (animation_speed_screen) { lv_obj_delete(animation_speed_screen); animation_speed_screen = NULL; }
     animation_speed_list = NULL;
+    if (keyboard_layout_screen) { lv_obj_delete(keyboard_layout_screen); keyboard_layout_screen = NULL; }
+    keyboard_layout_list = NULL;
     if (player_layout_choice_screen) { lv_obj_delete(player_layout_choice_screen); player_layout_choice_screen = NULL; }
     player_layout_choice_list = NULL;
     if (language_choice_screen) { lv_obj_delete(language_choice_screen); language_choice_screen = NULL; }
