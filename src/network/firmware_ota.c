@@ -1,6 +1,7 @@
 #include "firmware_ota.h"
 #include "i18n.h"
 #include "firmware_update.h"
+#include "firmware_image.h"
 #include "http_client.h"
 #include "battery.h"
 #include "app_version.h"
@@ -410,17 +411,59 @@ static bool sha256_file(const char * path, uint64_t * out_size, char out_hex[65]
 /* Moves another .upt aside as <path>.parked (or .parked.1 ... .parked.9
  * when taken), never deleting or replacing a parked file. True when the
  * path is free afterwards. */
+static bool is_upt_name(const char * name);
+
 static bool park_file(const char * path) {
     struct stat st;
     if (lstat(path, &st) != 0) return errno == ENOENT;
     char parked[PATH_MAX];
     for (int n = 0; n < 10; n++) {
-        if (n == 0) snprintf(parked, sizeof(parked), "%s.parked", path);
-        else snprintf(parked, sizeof(parked), "%s.parked.%d", path, n);
+        int written = n == 0 ? snprintf(parked, sizeof(parked), "%s.parked", path)
+                             : snprintf(parked, sizeof(parked), "%s.parked.%d", path, n);
+        if (written < 0 || (size_t) written >= sizeof(parked)) return false;
         if (lstat(parked, &st) == 0) continue;
+        if (errno != ENOENT) return false;
         return rename(path, parked) == 0;
     }
     return false;
+}
+
+bool firmware_ota_park_other_upts(const char * selected_path, char * error, size_t error_size) {
+    const char * selected_name = selected_path ? strrchr(selected_path, '/') : NULL;
+    selected_name = selected_name ? selected_name + 1 : selected_path;
+    struct stat selected_st;
+    bool have_selected_stat = selected_path && lstat(selected_path, &selected_st) == 0 && S_ISREG(selected_st.st_mode);
+    DIR * dir = opendir(OTA_SD_ROOT);
+    if (!dir) {
+        snprintf(error, error_size, TR("Cannot read the SD card."));
+        return false;
+    }
+    bool ok = true;
+    struct dirent * entry;
+    for (;;) {
+        errno = 0;
+        entry = readdir(dir);
+        if (!entry) {
+            if (errno) ok = false;
+            break;
+        }
+        /* Recovery may match dot-hidden entries too. Skip only the exact
+         * selected filename, plus aliases resolving to the same inode (as
+         * happens on FAT's case-insensitive namespace). */
+        if (!is_upt_name(entry->d_name)) continue;
+        char from[sizeof(OTA_SD_ROOT) + 1 + NAME_MAX + 1];
+        int written = snprintf(from, sizeof(from), "%s/%.*s", OTA_SD_ROOT, NAME_MAX, entry->d_name);
+        if (written < 0 || (size_t) written >= sizeof(from)) { ok = false; continue; }
+        if (selected_name && strcmp(entry->d_name, selected_name) == 0) continue;
+        struct stat candidate_st;
+        if (have_selected_stat && lstat(from, &candidate_st) == 0 &&
+            candidate_st.st_dev == selected_st.st_dev && candidate_st.st_ino == selected_st.st_ino)
+            continue;
+        if (!park_file(from)) ok = false;
+    }
+    closedir(dir);
+    if (!ok) snprintf(error, error_size, TR("Could not move other .upt files aside on the SD card."));
+    return ok;
 }
 
 /* The verification record lives on the card beside the image, so it
@@ -607,6 +650,13 @@ static void * download_worker(void * arg) {
     uint64_t actual_size = 0;
     if (!sha256_file(part_path, &actual_size, actual) || actual_size != release.asset_size ||
         strcmp(actual, expected) != 0) {
+        unlink(part_path);
+        set_failed(TR("The downloaded image failed verification and was deleted."));
+        return NULL;
+    }
+    char image_error[160] = "";
+    if (!firmware_image_validate(part_path, image_error, sizeof(image_error))) {
+        if (image_error[0]) fprintf(stderr, "firmware_ota: invalid downloaded image: %s\n", image_error);
         unlink(part_path);
         set_failed(TR("The downloaded image failed verification and was deleted."));
         return NULL;
@@ -838,35 +888,6 @@ static void * install_worker(void * unused) {
         return NULL;
     }
 
-    /* Recovery flashes a .upt from the card root; leave it only ours. */
-    DIR * dir = opendir(OTA_SD_ROOT);
-    if (!dir) {
-        set_failed(TR("Cannot read the SD card."));
-        return NULL;
-    }
-    struct dirent * entry;
-    bool parked_ok = true;
-    /* A read error must not look like the end of the listing: an unseen
-     * .upt would stay beside ours. */
-    for (;;) {
-        errno = 0;
-        entry = readdir(dir);
-        if (!entry) {
-            if (errno != 0) parked_ok = false;
-            break;
-        }
-        if (entry->d_name[0] == '.' || !is_upt_name(entry->d_name) ||
-            strcasecmp(entry->d_name, pending.release.asset_name) == 0)
-            continue;
-        char from[sizeof(OTA_SD_ROOT) + 1 + NAME_MAX + 1];
-        snprintf(from, sizeof(from), "%s/%.*s", OTA_SD_ROOT, NAME_MAX, entry->d_name);
-        if (!park_file(from)) parked_ok = false;
-    }
-    closedir(dir);
-    if (!parked_ok) {
-        set_failed(TR("Could not move other .upt files aside on the SD card."));
-        return NULL;
-    }
     if (!firmware_update_enter_ota_recovery_for_path(path)) {
         firmware_update_status_t update_status;
         firmware_update_get_status(&update_status);

@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "decoder_result.h"
+#include "metadata.h"
 
 typedef enum {
     AUDIO_CODEC_UNKNOWN = 0,
@@ -18,6 +19,7 @@ typedef enum {
     AUDIO_CODEC_WMA,
     AUDIO_CODEC_OPUS,
     AUDIO_CODEC_VORBIS,
+    AUDIO_CODEC_WAVPACK,
 } audio_codec_t;
 
 /* Immutable snapshot of the decoder currently feeding playback. The source
@@ -38,12 +40,38 @@ typedef struct {
     unsigned int bitrate_kbps;
     double duration_seconds;
     bool is_stream;
+    bool seekable;
     bool is_dsd;
     bool dsd_native; /* DSD sent to the DAC as DoP rather than converted to PCM */
     bool replaygain_applied;
     double replaygain_applied_db;
+    /* Live playback state, captured with the format snapshot. software_volume_gain
+     * is the linear PCM multiplier actually used by the audio worker. */
+    double software_volume_gain;
+    double playback_speed;
+    bool crossfade_enabled;
     uint64_t generation;
 } audio_current_format_info_t;
+
+typedef enum {
+    AUDIO_PLAYBACK_PROGRESS_NOT_READY = 0,
+    AUDIO_PLAYBACK_PROGRESS_ACTIVE,
+    AUDIO_PLAYBACK_PROGRESS_NATURAL_EOF,
+    AUDIO_PLAYBACK_PROGRESS_MANUAL_STOP,
+} audio_playback_progress_state_t;
+
+/* Coherent position snapshot for one exact playback path. A terminal state
+ * retains the last trusted counters after the live decoder has been closed;
+ * NOT_READY is reported by the function's false return rather than exposed
+ * as a valid snapshot. */
+typedef struct {
+    double position_seconds;
+    double duration_seconds;
+    bool is_playing;
+    bool is_paused;
+    audio_playback_progress_state_t state;
+    uint64_t generation;
+} audio_playback_progress_t;
 
 /* One-time setup of the audio backend (SDL2 audio on host, ALSA/tinyalsa on
  * target) and the single playback thread, which lives for the app's whole
@@ -51,6 +79,15 @@ typedef struct {
  * what lets gapless/crossfade transitions avoid tearing down the output
  * device between tracks. Safe to call more than once; only the first call
  * does anything. */
+/* Same-position comparison of finite, matching local 16-bit PCM or MP3 sources.
+ * Preparation is asynchronous; adoption may seek once. Selection never seeks.
+ * Both sources use the primary track's shared ReplayGain, EQ and volume.
+ * Pause/seek/stop/track/speed/crossfade changes invalidate the comparison. */
+bool audio_prepare_ab_switch(const char *path);
+bool audio_select_ab_source(bool source_b);
+void audio_clear_ab_switch(void);
+void audio_get_ab_switch(bool *preparing, bool *ready, bool *source_b);
+
 void audio_init(void);
 
 /* Interrupts whatever's currently playing (if anything) and immediately
@@ -60,9 +97,8 @@ void audio_init(void);
  * track (see audio_set_next_track()), which can gapless-handoff or
  * crossfade instead. Format is picked from the file extension -- except a
  * path starting with "http://" or "https://", which is instead opened as a
- * live network stream (internet radio) and always decoded as MP3
- * regardless of what the URL looks like, the only decoder with a
- * callback-based streaming API wired up so far (see decoder_open() in
+ * network stream. Format comes from a #.ext fragment, then the URL path
+ * extension, then Content-Type, and otherwise MP3 (see decoder_open() in
  * audio.c). A live stream reports a duration of 0 (see
  * audio_get_duration_seconds()), can't be seeked, and never reaches true
  * EOF, so auto-advance and gapless/crossfade into/out of it never engage --
@@ -86,8 +122,32 @@ void audio_play_file_at(const char * path, double start_seconds,
  * automatic transitions stops after one hop. Pass path=NULL to mean "end
  * of playlist, nothing queued" (a true EOF with nothing queued sets
  * audio_consume_track_finished() instead of advancing). */
+/* Local-file startup: read ReplayGain tags on the audio worker before any
+ * output, with the request's captured Settings mode (0 off, 1 track, 2 album). */
+void audio_play_file_at_with_replaygain_mode(const char * path, double start_seconds, int mode);
+typedef enum {
+    AUDIO_TRACK_METADATA_READY,
+    AUDIO_TRACK_METADATA_STOPPED,
+    AUDIO_TRACK_METADATA_REPLACED
+} audio_track_metadata_wait_result_t;
+/* Worker-only wait for scalar tags read by local startup. Distinguishes Stop
+ * (the current UI selection still needs display tags) from a newer request
+ * replacing this one; never call on the UI thread. */
+audio_track_metadata_wait_result_t audio_wait_track_metadata(uint64_t generation,
+                                                              track_metadata_t * out);
+/* Atomic stale-result guard for asynchronous gapless preparation. */
+bool audio_set_next_track_for_generation(const char * path, bool has_replaygain, double gain,
+                           bool has_peak, double peak, uint64_t generation);
+
 void audio_set_next_track(const char * path, bool has_replaygain, double replaygain_gain_db,
                            bool has_replaygain_peak, double replaygain_peak);
+
+/* Pitch-preserving speech tempo for files inside directory (component boundary).
+ * 0.5..2; NULL/1 resets. Other files stay at 1x. Local mono/stereo PCM at
+ * 8..96 kHz supported, non-1x uses S16 output and suspends crossfade.
+ * Changes commit on the audio thread after a source-position-preserving seek. */
+bool audio_set_playback_speed(const char * directory, double speed);
+double audio_get_playback_speed(void);
 
 /* Enables crossfading into the queued next track during the last few
  * seconds of the current one (only when both tracks share the same
@@ -123,6 +183,9 @@ void audio_toggle_pause(void);
 /* Stop playback and release the decoder/output device */
 void audio_stop(void);
 
+/* True only after the audio worker has released local output and acknowledged
+ * Stop. Output bridges must use this rather than transport status. */
+bool audio_is_idle(void);
 bool audio_is_playing(void);
 bool audio_is_paused(void);
 
@@ -138,12 +201,28 @@ void audio_seek(double seconds);
  * an absolute time offset the caller computed itself. */
 void audio_seek_percent(double percent);
 
+/* Repeats the exact PCM frame interval [start_seconds, end_seconds) on the
+ * audio worker. Supported for finite local 16-bit FLAC/WAV/AIFF/CAF tracks
+ * at normal speed with crossfade disabled. Returns false for unsupported
+ * formats or invalid intervals. A manual seek, stop, track change, speed
+ * change, or enabling crossfade clears the loop. */
+bool audio_set_ab_loop(double start_seconds, double end_seconds);
+void audio_clear_ab_loop(void);
+bool audio_get_ab_loop(double * start_seconds, double * end_seconds);
+
 double audio_get_position_seconds(void);
 /* Pending-aware position for durable pause/power-loss checkpoints. Unlike
  * audio_get_position_seconds(), this returns the latest deferred MP3 seek
  * target while its background seek-index is still being prepared. */
 double audio_get_resume_position_seconds(void);
 double audio_get_duration_seconds(void);
+
+/* Copies position, duration, transport state, and terminal reason under one
+ * audio-state lock. Returns false and zeroes *out unless expected_path exactly
+ * matches the current playback path and the counters belong to the current
+ * generation. ACTIVE requires a live decoder; trusted natural EOF/manual stop
+ * snapshots remain available after decoder cleanup. */
+bool audio_get_playback_progress(const char * expected_path, audio_playback_progress_t * out);
 
 /* Sample rate of the currently loaded track, in Hz. 0 if nothing loaded. */
 unsigned int audio_get_sample_rate(void);
@@ -171,6 +250,12 @@ void audio_set_volume(float volume);
  * A later synchronous audio_set_volume() always supersedes queued work. */
 void audio_request_volume(float volume);
 float audio_get_volume(void);
+
+/* Clamp a requested integer percentage to the active application cap. */
+int audio_clamp_volume_percent(int percent);
+/* Set the maximum allowed volume percentage. Use 100 for no application cap.
+ * Lowering it immediately clamps current volume; raising it does not restore it. */
+void audio_set_max_volume_percent(int percent);
 
 /* Shared with plugin_manager.c's own array-length validation for
  * plugin.set_hw_volume_curve() -- defined once here, rather than as a

@@ -18,8 +18,8 @@
  * is untouched by this project's own repack, no custom flashing logic is
  * needed here at all -- only the same trigger the stock player uses. */
 
-/* Only one regular board-named image may exist at the SD root. The checked
- * form describes missing, ambiguous, wrong-board and unreadable files. */
+/* Selects the regular image with this board's expected filename at the SD
+ * root. Other root .upt files are moved aside before recovery. */
 bool firmware_update_scan(char * out_path, size_t out_size);
 bool firmware_update_scan_checked(char * out_path, size_t out_size, char * error, size_t error_size);
 
@@ -46,12 +46,16 @@ bool firmware_update_busy(void);
 bool firmware_update_claim_ota(void);
 void firmware_update_release_ota(void);
 bool firmware_update_enter_ota_recovery_for_path(const char * path);
-/* Starts manual validation/recovery on a single-flight worker. No LVGL work.
- * All diagnostics are persisted at SD/.compas/ota/update.log. */
+/* Starts manual recovery preparation on a single-flight worker. The SD path
+ * checks the expected filename and regular-file type, parks other root .upt
+ * files, and leaves package-content validation to stock recovery. No LVGL work.
+ * All diagnostics are persisted at
+ * SD/.compas/ota/update.log. */
 bool firmware_update_start(const char * path, char * error, size_t error_size);
-/* Synchronous worker/early-boot entry. Validates the selected package, checks
- * erase/write and verifies the recovery flag before flushing and rebooting.
- * Host builds only validate. Returns false on failure; success on device does
+/* Synchronous worker/early-boot entry. Rechecks the selected SD filename and
+ * file identity, checks erase/write and verifies the recovery flag before
+ * flushing and rebooting. Host builds only check the handoff path. Returns
+ * false on failure; success on device does
  * not return. NAND helpers are never killed by a UI deadline; delayed status
  * remains busy until they finish, preventing unsafe retries. */
 bool firmware_update_enter_recovery_for_path(const char * path);

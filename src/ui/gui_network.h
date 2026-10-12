@@ -15,6 +15,9 @@ lv_obj_t * gui_network_get_usb_dac_overlay(void);
  * hint and can still read DAC after a restart with no cable attached. */
 bool gui_network_usb_dac_mode_active(void);
 bool gui_network_usb_prompt_invalidated(void);
+/* Firmware updates may proceed over a verified live ADB session after a
+ * Storage host was seen earlier on the same cable session. */
+bool gui_network_firmware_update_usb_blocked(void);
 bool gui_network_boot_prompt_blocked(void);
 lv_obj_t * gui_network_get_import_wifi_screen(void);
 

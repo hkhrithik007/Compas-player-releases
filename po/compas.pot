@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-05 22:08-0600\n"
+"POT-Creation-Date: 2026-10-11 13:10-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -39,17 +39,11 @@ msgstr ""
 msgid "No SD card is mounted."
 msgstr ""
 
-msgid "Cannot read the SD card."
-msgstr ""
-
-msgid "No .upt firmware file found on SD card"
-msgstr ""
-
-msgid "Keep only one .upt file in the SD card root."
+msgid "The firmware path is too long."
 msgstr ""
 
 #, c-format
-msgid "Use a regular %s file for this player. Check the SD card."
+msgid "Use a regular %s file in the SD card root."
 msgstr ""
 
 #, c-format
@@ -104,6 +98,9 @@ msgid "Cannot save update diagnostics on the SD card."
 msgstr ""
 
 msgid "The update file changed during verification. Select it again."
+msgstr ""
+
+msgid "Could not move other .upt files aside on the SD card."
 msgstr ""
 
 msgid "A required recovery helper is missing. Update preparation stopped."
@@ -168,6 +165,9 @@ msgstr ""
 msgid "Previous"
 msgstr ""
 
+msgid "This folder is empty"
+msgstr ""
+
 msgid "No playable files here"
 msgstr ""
 
@@ -207,6 +207,9 @@ msgstr ""
 
 #, c-format
 msgid "GitHub returned HTTP %d."
+msgstr ""
+
+msgid "Cannot read the SD card."
 msgstr ""
 
 msgid ""
@@ -273,9 +276,6 @@ msgstr ""
 msgid ""
 "This update no longer matches the latest release. Download the latest image "
 "again."
-msgstr ""
-
-msgid "Could not move other .upt files aside on the SD card."
 msgstr ""
 
 msgid "Could not enter recovery mode."
@@ -455,6 +455,132 @@ msgstr ""
 msgid "Add .txt files to the Books folder, then refresh the library."
 msgstr ""
 
+msgid "Disconnect USB storage from the computer before changing files."
+msgstr ""
+
+msgid "File Manager"
+msgstr ""
+
+#, c-format
+msgid "%d selected"
+msgid_plural "%d selected"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "Could not open this file"
+msgstr ""
+
+msgid "This type of file cannot be opened"
+msgstr ""
+
+#, c-format
+msgid ""
+"%u of %u\n"
+"%s"
+msgstr ""
+
+msgid "Stopped"
+msgstr ""
+
+#, c-format
+msgid "%u item could not be completed"
+msgid_plural "%u items could not be completed"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "Done. Update the music database to see the changes in your library."
+msgstr ""
+
+msgid "Done"
+msgstr ""
+
+msgid "Stopping..."
+msgstr ""
+
+msgid "Working..."
+msgstr ""
+
+msgid "Stop"
+msgstr ""
+
+msgid "Cancel"
+msgstr ""
+
+msgid "Another file operation is still running"
+msgstr ""
+
+msgid "Open the destination folder, then choose Paste here from the menu."
+msgstr ""
+
+#, c-format
+msgid "Move %d item?"
+msgid_plural "Move %d items?"
+msgstr[0] ""
+msgstr[1] ""
+
+#, c-format
+msgid "Delete %d item?"
+msgid_plural "Delete %d items?"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "Move"
+msgstr ""
+
+msgid "Delete"
+msgstr ""
+
+msgid ""
+"This includes the player's own data (.compas or .plugins). Deleting or "
+"moving it can break features, lose data such as settings and installed "
+"plugins, and may require a restart."
+msgstr ""
+
+msgid "This cannot be undone."
+msgstr ""
+
+msgid "That name cannot be used"
+msgstr ""
+
+msgid "Could not rename"
+msgstr ""
+
+msgid "An item with that name already exists"
+msgstr ""
+
+msgid "Rename"
+msgstr ""
+
+msgid "Could not create the folder"
+msgstr ""
+
+msgid "Nothing to select here"
+msgstr ""
+
+msgid "New folder"
+msgstr ""
+
+msgid "Copy"
+msgstr ""
+
+msgid "Select all"
+msgstr ""
+
+#, c-format
+msgid "Paste %d item here"
+msgid_plural "Paste %d items here"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "Select"
+msgstr ""
+
+msgid "Hide hidden files"
+msgstr ""
+
+msgid "Show hidden files"
+msgstr ""
+
 msgid "Playlist created"
 msgstr ""
 
@@ -516,12 +642,6 @@ msgid "Start sequentially"
 msgstr ""
 
 msgid "Shuffle from a random song"
-msgstr ""
-
-msgid "Cancel"
-msgstr ""
-
-msgid "Done"
 msgstr ""
 
 msgid "Edit"
@@ -624,9 +744,6 @@ msgid "Delete playlist?"
 msgstr ""
 
 msgid "The playlist file will be deleted. Music files are kept."
-msgstr ""
-
-msgid "Delete"
 msgstr ""
 
 msgid "Delete Playlist"
@@ -1317,21 +1434,6 @@ msgstr ""
 msgid "Resume Last Track"
 msgstr ""
 
-msgid "Play/Pause"
-msgstr ""
-
-msgid "Previous Track"
-msgstr ""
-
-msgid "Play/Pause + Previous Track (Double-Click)"
-msgstr ""
-
-msgid "Applies immediately"
-msgstr ""
-
-msgid "Play/Pause Button"
-msgstr ""
-
 msgid "Small"
 msgstr ""
 
@@ -1622,6 +1724,12 @@ msgstr ""
 msgid "Download layouts"
 msgstr ""
 
+msgid "Download themes"
+msgstr ""
+
+msgid "Extension updates"
+msgstr ""
+
 msgid "Install"
 msgstr ""
 
@@ -1643,12 +1751,7 @@ msgstr ""
 msgid "Needs newer firmware"
 msgstr ""
 
-#, c-format
-msgid "Update available · %s"
-msgstr ""
-
-#, c-format
-msgid "Installed · %s"
+msgid "Update available"
 msgstr ""
 
 msgid "Installed"
@@ -1661,10 +1764,15 @@ msgid "Installed manually"
 msgstr ""
 
 #, c-format
-msgid "Available · %s"
+msgid "Update available · %s"
 msgstr ""
 
-msgid "Update available"
+#, c-format
+msgid "Installed · %s"
+msgstr ""
+
+#, c-format
+msgid "Available · %s"
 msgstr ""
 
 #, c-format
@@ -1699,7 +1807,10 @@ msgstr ""
 msgid "This may take a while"
 msgstr ""
 
-msgid "No layouts are available in the catalog."
+msgid "No network detected. Connect to a network to download plugins."
+msgstr ""
+
+msgid "No updates available."
 msgstr ""
 
 msgid "Refresh plugin catalog"
@@ -1709,6 +1820,15 @@ msgid "Updates"
 msgstr ""
 
 msgid "Update All"
+msgstr ""
+
+msgid "Review updates"
+msgstr ""
+
+msgid "No layouts are available in the catalog."
+msgstr ""
+
+msgid "No themes are available in the catalog."
 msgstr ""
 
 msgid "Could not start the plugin operation"
@@ -1727,9 +1847,6 @@ msgstr ""
 msgid "Update these plugins individually"
 msgstr ""
 
-msgid "Plugin is unavailable"
-msgstr ""
-
 msgid "Not enough memory to load the plugin store"
 msgstr ""
 
@@ -1742,16 +1859,16 @@ msgstr ""
 msgid "Loading layouts"
 msgstr ""
 
+msgid "Loading themes"
+msgstr ""
+
+msgid "Loading updates"
+msgstr ""
+
 msgid "Loading plugins"
 msgstr ""
 
-msgid "No network detected. Connect to a network to download plugins."
-msgstr ""
-
 msgid "Could not load the plugin catalog."
-msgstr ""
-
-msgid "Plugin is unavailable in the catalog"
 msgstr ""
 
 msgid "Some plugin files were changed on the card. Replace them?"
@@ -1839,6 +1956,13 @@ msgstr ""
 msgid "%d min remaining"
 msgstr ""
 
+msgid "Crossfeed: Off"
+msgstr ""
+
+#, c-format
+msgid "Crossfeed: %d%%"
+msgstr ""
+
 #, c-format
 msgid "Pre-Amp: %+.2f dB"
 msgstr ""
@@ -1848,6 +1972,9 @@ msgid "%.0f Hz"
 msgstr ""
 
 msgid "Pre-Amp (dB, -12 to 12)"
+msgstr ""
+
+msgid "Crossfeed (0 to 100)"
 msgstr ""
 
 msgid "Frequency (Hz, 20 to 20000)"
@@ -1964,9 +2091,6 @@ msgstr ""
 msgid "Compás Player"
 msgstr ""
 
-msgid "Firmware Update"
-msgstr ""
-
 msgid "Developer Options"
 msgstr ""
 
@@ -2049,6 +2173,13 @@ msgid "Startup Volume"
 msgstr ""
 
 msgid "Launch at a fixed volume"
+msgstr ""
+
+msgid "Max Volume"
+msgstr ""
+
+msgid ""
+"Limits the player volume, including buttons, remote controls and plugins."
 msgstr ""
 
 msgid "Car Mode"
@@ -2188,6 +2319,93 @@ msgstr ""
 msgid "Sound"
 msgstr ""
 
+msgid "Power"
+msgstr ""
+
+msgid "Play/Pause"
+msgstr ""
+
+msgid "Next Track"
+msgstr ""
+
+msgid "Previous Track"
+msgstr ""
+
+msgid "Clockwise"
+msgstr ""
+
+msgid "Counterclockwise"
+msgstr ""
+
+msgid "Volume Up"
+msgstr ""
+
+msgid "Volume Down"
+msgstr ""
+
+msgid "Button"
+msgstr ""
+
+msgid "Default (native behavior)"
+msgstr ""
+
+msgid "Seek Forward"
+msgstr ""
+
+msgid "Seek Backward"
+msgstr ""
+
+msgid "Toggle Screen"
+msgstr ""
+
+msgid "Power Menu"
+msgstr ""
+
+msgid "Do Nothing"
+msgstr ""
+
+msgid "Single press"
+msgstr ""
+
+msgid "Double press"
+msgstr ""
+
+msgid "Long press"
+msgstr ""
+
+msgid "Single"
+msgstr ""
+
+msgid "Double"
+msgstr ""
+
+msgid "Long"
+msgstr ""
+
+msgid "Default"
+msgstr ""
+
+msgid "Disabled"
+msgstr ""
+
+msgid "Reset All"
+msgstr ""
+
+msgid "Button Mapping"
+msgstr ""
+
+msgid "Keep a button assigned to Toggle Screen or Power Menu"
+msgstr ""
+
+msgid "Reset all button mappings?"
+msgstr ""
+
+msgid "Reset"
+msgstr ""
+
+msgid "Volume Lock (Screen Off)"
+msgstr ""
+
 msgid "In-line Remote"
 msgstr ""
 
@@ -2293,9 +2511,6 @@ msgstr ""
 msgid "Charging"
 msgstr ""
 
-msgid "Power"
-msgstr ""
-
 msgid "Additional Tools"
 msgstr ""
 
@@ -2326,6 +2541,12 @@ msgstr ""
 msgid "Maintenance"
 msgstr ""
 
+msgid "Firmware Update"
+msgstr ""
+
+msgid "Plugins & Layouts"
+msgstr ""
+
 msgid "Applying language, this may take a while"
 msgstr ""
 
@@ -2343,7 +2564,16 @@ msgid ""
 "here."
 msgstr ""
 
-msgid "DAC"
+msgid "Plugins"
+msgstr ""
+
+msgid "Themes"
+msgstr ""
+
+msgid "Now Playing layouts"
+msgstr ""
+
+msgid "More"
 msgstr ""
 
 msgid "Combined response (dB) · EQ off"
@@ -2356,9 +2586,6 @@ msgid "PEQ reset to defaults"
 msgstr ""
 
 msgid "Reset PEQ to defaults?"
-msgstr ""
-
-msgid "Reset"
 msgstr ""
 
 msgid "Reset all settings and reboot?"
@@ -2481,6 +2708,9 @@ msgstr ""
 msgid "Could not start the library scan. Please try again."
 msgstr ""
 
+msgid "Plugin is unavailable in the catalog"
+msgstr ""
+
 msgid "Insert an SD card to scan for music, or turn off Scan for music."
 msgstr ""
 
@@ -2493,16 +2723,10 @@ msgstr ""
 msgid "Loading plugin catalog..."
 msgstr ""
 
-msgid "Default"
-msgstr ""
-
 msgid "No network detected"
 msgstr ""
 
 msgid "Time zone"
-msgstr ""
-
-msgid "Plugins"
 msgstr ""
 
 msgid "Quick setup"
@@ -2568,7 +2792,7 @@ msgstr ""
 msgid "AutoEQ"
 msgstr ""
 
-msgid "More"
+msgid "Gain Mode"
 msgstr ""
 
 msgid "Scan for music"
@@ -2811,6 +3035,9 @@ msgid "Download settings"
 msgstr ""
 
 msgid "Songs"
+msgstr ""
+
+msgid "Could not apply theme"
 msgstr ""
 
 #, c-format

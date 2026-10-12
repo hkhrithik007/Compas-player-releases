@@ -1,5 +1,6 @@
 #include "usb_mode_control.h"
 #include "battery.h"
+#include "sd_fsck.h"
 #include "subprocess.h"
 #include "usb_dac_bridge.h"
 
@@ -8,7 +9,10 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #define SETTLE_RETRY_LIMIT 20 /* ~1s at 50ms between checks */
@@ -46,6 +50,58 @@ static char storage_write_saved_controller[256];
 
 static bool path_exists(const char * path) {
     return access(path, F_OK) == 0;
+}
+
+static bool mounted_sd_partition_is_live(void) {
+    struct stat mounted_root_st, partition_st;
+    if (stat("/data/mnt/sd_0", &mounted_root_st) != 0 ||
+        stat("/dev/mmcblk0p1", &partition_st) != 0 || !S_ISBLK(partition_st.st_mode))
+        return false;
+
+    FILE * dev_file = fopen("/sys/class/block/mmcblk0p1/dev", "r");
+    if (!dev_file) return false;
+    unsigned major_number, minor_number;
+    char trailing;
+    int parsed = fscanf(dev_file, "%u:%u %c", &major_number, &minor_number, &trailing);
+    bool read_ok = parsed == 2 && !ferror(dev_file);
+    if (fclose(dev_file) != 0) read_ok = false;
+    if (!read_ok) return false;
+
+    dev_t live_partition = makedev(major_number, minor_number);
+    return mounted_root_st.st_dev == partition_st.st_rdev &&
+           partition_st.st_rdev == live_partition;
+}
+
+/* Export the partition the player actually mounted. Reading one line at a
+ * time preserves sd_fsck_parse_mounts()'s last-matching-mount semantics
+ * without imposing a size limit on /proc/mounts. Anything other than the
+ * known partition node (including a whole-disk/superfloppy mount, an
+ * unsupported partition, or a read/parse failure) keeps the full-disk
+ * backing device. */
+static const char * storage_backing_device(void) {
+    FILE * mounts = fopen("/proc/mounts", "r");
+    if (!mounts) return "/dev/mmcblk0";
+
+    char * line = NULL;
+    size_t line_capacity = 0;
+    bool found = false;
+    char mounted_device[SD_FSCK_DEVICE_BYTES] = { 0 };
+    ssize_t line_length;
+    while ((line_length = getline(&line, &line_capacity, mounts)) >= 0) {
+        (void) line_length;
+        sd_mount_info_t info;
+        if (sd_fsck_parse_mounts(line, &info) && info.found) {
+            snprintf(mounted_device, sizeof(mounted_device), "%s", info.device);
+            found = true;
+        }
+    }
+    bool read_ok = feof(mounts) && !ferror(mounts);
+    free(line);
+    if (fclose(mounts) != 0) read_ok = false;
+    if (read_ok && found && sd_fsck_device_allowed(mounted_device) &&
+        strcmp(mounted_device, "/dev/mmcblk0p1") == 0 && mounted_sd_partition_is_live())
+        return "/dev/mmcblk0p1";
+    return "/dev/mmcblk0";
 }
 
 bool usb_mode_control_cable_connected(void) {
@@ -279,6 +335,8 @@ static bool start_adb_gadget(void) {
 
 static bool usb_mode_control_apply_locked(usb_mode_t mode) {
     fprintf(stderr, "usb_mode_control: switching to mode=%d\n", (int) mode);
+    /* Capture the source before teardown changes mounts or gadget state. */
+    const char * storage_device = mode == USB_MODE_STORAGE ? storage_backing_device() : "/dev/mmcblk0";
     usb_dac_bridge_stop(); /* no-op unless we're actually leaving DAC mode */
 
     /* Deliberately does NOT call uac_device_config.sh's own "stop" --
@@ -337,7 +395,7 @@ static bool usb_mode_control_apply_locked(usb_mode_t mode) {
     int exit_code = -1;
     switch (mode) {
         case USB_MODE_STORAGE: {
-            char * argv[] = { (char *) "/usr/bin/usb_dev_mass_storage.sh", (char *) "start", (char *) "/dev/mmcblk0", NULL };
+            char * argv[] = { (char *) "/usr/bin/usb_dev_mass_storage.sh", (char *) "start", (char *) storage_device, NULL };
             subprocess_run_checked(argv, NULL, 0, SCRIPT_TIMEOUT_MS, &exit_code);
             bool ok = exit_code == 0 && udc_becomes_bound(ANDROID0_UDC_PATH) && function_linked(ANDROID0_DIR, "mass_storage.");
             fprintf(stderr, "usb_mode_control: Storage start exit=%d -> %s\n", exit_code, ok ? "ok" : "FAILED");

@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -40,6 +41,25 @@ static biquad_state_t state[PEQ_NUM_BANDS][PEQ_MAX_CHANNELS];
 static bool last_call_was_s32 = false;
 static bool bypass = false;
 static double preamp_db = 0.0;
+/* UI/plugin writes are atomic; the smoothed value belongs to the PCM owner. */
+static _Atomic float stereo_width_target = 1.0f;
+static float stereo_width_current = 1.0f;
+#define STEREO_WIDTH_RAMP_SEC 0.020f
+/* Crossfeed target is shared with the UI. Mix and low-pass memory stay on
+ * the audio thread: writers never touch them. */
+static _Atomic float crossfeed_target = 0.0f;
+static float crossfeed_mix = 0.0f;
+static float crossfeed_lp[PEQ_MAX_CHANNELS];
+static float crossfeed_alpha = 0.0f;
+static unsigned int crossfeed_coeff_rate = 0;
+/* Set when the rate, PCM format, or a noted discontinuity changes. The next
+ * active sample copies the current input into the low-pass memory so the
+ * mix does not ring out the previous stream and does not step a steady
+ * signal. */
+static bool crossfeed_prime = false;
+/* Audio thread sets this at a transport break. Only peq_process consumes
+ * it, so UI/control threads never write the low-pass. */
+static atomic_bool crossfeed_discontinuity = false;
 static unsigned int coeffs_sample_rate = 0;
 static bool coeffs_dirty = true;
 
@@ -99,6 +119,8 @@ static void set_defaults(void) {
     }
     bypass = false;
     preamp_db = 0.0;
+    peq_set_stereo_width(1.0);
+    peq_set_crossfeed(0.0);
     update_preamp_linear_cache();
 }
 
@@ -259,6 +281,162 @@ void peq_set_preamp_db(double db) {
     update_preamp_linear_cache();
 }
 
+double peq_get_stereo_width(void) {
+    return atomic_load_explicit(&stereo_width_target, memory_order_relaxed);
+}
+
+void peq_set_stereo_width(double width) {
+    if (!isfinite(width)) width = 1.0;
+    if (width < 0.0) width = 0.0;
+    if (width > 2.0) width = 2.0;
+    atomic_store_explicit(&stereo_width_target, (float) width, memory_order_relaxed);
+}
+
+double peq_get_crossfeed(void) {
+    return atomic_load_explicit(&crossfeed_target, memory_order_relaxed);
+}
+
+void peq_set_crossfeed(double strength) {
+    if (!isfinite(strength)) strength = 0.0;
+    if (strength < 0.0) strength = 0.0;
+    if (strength > 1.0) strength = 1.0;
+    atomic_store_explicit(&crossfeed_target, (float) strength, memory_order_relaxed);
+}
+
+void peq_note_pcm_discontinuity(void) {
+    atomic_store_explicit(&crossfeed_discontinuity, true, memory_order_relaxed);
+}
+
+/* Drop crossfeed memory. Safe only on the audio thread (or before playback). */
+static void crossfeed_clear_audio_state(void) {
+    crossfeed_mix = 0.0f;
+    crossfeed_lp[0] = 0.0f;
+    crossfeed_lp[1] = 0.0f;
+    crossfeed_prime = false;
+}
+
+/* One-pole coefficient for y += alpha * (x - y), alpha = 1 - exp(-2π fc / sr).
+ * exp() runs only when the sample rate changes, not per sample. A rate change
+ * drops filter memory so the new coefficient cannot ring out old samples. */
+static void crossfeed_update_alpha(unsigned int sample_rate) {
+    if (sample_rate == 0) sample_rate = 48000;
+    if (crossfeed_coeff_rate == sample_rate && crossfeed_alpha > 0.0f) return;
+    if (crossfeed_coeff_rate != 0 && crossfeed_coeff_rate != sample_rate) {
+        crossfeed_lp[0] = 0.0f;
+        crossfeed_lp[1] = 0.0f;
+        crossfeed_prime = true;
+    }
+    double decay = exp(-2.0 * M_PI * PEQ_CROSSFEED_FC_HZ / (double) sample_rate);
+    crossfeed_alpha = (float) (1.0 - decay);
+    crossfeed_coeff_rate = sample_rate;
+}
+
+/* Drop a pending break without arming a prime. Bypass and an idle buffer
+ * already zero the low-pass; leaving the flag set would prime later. */
+static void crossfeed_drop_discontinuity(void) {
+    atomic_store_explicit(&crossfeed_discontinuity, false, memory_order_relaxed);
+}
+
+/* Consume a break noted by the audio thread. Armed only while crossfeed
+ * will run, so the next sample adopts the new stream instead of the old
+ * low-pass. */
+static void crossfeed_consume_discontinuity(bool cross_active) {
+    if (!atomic_exchange_explicit(&crossfeed_discontinuity, false, memory_order_relaxed))
+        return;
+    crossfeed_lp[0] = 0.0f;
+    crossfeed_lp[1] = 0.0f;
+    if (cross_active) crossfeed_prime = true;
+}
+
+/* Strength s maps to k = s * PEQ_CROSSFEED_MAX_BLEND.
+ * yL = xL + k * (lpR - lpL), with lp the one-pole low-pass of that channel
+ * including the current sample. Steady mono (xL == xR, lp cleared together)
+ * stays exactly x. k == 0 skips the filter.
+ *
+ * ceiling is the immediate stereo-linked peak limit used only while this
+ * mix is active. A reversal can reach about 1+2k times the input before
+ * the 1 ms limiter moves. Gain is ceiling/peak, or the pre-crossfeed peak
+ * when that peak is already over the ceiling, so preamp headroom still
+ * belongs to the existing limiter. Signals that do not exceed the ceiling
+ * are left unchanged. */
+static void crossfeed_frame(float * samples, float target, float step, float ceiling) {
+    if (crossfeed_mix != target) {
+        if (crossfeed_mix < target)
+            crossfeed_mix = fminf(target, crossfeed_mix + step);
+        else
+            crossfeed_mix = fmaxf(target, crossfeed_mix - step);
+    }
+    float k = crossfeed_mix * (float) PEQ_CROSSFEED_MAX_BLEND;
+    if (k == 0.0f) {
+        crossfeed_lp[0] = 0.0f;
+        crossfeed_lp[1] = 0.0f;
+        return;
+    }
+    float x0 = samples[0];
+    float x1 = samples[1];
+    if (crossfeed_prime) {
+        crossfeed_lp[0] = x0;
+        crossfeed_lp[1] = x1;
+        crossfeed_prime = false;
+    } else {
+        crossfeed_lp[0] += crossfeed_alpha * (x0 - crossfeed_lp[0]);
+        crossfeed_lp[1] += crossfeed_alpha * (x1 - crossfeed_lp[1]);
+    }
+    float y0 = x0 + k * (crossfeed_lp[1] - crossfeed_lp[0]);
+    float y1 = x1 + k * (crossfeed_lp[0] - crossfeed_lp[1]);
+    if (!isfinite(y0) || !isfinite(y1)) {
+        crossfeed_lp[0] = 0.0f;
+        crossfeed_lp[1] = 0.0f;
+        return;
+    }
+    float in_peak = fabsf(x0);
+    float in_other = fabsf(x1);
+    if (in_other > in_peak) in_peak = in_other;
+    float out_peak = fabsf(y0);
+    float out_other = fabsf(y1);
+    if (out_other > out_peak) out_peak = out_other;
+    if (out_peak > ceiling && out_peak > in_peak) {
+        float allowed = in_peak > ceiling ? in_peak : ceiling;
+        if (out_peak > allowed) {
+            float gain = allowed / out_peak;
+            y0 *= gain;
+            y1 *= gain;
+        }
+    }
+    samples[0] = y0;
+    samples[1] = y1;
+}
+
+/* Normalized mid/side matrix. For width > 1 the reciprocal provides
+ * headroom: the absolute coefficients sum to one, so widening cannot
+ * increase a frame's peak. The center becomes quieter when widened.
+ * Unity is an exact no-op; mono buffers never enter this matrix. */
+static void stereo_width_coeffs(float width, float * direct, float * cross) {
+    if (width > 1.0f) {
+        float inverse = 1.0f / width;
+        *direct = (1.0f + inverse) * 0.5f;
+        *cross = (inverse - 1.0f) * 0.5f;
+    } else {
+        *direct = (1.0f + width) * 0.5f;
+        *cross = (1.0f - width) * 0.5f;
+    }
+}
+
+static void stereo_width_frame(float * samples, float target, float step,
+                                float * direct, float * cross) {
+    if (stereo_width_current != target) {
+        if (stereo_width_current < target)
+            stereo_width_current = fminf(target, stereo_width_current + step);
+        else
+            stereo_width_current = fmaxf(target, stereo_width_current - step);
+        stereo_width_coeffs(stereo_width_current, direct, cross);
+    }
+    if (stereo_width_current == 1.0f) return;
+    float left = samples[0], right = samples[1];
+    samples[0] = left * *direct + right * *cross;
+    samples[1] = right * *direct + left * *cross;
+}
+
 const peq_band_t * peq_get_band(int index) {
     if (index < 0 || index >= PEQ_NUM_BANDS) return NULL;
     return &bands[index];
@@ -285,23 +463,37 @@ void peq_set_band_enabled(int index, bool enabled) {
 
 void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int sample_rate) {
     /* Reset limiter gain to unity when processing is bypassed or inactive so
-     * that it starts cleanly the next time processing resumes. */
+     * that it starts cleanly the next time processing resumes. Bypass also
+     * drops crossfeed memory so the next active buffer cannot ring out
+     * samples from before the bypass. */
     if (bypass) {
         limiter_gain = 1.0f;
+        stereo_width_current = 1.0f;
+        crossfeed_clear_audio_state();
+        crossfeed_drop_discontinuity();
         return;
     }
 
+    float width = (float) peq_get_stereo_width();
+    bool width_active = channels == 2 && (width != 1.0f || stereo_width_current != 1.0f);
+    float cross_target = (float) peq_get_crossfeed();
+    bool cross_active = channels == 2 && (cross_target != 0.0f || crossfeed_mix != 0.0f);
+    if (!cross_active) crossfeed_clear_audio_state();
+    crossfeed_consume_discontinuity(cross_active);
     bool any_enabled = false;
     for (int i = 0; i < PEQ_NUM_BANDS; i++) {
         if (bands[i].enabled) { any_enabled = true; break; }
     }
-    if (!any_enabled && preamp_db == 0.0) {
+    if (!any_enabled && preamp_db == 0.0 && !width_active && !cross_active) {
         limiter_gain = 1.0f;
         return;
     }
 
     if (last_call_was_s32) {
         memset(state, 0, sizeof(state));
+        crossfeed_lp[0] = 0.0f;
+        crossfeed_lp[1] = 0.0f;
+        if (cross_active) crossfeed_prime = true;
         last_call_was_s32 = false;
     }
 
@@ -315,6 +507,12 @@ void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int s
     float attack_coeff = cached_attack_coeff;
     float release_coeff = cached_release_coeff;
 
+    float width_direct, width_cross;
+    stereo_width_coeffs(stereo_width_current, &width_direct, &width_cross);
+    unsigned int rate_for_ramp = sample_rate ? sample_rate : 48000;
+    float width_step = 2.0f / (STEREO_WIDTH_RAMP_SEC * (float) rate_for_ramp);
+    float cross_step = 1.0f / ((float) PEQ_CROSSFEED_RAMP_SEC * (float) rate_for_ramp);
+    if (cross_active) crossfeed_update_alpha(sample_rate);
     for (size_t i = 0; i < frame_count; i++) {
         float frame_samples[PEQ_MAX_CHANNELS];
         float frame_peak = 0.0f;
@@ -344,7 +542,16 @@ void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int s
              * the limiter gain or cascading through biquad filters. */
             if (!isfinite(sample)) sample = 0.0f;
             frame_samples[ch] = sample;
-            float abs_sample = sample < 0.0f ? -sample : sample;
+        }
+        /* Crossfeed, then width, then the limiter below. Crossfeed is a
+         * frequency-dependent opposite-channel mix; width is a broadband
+         * mid/side matrix. The limiter sees both. */
+        if (cross_active)
+            crossfeed_frame(frame_samples, cross_target, cross_step, LIMITER_CEILING);
+        if (width_active)
+            stereo_width_frame(frame_samples, width, width_step, &width_direct, &width_cross);
+        for (int ch = 0; ch < channels; ch++) {
+            float abs_sample = fabsf(frame_samples[ch]);
             if (abs_sample > frame_peak) frame_peak = abs_sample;
         }
 
@@ -370,20 +577,32 @@ void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int s
 void peq_process_s32(int32_t * buf, size_t frame_count, int channels, unsigned int sample_rate) {
     if (bypass) {
         limiter_gain = 1.0f;
+        stereo_width_current = 1.0f;
+        crossfeed_clear_audio_state();
+        crossfeed_drop_discontinuity();
         return;
     }
 
+    float width = (float) peq_get_stereo_width();
+    bool width_active = channels == 2 && (width != 1.0f || stereo_width_current != 1.0f);
+    float cross_target = (float) peq_get_crossfeed();
+    bool cross_active = channels == 2 && (cross_target != 0.0f || crossfeed_mix != 0.0f);
+    if (!cross_active) crossfeed_clear_audio_state();
+    crossfeed_consume_discontinuity(cross_active);
     bool any_enabled = false;
     for (int i = 0; i < PEQ_NUM_BANDS; i++) {
         if (bands[i].enabled) { any_enabled = true; break; }
     }
-    if (!any_enabled && preamp_db == 0.0) {
+    if (!any_enabled && preamp_db == 0.0 && !width_active && !cross_active) {
         limiter_gain = 1.0f;
         return;
     }
 
     if (!last_call_was_s32) {
         memset(state, 0, sizeof(state));
+        crossfeed_lp[0] = 0.0f;
+        crossfeed_lp[1] = 0.0f;
+        if (cross_active) crossfeed_prime = true;
         last_call_was_s32 = true;
     }
 
@@ -396,6 +615,12 @@ void peq_process_s32(int32_t * buf, size_t frame_count, int channels, unsigned i
     float attack_coeff = cached_attack_coeff;
     float release_coeff = cached_release_coeff;
 
+    float width_direct, width_cross;
+    stereo_width_coeffs(stereo_width_current, &width_direct, &width_cross);
+    unsigned int rate_for_ramp = sample_rate ? sample_rate : 48000;
+    float width_step = 2.0f / (STEREO_WIDTH_RAMP_SEC * (float) rate_for_ramp);
+    float cross_step = 1.0f / ((float) PEQ_CROSSFEED_RAMP_SEC * (float) rate_for_ramp);
+    if (cross_active) crossfeed_update_alpha(sample_rate);
     for (size_t i = 0; i < frame_count; i++) {
         float frame_samples[PEQ_MAX_CHANNELS];
         float frame_peak = 0.0f;
@@ -423,7 +648,13 @@ void peq_process_s32(int32_t * buf, size_t frame_count, int channels, unsigned i
 
             if (!isfinite(sample)) sample = 0.0f;
             frame_samples[ch] = sample;
-            float abs_sample = sample < 0.0f ? -sample : sample;
+        }
+        if (cross_active)
+            crossfeed_frame(frame_samples, cross_target, cross_step, LIMITER_CEILING_S32);
+        if (width_active)
+            stereo_width_frame(frame_samples, width, width_step, &width_direct, &width_cross);
+        for (int ch = 0; ch < channels; ch++) {
+            float abs_sample = fabsf(frame_samples[ch]);
             if (abs_sample > frame_peak) frame_peak = abs_sample;
         }
 
@@ -444,6 +675,8 @@ bool peq_load_from_path(const char * path) {
     FILE * f = fopen(path, "r");
     if (!f) return false;
 
+    double loaded_width = 1.0; /* Older profiles are neutral, never inherit width. */
+    double loaded_crossfeed = 0.0; /* Older profiles are off, never inherit crossfeed. */
     char line[128];
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\n")] = '\0';
@@ -464,6 +697,24 @@ bool peq_load_from_path(const char * path) {
             continue;
         }
 
+        if (strcmp(key, "stereo_width") == 0) {
+            char * end;
+            double parsed = strtod(value, &end);
+            bool parsed_number = end != value;
+            while (*end == ' ' || *end == '\t' || *end == '\r') end++;
+            if (parsed_number && *end == '\0' && isfinite(parsed)) loaded_width = parsed;
+            continue;
+        }
+
+        if (strcmp(key, "crossfeed") == 0) {
+            char * end;
+            double parsed = strtod(value, &end);
+            bool parsed_number = end != value;
+            while (*end == ' ' || *end == '\t' || *end == '\r') end++;
+            if (parsed_number && *end == '\0' && isfinite(parsed)) loaded_crossfeed = parsed;
+            continue;
+        }
+
         int index;
         char field[16];
         if (sscanf(key, "band%d_%15s", &index, field) == 2 && index >= 0 && index < PEQ_NUM_BANDS) {
@@ -476,6 +727,8 @@ bool peq_load_from_path(const char * path) {
     }
 
     fclose(f);
+    peq_set_stereo_width(loaded_width);
+    peq_set_crossfeed(loaded_crossfeed);
     coeffs_dirty = true;
     return true;
 }
@@ -507,6 +760,8 @@ bool peq_save_to_path(const char * path) {
 
     fprintf(f, "bypass=%d\n", bypass ? 1 : 0);
     fprintf(f, "preamp=%.2f\n", preamp_db);
+    fprintf(f, "stereo_width=%.6f\n", peq_get_stereo_width());
+    fprintf(f, "crossfeed=%.6f\n", peq_get_crossfeed());
     for (int i = 0; i < PEQ_NUM_BANDS; i++) {
         fprintf(f, "band%d_freq=%.2f\n", i, bands[i].freq_hz);
         fprintf(f, "band%d_gain=%.2f\n", i, bands[i].gain_db);

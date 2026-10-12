@@ -1,4 +1,5 @@
 #include <limits.h>
+#include "metadata.h"
 #include "board_config.h"
 #include "i18n.h"
 #include "usb_mode_control.h"
@@ -32,7 +33,25 @@ static int consecutive_decoder_failure_skips = 0;
 #define MAX_FAILED_PHYSICAL_PATHS 5
 static char failed_physical_paths[MAX_FAILED_PHYSICAL_PATHS][PATH_MAX];
 static int failed_physical_paths_count = 0;
+extern bool plugin_now_playing_loaded;
 static uint64_t current_playback_generation = 0;
+static uint64_t metadata_ui_token, metadata_next_token, metadata_next_queue_revision;
+static uint64_t metadata_ui_audio_generation, metadata_next_audio_generation;
+static uint64_t favorite_ui_revision, metadata_favorite_revision;
+static uint64_t favorite_request_token, favorite_request_revision;
+static char favorite_request_path[PATH_MAX];
+static bool favorite_track_known, favorite_toggle_pending;
+static bool metadata_ui_notify, metadata_notify_ready;
+static track_metadata_t metadata_notify_payload;
+static char metadata_ui_path[PATH_MAX], metadata_next_current_path[PATH_MAX];
+static int metadata_next_gain_mode;
+static char armed_next_path[PATH_MAX];
+static uint64_t armed_next_generation;
+static int armed_next_gain_mode;
+static bool next_metadata_cached;
+static char next_metadata_cached_path[PATH_MAX];
+static track_metadata_t next_metadata_cache;
+
 static int open_sd_queue_dir(void);
 static int open_queue_dir_from_snapshot(const struct tagcache_snapshot *snapshot);
 static int open_queue_dir_from_file_index(const file_browser_index_t *index);
@@ -52,6 +71,9 @@ static bool is_sd_card_path(const char *path);
 #include "playlist_files.h"
 #include "favorite_writer.h"
 #include "path_cache.h"
+#include "cover_raster_cache.h"
+#include "ui_wake.h"
+#include "track_metadata_worker.h"
 #include "playback_order.h"
 #include "queue_resume.h"
 #ifdef HOST_BUILD
@@ -81,7 +103,8 @@ static bool is_sd_card_path(const char *path);
 #include "fallback_font.h"
 #include "http_client.h"
 #include "screen_builders.h"
-#include "metadata.h"
+static void notify_plugin_track_started(const track_metadata_t * meta, const char * path, double duration);
+
 #include "metadata_db.h"
 #include "cover_decode.h"
 #include "db_log.h"
@@ -105,6 +128,7 @@ static bool is_sd_card_path(const char *path);
 #include <unistd.h>
 #include <fcntl.h>
 #include <limits.h>
+#include "metadata.h"
 #include <ctype.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -389,11 +413,18 @@ static void volume_popup_track_event_cb(lv_event_t * e) {
          * mid-interaction. */
         lv_timer_pause(volume_popup_hide_timer);
     } else if (code == LV_EVENT_VALUE_CHANGED) {
+        percent = audio_clamp_volume_percent((int) percent);
+        if (percent != lv_slider_get_value(volume_popup_track))
+            lv_slider_set_value(volume_popup_track, percent, LV_ANIM_OFF);
         hw_volume_coalesce_drag_update(&volume_popup_hv, (int) percent);
         if (volume_popup_value_label) lv_label_set_text_fmt(volume_popup_value_label, "%d", (int) percent);
         refresh_volume_topbar(percent);
     } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        hw_volume_coalesce_drag_end(&volume_popup_hv, (int) percent);
+        percent = audio_clamp_volume_percent((int) percent);
+        if (percent != lv_slider_get_value(volume_popup_track))
+            lv_slider_set_value(volume_popup_track, percent, LV_ANIM_OFF);
+        percent = hw_volume_coalesce_drag_end(&volume_popup_hv, (int) percent);
+        if (volume_popup_value_label) lv_label_set_text_fmt(volume_popup_value_label, "%d", (int) percent);
         if (volume_slider) lv_slider_set_value(volume_slider, percent, LV_ANIM_OFF);
         gui_player_remember_volume_percent(percent);
         settings_save_async(&current_settings);
@@ -985,6 +1016,10 @@ static uint64_t bt_cover_file_key(const cover_file_id_t * id) {
     return key ? key : 1;
 }
 
+static size_t player_raster_cache_memory_floor(void) {
+    return artwork_reserve_bytes_for_priority(ARTWORK_PRIO_WARMER) + 1024u * 1024u;
+}
+
 static bool load_generated_player_cover(const albumart_info_t * info, const char * track_path,
                                         unsigned int generation, uint64_t bt_art_token, bool require_fresh,
                                         const cover_file_id_t * shown, cover_file_id_t * out_id,
@@ -996,7 +1031,7 @@ static bool load_generated_player_cover(const albumart_info_t * info, const char
         : albumart_generated_cache_find(info, ALBUMART_PLAYER_CACHE_SIZE, ALBUMART_PLAYER_CACHE_SIZE,
                                         found, sizeof(found));
     if (!have) return false;
-    struct stat st;
+    struct stat st = {0};
     cover_file_id_t id = { .valid = false };
     if (stat(found, &st) == 0) {
         id = (cover_file_id_t) { true, st.st_dev, st.st_ino, st.st_mtime, st.st_size };
@@ -1008,6 +1043,21 @@ static bool load_generated_player_cover(const albumart_info_t * info, const char
         DB_LOG("ART_PLAYER", "cache_same path=%s file=%s", track_path, found);
         return true;
     }
+    const char *cache_flag = getenv("COMPAS_ARTWORK_REUSE");
+    bool reuse = cache_flag && strcmp(cache_flag, "1") == 0 && id.valid;
+    cover_raster_key_t key = { .file = st, .width = COVER_ART_WIDTH, .height = COVER_ART_HEIGHT };
+    if (reuse && system_get_mem_available_bytes() < player_raster_cache_memory_floor()) {
+        cover_raster_cache_clear();
+        reuse = false;
+    }
+    if (reuse) {
+        *out_pixels = cover_raster_cache_get(&key);
+        if (*out_pixels) {
+            *out_id = id;
+            DB_LOG("ART_PLAYER", "raster_reuse path=%s bytes=%zu", track_path, cover_raster_cache_bytes());
+            return true;
+        }
+    }
     uint8_t * data = NULL;
     uint32_t size = 0;
     if (albumart_load_file_ex(found, &data, &size, EXTERNAL_COVER_MAX_BYTES,
@@ -1018,6 +1068,15 @@ static bool load_generated_player_cover(const albumart_info_t * info, const char
         player_cover_decode_cancelled, (void *) (uintptr_t) generation, out_pixels);
     free(data);
     if (result != COVER_DECODE_OK) return false;
+    /* A replaced cache file may race the read. Only retain a raster if its
+     * complete identity still matches after decoding. */
+    struct stat after;
+    if (reuse && stat(found, &after) == 0 &&
+        st.st_dev == after.st_dev && st.st_ino == after.st_ino && st.st_size == after.st_size &&
+        st.st_mtim.tv_sec == after.st_mtim.tv_sec && st.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+        st.st_ctim.tv_sec == after.st_ctim.tv_sec && st.st_ctim.tv_nsec == after.st_ctim.tv_nsec &&
+        system_get_mem_available_bytes() >= player_raster_cache_memory_floor())
+        cover_raster_cache_put(&key, *out_pixels);
     *out_id = id;
     DB_LOG("ART_PLAYER", "cache_hit path=%s file=%s", track_path, found);
     return true;
@@ -1187,7 +1246,8 @@ static void * cover_decode_thread_func(void * arg) {
     cover_decode_result_same = same;
     free(req);
     atomic_store_explicit(&cover_decode_running, false, memory_order_release);
-    atomic_store_explicit(&cover_decode_done_flag, true, memory_order_release); /* written last -- poll_cover_decode() only checks this flag */
+    atomic_store_explicit(&cover_decode_done_flag, true, memory_order_release);
+    ui_wake_notify(); /* written last -- poll_cover_decode() only checks this flag */
     return NULL;
 }
 
@@ -1348,11 +1408,15 @@ static void player_artwork_cache_service(lv_timer_t * timer) {
     lv_draw_sw_image_cache_get_intermediate_stats(&stats);
     /* Without allocations there is nothing to reclaim. Read memory only
      * when pressure can release storage or eligible idle work can start. */
-    if (!stats.entries && !stats.pending && (!idle || !stats.qualified_candidates)) {
+    if (!stats.entries && !stats.pending && !cover_raster_cache_bytes() &&
+        (!idle || !stats.qualified_candidates)) {
         if (timer) lv_timer_pause(timer);
         return;
     }
-    lv_draw_sw_image_cache_service(system_get_mem_available_bytes(), idle);
+    size_t available = system_get_mem_available_bytes();
+    if (available < player_raster_cache_memory_floor())
+        cover_raster_cache_clear();
+    lv_draw_sw_image_cache_service(available, idle);
     lv_draw_sw_image_cache_get_intermediate_stats(&stats);
     if (timer && (!idle || !stats.pending)) lv_timer_pause(timer);
     if (!timer && idle && stats.pending) {
@@ -1667,12 +1731,31 @@ static void show_favorite_state(bool is_favorite) {
     gui_shell_update_quick_drawer_favorite(favorite_is_set);
 }
 
+/* Resolve a tap made while the initial Favorite read was pending against
+ * the stored value, rather than treating the placeholder as authoritative. */
+static void apply_loaded_favorite(bool value) {
+    bool toggle = favorite_toggle_pending;
+    favorite_toggle_pending = false;
+    favorite_track_known = true;
+    show_favorite_state(toggle ? !value : value);
+    if (toggle) {
+        ++favorite_ui_revision;
+        favorite_writer_submit(playlist_path_at(playlist_index), favorite_is_set);
+    }
+}
+
 /* Remote Control changed some favorite: reload the now-playing heart from
  * the writer, which also sees this player's own unsaved taps. */
 void gui_player_refresh_favorite(void) {
     if (playlist_index < 0 || playlist_index >= playlist_count) return;
     const char * current = playlist_path_at(playlist_index);
-    if (current && current[0]) show_favorite_state(favorite_writer_is_set(current));
+    if (!current || !current[0]) return;
+    ++favorite_ui_revision;
+    favorite_request_revision = favorite_ui_revision;
+    track_metadata_request_t request = { .token = ++favorite_request_token };
+    snprintf(request.path, sizeof(request.path), "%s", current);
+    snprintf(favorite_request_path, sizeof(favorite_request_path), "%s", current);
+    track_metadata_submit(TRACK_METADATA_FAVORITE, &request);
 }
 
 void favorite_icon_event_cb(lv_event_t * e) {
@@ -1682,6 +1765,12 @@ void favorite_icon_event_cb(lv_event_t * e) {
     const char * path = playlist_path_at(playlist_index);
     if (!path) return;
 
+    if (!favorite_track_known) {
+        favorite_toggle_pending = !favorite_toggle_pending;
+        show_favorite_state(!favorite_is_set);
+        return;
+    }
+    ++favorite_ui_revision;
     show_favorite_state(!favorite_is_set);
 
     favorite_writer_submit(path, favorite_is_set);
@@ -1764,6 +1853,7 @@ static audio_codec_t info_codec_from_hint(const char * hint) {
         return AUDIO_CODEC_DSD;
     if (strcasecmp(hint, "aac") == 0 || strcasecmp(hint, "aacp") == 0)
         return AUDIO_CODEC_AAC;
+    if (strcasecmp(hint, "wv") == 0 || strcasecmp(hint, "wavpack") == 0) return AUDIO_CODEC_WAVPACK;
     if (strcasecmp(hint, "ape") == 0) return AUDIO_CODEC_APE;
     if (strcasecmp(hint, "wma") == 0 || strcasecmp(hint, "asf") == 0)
         return AUDIO_CODEC_WMA;
@@ -1839,7 +1929,7 @@ static const subsonic_stream_song_meta_t * subsonic_meta_for_path(int index, con
     return NULL;
 }
 
-void apply_track_metadata_to_ui(int index, track_metadata_t * out_meta) {
+static bool seed_track_metadata(int index, track_metadata_t * out_meta) {
     /* Resolved once -- this is playlist_index's first real touch on every
      * track-start (play_track_at_from()/on_track_auto_advanced() both call
      * this immediately after setting playlist_index), so it's also where a
@@ -1849,9 +1939,6 @@ void apply_track_metadata_to_ui(int index, track_metadata_t * out_meta) {
      * but there's no reason to). */
     const char * path = playlist_path_at(index);
 
-    char title[128];
-    char folder[128];
-    get_display_names(path, title, sizeof(title), folder, sizeof(folder));
 
     const subsonic_stream_song_meta_t * subsonic_meta = subsonic_meta_for_path(index, path);
     bool is_subsonic_stream = subsonic_meta != NULL;
@@ -1897,12 +1984,23 @@ void apply_track_metadata_to_ui(int index, track_metadata_t * out_meta) {
             out_meta->has_album = true;
         }
     } else {
-        metadata_read_without_artwork(path, out_meta); /* already normalized */
+        memset(out_meta, 0, sizeof(*out_meta));
     }
     /* Stream and remote catalog text reaches the rows too: same single-line,
      * non-empty rules as file tags. */
     if (is_remote_track || is_subsonic_stream) metadata_normalize_text_tags(out_meta);
 
+    return !is_remote_track && !is_subsonic_stream && !is_http_url(path);
+}
+
+static void apply_loaded_track_metadata(int index, track_metadata_t * out_meta, bool favorite) {
+    const char * path = playlist_path_at(index);
+    char title[128], folder[128];
+    get_display_names(path, title, sizeof(title), folder, sizeof(folder));
+    const subsonic_stream_song_meta_t * subsonic_meta = subsonic_meta_for_path(index, path);
+    bool is_subsonic_stream = subsonic_meta != NULL;
+    remote_track_meta_t remote_meta;
+    bool is_remote_track = remote_track_meta_copy_for_path(path, &remote_meta);
     gui_track_info_context_t info = {0};
     snprintf(info.path, sizeof(info.path), "%s", path);
     info.replaygain_mode = current_settings.replaygain_mode;
@@ -1953,9 +2051,6 @@ void apply_track_metadata_to_ui(int index, track_metadata_t * out_meta) {
     info_container_from_hint(format_hint, info.container);
     gui_track_info_set_current(&info);
 
-    bt_cover_art_begin_track(path);
-    snprintf(now_playing_path, sizeof(now_playing_path), "%s", path);
-    refresh_now_playing_indicators();
 
     const char * title_text = out_meta->has_title ? out_meta->title : title;
     const char * folder_text = out_meta->has_artist ? out_meta->artist : folder;
@@ -1995,31 +2090,69 @@ void apply_track_metadata_to_ui(int index, track_metadata_t * out_meta) {
     } else {
         gui_lyrics_load_track(index, NULL);
     }
-    /* out_meta->lyrics (populated by the metadata_read() call above, if this
-     * track has embedded lyrics) is never read here -- launch_lyrics_load()
-     * just above does its own independent metadata_read() on a background
-     * thread instead of sharing this one (see lyrics_load_thread_func()'s
-     * own comment for why: this function runs synchronously on the UI
-     * thread at every track change, and re-parsing tags a second time in
-     * the background is cheaper than plumbing a malloc'd pointer through a
-     * separate async load path that already does its own file I/O anyway).
-     * Always free it here so every caller's stack-local track_metadata_t
-     * doesn't leak it. */
+    /* Results contain only scalar tags; keep this defensive ownership guard
+     * if the metadata loader later supplies optional blobs. */
     free(out_meta->lyrics);
     out_meta->lyrics = NULL;
 
-    show_favorite_state(favorite_writer_is_set(path));
 
-    /* Once per real "this track started playing" event -- apply_track_
-     * metadata_to_ui() is called exactly here for both an explicit pick
-     * (play_track_at_from) and a gapless auto-advance (on_track_
-     * auto_advanced), never on a repeat UI refresh of the same still-
-     * playing track, so this can't double-count. Backs the Most Played
-     * auto-generated playlist (Music > Playlists). */
-    metadata_db_song_play_count_increment(path);
+    if (metadata_favorite_revision == favorite_ui_revision) apply_loaded_favorite(favorite);
+    player_transition_mark_dirty();
+}
 
-    /* The real position/duration come from audio_get_*_seconds() once the
-     * decoder's opened -- the timer picks that up within its next tick. */
+/* Establish the new UI identity immediately; file/DB enrichment arrives
+ * through an owned scalar snapshot and never resets live playback progress. */
+static void request_track_metadata(int index, bool notify, bool probe, bool audio_tags) {
+    const char * path = playlist_path_at(index);
+    track_metadata_request_t request = { .token = ++metadata_ui_token, .probe = probe };
+    snprintf(request.path, sizeof(request.path), "%s", path);
+    request.read_file = seed_track_metadata(index, &request.metadata);
+    if (request.read_file && notify) {
+        if (next_metadata_cached && strcmp(path, next_metadata_cached_path) == 0) {
+            request.metadata = next_metadata_cache;
+            request.read_file = false;
+        } else if (audio_tags) {
+            request.read_audio = true;
+            request.read_file = false;
+            request.audio_generation = audio_get_playback_generation();
+        }
+    }
+    snprintf(metadata_ui_path, sizeof(metadata_ui_path), "%s", path);
+    metadata_ui_notify = notify;
+    metadata_notify_ready = false;
+    plugin_now_playing_loaded = false;
+    metadata_ui_audio_generation = audio_get_playback_generation();
+    metadata_favorite_revision = ++favorite_ui_revision;
+    track_metadata_submit(TRACK_METADATA_CURRENT, &request);
+    /* Cancel a cover result even if a new queue reuses the same slot. */
+    atomic_fetch_add_explicit(&cover_decode_generation, 1u, memory_order_relaxed);
+    free(cover_decode_pending.picture_data);
+    memset(&cover_decode_pending, 0, sizeof(cover_decode_pending));
+    cover_decode_pending_valid = false;
+    gui_lyrics_load_track(index, NULL);
+    bt_cover_art_begin_track(path);
+    gui_track_info_context_t pending_info = {0};
+    snprintf(pending_info.path, sizeof(pending_info.path), "%s", path);
+    pending_info.replaygain_mode = current_settings.replaygain_mode;
+    pending_info.source = remote_track_path_is_remote(path) ? GUI_TRACK_SOURCE_PLUGIN :
+        subsonic_meta_for_path(index, path) ? GUI_TRACK_SOURCE_SUBSONIC :
+        is_http_url(path) ? GUI_TRACK_SOURCE_RADIO : GUI_TRACK_SOURCE_LOCAL;
+    pending_info.declared_codec = info_codec_from_hint(info_path_hint(path));
+    gui_track_info_set_current(&pending_info);
+    refresh_format_badge();
+    snprintf(now_playing_path, sizeof(now_playing_path), "%s", path);
+    refresh_now_playing_indicators();
+    char title[128], folder[128];
+    get_display_names(path, title, sizeof(title), folder, sizeof(folder));
+    player_set_track_display_text(request.metadata.has_title ? request.metadata.title : title,
+                                  request.metadata.has_artist ? request.metadata.artist : folder,
+                                  request.metadata.has_album ? request.metadata.album : "");
+    now_playing_genre[0] = '\0';
+    now_playing_track_number = 0;
+    favorite_track_known = false;
+    favorite_toggle_pending = false;
+    show_favorite_state(false);
+
     player_seekbar_set_value(progress_slider, 0);
     displayed_progress_percent = 0;
     displayed_position_second = -1;
@@ -2229,6 +2362,12 @@ typedef struct {
     int32_t translate_x, translate_y;
     lv_label_long_mode_t long_mode;
 } player_lyrics_geometry_t;
+
+#define PLAYER_LYRICS_GEOMETRY_OBJECT_COUNT 4
+#define PLAYER_TIMELINE_COVER_LIVE_DECORATION_MAX 8
+static player_lyrics_geometry_t player_lyrics_geometry[PLAYER_LYRICS_GEOMETRY_OBJECT_COUNT];
+static unsigned player_lyrics_object_count;
+static bool player_lyrics_generated_timelines;
 
 static bool player_lyrics_open;
 static bool player_lyrics_animating;
@@ -2456,7 +2595,8 @@ static void player_timeline_cover_cache_refresh_cb(lv_event_t * e) {
          * avoids repeatedly drawing the same backdrop and copying fragmented
          * damage between the direct framebuffer pages. */
         lv_display_t * display = lv_event_get_target(e);
-        if (player_lyrics_animating && player_timeline_lyrics_open && player_timeline_lyrics_close &&
+        if (player_lyrics_animating && !player_lyrics_generated_timelines &&
+            player_timeline_lyrics_open && player_timeline_lyrics_close &&
             player_screen && lv_display_get_screen_active(display) == player_screen) {
             lv_area_t * area = lv_event_get_param(e);
             if (area) {
@@ -2484,9 +2624,96 @@ static void player_timeline_cover_cache_refresh_cb(lv_event_t * e) {
     }
 }
 
-/* A card snapshot replaces only static cover pixels. Geometry can animate
- * on the card itself; drawing changes or other children must stay live.
- * Drawing-property animations, including radius, retain live rendering. */
+/* The native circular cover can retain a one-shot artwork snapshot while its
+ * static circular border decorations stay live. Rounded rectangles and
+ * authored timelines keep their existing live-rendering fallback. */
+static bool player_timeline_cover_circle_snapshot(lv_anim_timeline_t * timeline) {
+    if (!timeline || !player_lyrics_generated_timelines || !cover_card ||
+        lv_obj_get_style_radius(cover_card, LV_PART_MAIN) != LV_RADIUS_CIRCLE ||
+        player_lyrics_object_count == 0 || player_lyrics_geometry[0].obj != cover_card) return false;
+    const player_lyrics_geometry_t * geometry = &player_lyrics_geometry[0];
+    if (geometry->w <= 0 || geometry->h != geometry->w || geometry->compact_w <= 0 ||
+        geometry->compact_h != geometry->compact_w) return false;
+
+    bool has_circle_radius = false;
+    uint32_t count = player_layouts_timeline_style_animation_count(timeline);
+    for (uint32_t i = 0; i < count; ++i) {
+        player_layout_style_transition_t animation;
+        if (!player_layouts_timeline_get_style_animation(timeline, i, &animation)) return false;
+        if (animation.target == cover_card && animation.prop == LV_STYLE_RADIUS) {
+            if (animation.selector != LV_PART_MAIN || animation.start_value != LV_RADIUS_CIRCLE ||
+                animation.end_value != LV_RADIUS_CIRCLE) return false;
+            has_circle_radius = true;
+        }
+    }
+    return has_circle_radius;
+}
+
+/* Only plain, static circular border objects wholly inside the circular card
+ * may remain live after the card's rounded clipping is replaced by a snapshot. */
+static bool player_timeline_cover_live_circle_decoration(lv_obj_t * child) {
+    int32_t width_style = child ? lv_obj_get_style_width(child, LV_PART_MAIN) : 0;
+    int32_t height_style = child ? lv_obj_get_style_height(child, LV_PART_MAIN) : 0;
+    if (!child || !LV_COORD_IS_PCT(width_style) || !LV_COORD_IS_PCT(height_style) ||
+        LV_COORD_GET_PCT(width_style) <= 0 || LV_COORD_GET_PCT(width_style) > 100 ||
+        LV_COORD_GET_PCT(height_style) <= 0 || LV_COORD_GET_PCT(height_style) > 100 ||
+        LV_COORD_GET_PCT(width_style) != LV_COORD_GET_PCT(height_style) ||
+        lv_obj_get_style_min_width(child, LV_PART_MAIN) != 0 ||
+        lv_obj_get_style_min_height(child, LV_PART_MAIN) != 0 ||
+        lv_obj_get_style_max_width(child, LV_PART_MAIN) != LV_COORD_MAX ||
+        lv_obj_get_style_max_height(child, LV_PART_MAIN) != LV_COORD_MAX ||
+        lv_obj_get_style_align(child, LV_PART_MAIN) != LV_ALIGN_CENTER ||
+        lv_obj_get_style_x(child, LV_PART_MAIN) != 0 || lv_obj_get_style_y(child, LV_PART_MAIN) != 0 ||
+        lv_obj_get_style_pad_left(child, LV_PART_MAIN) || lv_obj_get_style_pad_right(child, LV_PART_MAIN) ||
+        lv_obj_get_style_pad_top(child, LV_PART_MAIN) || lv_obj_get_style_pad_bottom(child, LV_PART_MAIN)) return false;
+    if (lv_obj_get_class(child) != &lv_obj_class ||
+        lv_obj_get_child_count(child) != 0 || lv_obj_get_ext_draw_size(child) != 0 ||
+        lv_obj_get_event_count(child) != 0 ||
+        lv_obj_get_layer_type(child) != LV_LAYER_TYPE_NONE ||
+        lv_obj_get_style_opa_recursive(child, LV_PART_MAIN) != LV_OPA_COVER ||
+        lv_obj_get_style_bg_opa(child, LV_PART_MAIN) != LV_OPA_TRANSP ||
+        lv_obj_get_style_bg_image_src(child, LV_PART_MAIN) ||
+        lv_obj_get_style_border_width(child, LV_PART_MAIN) <= 0 ||
+        lv_obj_get_style_border_opa(child, LV_PART_MAIN) != LV_OPA_COVER ||
+        lv_obj_get_style_radius(child, LV_PART_MAIN) != LV_RADIUS_CIRCLE ||
+        lv_obj_get_style_shadow_width(child, LV_PART_MAIN) ||
+        lv_obj_get_style_outline_width(child, LV_PART_MAIN) ||
+        lv_obj_get_style_transform_width(child, LV_PART_MAIN) ||
+        lv_obj_get_style_transform_height(child, LV_PART_MAIN) ||
+        lv_obj_get_style_transform_rotation(child, LV_PART_MAIN) ||
+        lv_obj_get_style_transform_scale_x(child, LV_PART_MAIN) != LV_SCALE_NONE ||
+        lv_obj_get_style_transform_scale_y(child, LV_PART_MAIN) != LV_SCALE_NONE ||
+        lv_obj_get_style_transform_skew_x(child, LV_PART_MAIN) ||
+        lv_obj_get_style_transform_skew_y(child, LV_PART_MAIN) ||
+        lv_obj_get_style_translate_x(child, LV_PART_MAIN) ||
+        lv_obj_get_style_translate_y(child, LV_PART_MAIN) ||
+        lv_obj_get_style_color_filter_dsc(child, LV_PART_MAIN) ||
+        lv_obj_get_style_color_filter_opa(child, LV_PART_MAIN) != LV_OPA_TRANSP ||
+        lv_anim_get(child, NULL)) return false;
+
+    int32_t x = lv_obj_get_x(child), y = lv_obj_get_y(child);
+    int32_t width = lv_obj_get_width(child), height = lv_obj_get_height(child);
+    int32_t card_width = lv_obj_get_width(cover_card), card_height = lv_obj_get_height(cover_card);
+    const player_lyrics_geometry_t * geometry = &player_lyrics_geometry[0];
+    int32_t expected_width = card_width * LV_COORD_GET_PCT(width_style) / 100;
+    int32_t expected_height = card_height * LV_COORD_GET_PCT(height_style) / 100;
+    int32_t compact_width = geometry->compact_w * LV_COORD_GET_PCT(width_style) / 100;
+    int32_t compact_height = geometry->compact_h * LV_COORD_GET_PCT(height_style) / 100;
+    int32_t compact_x = geometry->compact_w / 2 - compact_width / 2;
+    int32_t compact_y = geometry->compact_h / 2 - compact_height / 2;
+    int32_t border_width = lv_obj_get_style_border_width(child, LV_PART_MAIN);
+    return width > 0 && height > 0 && width == height &&
+           LV_ABS(width - expected_width) <= 1 && LV_ABS(height - expected_height) <= 1 && x >= 0 && y >= 0 &&
+           x + width <= card_width && y + height <= card_height &&
+           LV_ABS(2 * x + width - card_width) <= 1 && LV_ABS(2 * y + height - card_height) <= 1 &&
+           compact_width > 0 && compact_height > 0 && LV_ABS(compact_width - compact_height) <= 1 &&
+           compact_x >= 0 && compact_y >= 0 && compact_x + compact_width <= geometry->compact_w &&
+           compact_y + compact_height <= geometry->compact_h &&
+           LV_ABS(2 * compact_x + compact_width - geometry->compact_w) <= 1 &&
+           LV_ABS(2 * compact_y + compact_height - geometry->compact_h) <= 1 &&
+           border_width > 0 && border_width <= compact_width;
+}
+
 static bool player_timeline_cover_cache_eligible(lv_anim_timeline_t * timeline) {
     if (!timeline || !cover_card || !cover_img || lv_obj_get_parent(cover_img) != cover_card ||
         lv_obj_get_child_count(cover_img) != 0 ||
@@ -2502,14 +2729,23 @@ static bool player_timeline_cover_cache_eligible(lv_anim_timeline_t * timeline) 
         lv_obj_get_style_transform_scale_y(cover_card, 0) != LV_SCALE_NONE ||
         lv_obj_get_style_transform_skew_x(cover_card, 0) ||
         lv_obj_get_style_transform_skew_y(cover_card, 0)) return false;
+    bool circle_snapshot = player_timeline_cover_circle_snapshot(timeline);
     uint32_t children = lv_obj_get_child_count(cover_card);
+    uint32_t live_decoration_count = 0;
     for (uint32_t i = 0; i < children; ++i) {
         lv_obj_t * child = lv_obj_get_child(cover_card, i);
         if (child != cover_img && child != player_timeline_cover_fade &&
             lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN) &&
             !player_layouts_timeline_has_animation_for_obj(timeline, child)) continue;
-        if ((child != cover_img && child != player_timeline_cover_fade) ||
-            (lv_obj_get_child_count(child) != 0 &&
+        if (child != cover_img && child != player_timeline_cover_fade) {
+            if (circle_snapshot && !player_layouts_timeline_has_animation_for_obj(timeline, child) &&
+                player_timeline_cover_live_circle_decoration(child)) {
+                if (++live_decoration_count > PLAYER_TIMELINE_COVER_LIVE_DECORATION_MAX) return false;
+                continue;
+            }
+            return false;
+        }
+        if ((lv_obj_get_child_count(child) != 0 &&
              (child != player_timeline_cover_fade || !player_cover_fade_cache_eligible(child))) ||
             player_layouts_timeline_has_animation_for_obj(timeline, child)) return false;
         if (child == player_timeline_cover_fade && lv_obj_get_child_count(child) &&
@@ -2524,7 +2760,9 @@ static bool player_timeline_cover_cache_eligible(lv_anim_timeline_t * timeline) 
         if (animation.selector != LV_PART_MAIN ||
             (animation.prop != LV_STYLE_WIDTH && animation.prop != LV_STYLE_HEIGHT &&
              animation.prop != LV_STYLE_TRANSLATE_X && animation.prop != LV_STYLE_TRANSLATE_Y &&
-             animation.prop != LV_STYLE_OPA)) return false;
+             animation.prop != LV_STYLE_OPA &&
+             !(animation.prop == LV_STYLE_RADIUS && circle_snapshot &&
+               animation.start_value == LV_RADIUS_CIRCLE && animation.end_value == LV_RADIUS_CIRCLE))) return false;
         ++card_count;
     }
     return card_count == player_layouts_timeline_animation_count_for_obj(timeline, cover_card);
@@ -2547,6 +2785,23 @@ static void player_timeline_cover_snapshot_take(lv_anim_timeline_t * timeline) {
         !player_timeline_cover_cache_eligible(timeline)) return;
     const void * source = lv_image_get_src(cover_img);
     if (!source) return;
+    int32_t current_w = lv_obj_get_width(cover_card);
+    int32_t current_h = lv_obj_get_height(cover_card);
+    int32_t snapshot_w = player_timeline_cover_w > 0 ? player_timeline_cover_w : current_w;
+    int32_t snapshot_h = player_timeline_cover_h > 0 ? player_timeline_cover_h : current_h;
+    lv_obj_t * live_decorations[PLAYER_TIMELINE_COVER_LIVE_DECORATION_MAX];
+    unsigned live_decoration_count = 0;
+    if (player_timeline_cover_circle_snapshot(timeline)) {
+        for (uint32_t i = 0; i < lv_obj_get_child_count(cover_card); ++i) {
+            lv_obj_t * child = lv_obj_get_child(cover_card, i);
+            if (child == cover_img || child == player_timeline_cover_fade ||
+                lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN)) continue;
+            if (player_layouts_timeline_has_animation_for_obj(timeline, child) ||
+                !player_timeline_cover_live_circle_decoration(child) ||
+                live_decoration_count >= PLAYER_TIMELINE_COVER_LIVE_DECORATION_MAX) return;
+            live_decorations[live_decoration_count++] = child;
+        }
+    }
     player_timeline_cover_source = source;
     lv_image_src_t source_type = lv_image_src_get_type(source);
     player_timeline_cover_source_owned = source_type == LV_IMAGE_SRC_FILE || source_type == LV_IMAGE_SRC_SYMBOL;
@@ -2557,11 +2812,6 @@ static void player_timeline_cover_snapshot_take(lv_anim_timeline_t * timeline) {
             return;
         }
     }
-
-    int32_t current_w = lv_obj_get_width(cover_card);
-    int32_t current_h = lv_obj_get_height(cover_card);
-    int32_t snapshot_w = player_timeline_cover_w > 0 ? player_timeline_cover_w : current_w;
-    int32_t snapshot_h = player_timeline_cover_h > 0 ? player_timeline_cover_h : current_h;
     bool retain = source == &current_cover_dsc && player_timeline_cover_can_retain() &&
         snapshot_w > 0 && snapshot_h > 0 &&
         (uint64_t) lv_draw_buf_width_to_stride(snapshot_w, LV_COLOR_FORMAT_ARGB8888) * snapshot_h +
@@ -2636,7 +2886,13 @@ static void player_timeline_cover_snapshot_take(lv_anim_timeline_t * timeline) {
                 retain = false;
             }
         }
-        if (!player_timeline_cover_frame) player_timeline_cover_frame = lv_snapshot_take(cover_card, format);
+        if (!player_timeline_cover_frame) {
+            for (unsigned i = 0; i < live_decoration_count; ++i)
+                lv_obj_add_flag(live_decorations[i], LV_OBJ_FLAG_HIDDEN);
+            player_timeline_cover_frame = lv_snapshot_take(cover_card, format);
+            for (unsigned i = 0; i < live_decoration_count; ++i)
+                lv_obj_remove_flag(live_decorations[i], LV_OBJ_FLAG_HIDDEN);
+        }
         lv_obj_set_size(cover_card, current_w, current_h);
         lv_obj_update_layout(cover_card);
         if (retain && player_timeline_cover_frame) {
@@ -2681,15 +2937,11 @@ static void player_timeline_cover_snapshot_take(lv_anim_timeline_t * timeline) {
     lv_image_set_antialias(cover_img, false);
     player_timeline_cover_internal = was_internal;
 }
-#define PLAYER_LYRICS_GEOMETRY_OBJECT_COUNT 4
-static player_lyrics_geometry_t player_lyrics_geometry[PLAYER_LYRICS_GEOMETRY_OBJECT_COUNT];
 /* Cover first, then the metadata labels the layout has; the title is required
  * but artist and album are optional, so this is 2..4. */
-static unsigned player_lyrics_object_count;
 static lv_obj_t * player_lyrics_hidden[32];
 static unsigned player_lyrics_hidden_count;
 static int32_t player_lyrics_content_top;
-static bool player_lyrics_generated_timelines;
 
 #ifdef UI_PERF_TRACE
 #define PLAYER_LYRICS_PERF_FRAME_CAPACITY 64
@@ -3394,9 +3646,9 @@ static bool player_lyrics_generated_prepare(bool opening) {
                                 g->translate_y + g->compact_y - g->y,
                                 g->compact_w, g->compact_h,
                                 i ? g->normal_pad_left : lv_obj_get_style_radius(g->obj, 0) };
-        /* A native card keeps its radius in pixels while it changes size.
-         * Declaring that drawing constraint retains the live rounded clipping
-         * through the same eligibility rules used by authored timelines. */
+        /* Keep fixed-radius native cards live as their geometry changes.
+         * A constant circle radius also permits the bounded artwork snapshot
+         * while static circular borders remain live. */
         for (unsigned j = 0; j < 5U; ++j) {
             player_layout_style_transition_t * t = &transitions[count++];
             t->target = g->obj; t->selector = LV_PART_MAIN; t->prop = props[j];
@@ -3591,16 +3843,19 @@ static void transport_seek_repeat_cb(lv_event_t * e) {
                                &transport_seek_playback_generation, &transport_seek_hold_cancelled);
 }
 
-/* Physical Next button, held -- see hw_buttons_consume_next_seek_steps()'s
- * own comment. Called from gui.c's update_timer_cb with however many steps
- * accumulated since the last poll. */
-static double hw_next_seek_target_seconds;
-static uint64_t hw_next_seek_playback_generation;
-static bool hw_next_seek_hold_cancelled;
+/* Separate held targets for each direction retain repeat accumulation while
+ * sharing touch seeking's playback-generation and end-of-track guards. */
+static double hw_seek_target_seconds[2];
+static uint64_t hw_seek_playback_generation[2];
+static bool hw_seek_hold_cancelled[2];
 
-void gui_player_hw_next_seek_steps(int step_count, bool is_first) {
-    apply_transport_seek_step(1.0, step_count, is_first, &hw_next_seek_target_seconds,
-                               &hw_next_seek_playback_generation, &hw_next_seek_hold_cancelled);
+void gui_player_hw_seek_steps(int direction, int step_count, bool is_first) {
+    if ((direction != 1 && direction != -1) || step_count <= 0) return;
+    unsigned slot = direction < 0;
+    apply_transport_seek_step((double)direction, step_count, is_first,
+                              &hw_seek_target_seconds[slot],
+                              &hw_seek_playback_generation[slot],
+                              &hw_seek_hold_cancelled[slot]);
 }
 
 /* LV_EVENT_CLICKED still fires on release even after a long press (LVGL's
@@ -4430,7 +4685,7 @@ static bool player_bind_widgets(lv_obj_t * scr) {
     }
 
     lv_slider_set_range(r_volume, 0, 100);
-    lv_slider_set_value(r_volume, (int32_t) (audio_get_volume() * 100.0f), LV_ANIM_OFF);
+    lv_slider_set_value(r_volume, audio_clamp_volume_percent((int32_t) (audio_get_volume() * 100.0f + 0.5f)), LV_ANIM_OFF);
 
     /* Part D: Hit targets */
     lv_obj_update_layout(scr);
@@ -4677,6 +4932,7 @@ static lv_obj_t * build_player_screen(uint32_t screen_width, uint32_t screen_hei
 
 
 void show_volume_popup(int32_t percent) {
+    percent = audio_clamp_volume_percent(percent);
     if (!volume_popup || !volume_popup_track) return;
     /* A BT/remote/hw-button echo writing the slider under a live finger
      * snaps the knob back to the last applied value, then the next indev
@@ -4705,6 +4961,7 @@ static const char * format_codec_name(audio_codec_t codec) {
         case AUDIO_CODEC_WMA: return "WMA";
         case AUDIO_CODEC_OPUS: return "Opus";
         case AUDIO_CODEC_VORBIS: return "Vorbis";
+        case AUDIO_CODEC_WAVPACK: return "WavPack";
         case AUDIO_CODEC_UNKNOWN: break;
     }
     return "";
@@ -4949,6 +5206,9 @@ static void record_failed_physical_path(const char * path) {
 }
 
 void free_playlist(void) {
+    ++metadata_ui_token;
+    ++metadata_next_token;
+    ++favorite_ui_revision;
     queue_revision++;
     queued_pending_count = 0;
     queue_next_insert_index = -1;
@@ -5349,12 +5609,10 @@ static void recolor_play_btn_accent(lv_draw_buf_t * buf, lv_color_t accent)
 
 static void load_play_btn_images(void)
 {
-    asset_decoded_image_close(&play_btn_play_img);
-    asset_decoded_image_close(&play_btn_pause_img);
     lv_color_t accent = accent_lv_color();
-    if (asset_decoded_image_open(&play_btn_play_img, "playing_plane/btn_play.png"))
+    if (asset_decoded_image_prepare_retint(&play_btn_play_img, "playing_plane/btn_play.png"))
         recolor_play_btn_accent((lv_draw_buf_t *) play_btn_play_img.decoder.decoded, accent);
-    if (asset_decoded_image_open(&play_btn_pause_img, "playing_plane/btn_pause.png"))
+    if (asset_decoded_image_prepare_retint(&play_btn_pause_img, "playing_plane/btn_pause.png"))
         recolor_play_btn_accent((lv_draw_buf_t *) play_btn_pause_img.decoder.decoded, accent);
 }
 
@@ -5389,6 +5647,7 @@ void set_play_button_state(bool is_playing) {
  * advances on its own, or the chain of automatic transitions stops after
  * one hop. */
 void arm_next_track_for_audio(int index) {
+    ++metadata_next_token;
     queue_revision++;
     if (current_settings.play_mode == PLAY_MODE_SHUFFLE) {
         ensure_shuffle_order_current();
@@ -5404,32 +5663,109 @@ void arm_next_track_for_audio(int index) {
      * itself is unaffected; only the seamless handoff is given up. */
     int next_index = compute_auto_advance_index(index);
     if (next_index < 0 || !current_settings.gapless_enabled) {
+        armed_next_path[0] = '\0';
         audio_set_next_track(NULL, false, 0.0, false, 0.0);
         return;
     }
     const char * next_path = playlist_path_at(next_index);
-    remote_track_meta_t next_remote_meta;
-    bool next_is_remote_track = remote_track_meta_copy_for_path(next_path, &next_remote_meta);
-    bool has_gain, has_peak;
-    double gain_db, peak;
-    if (next_is_remote_track) {
-        /* metadata_read() can't open a synthetic "remote://" path -- same
-         * gap this fixes in apply_track_metadata_to_ui() for the CURRENT
-         * track, needed again here for the gapless-prefetched NEXT one
-         * (on_track_auto_advanced()'s own comment: audio.c applies whatever
-         * gain was armed here, not anything recomputed at handoff time). */
-        has_gain = next_remote_meta.has_replaygain;
-        gain_db = next_remote_meta.replaygain_db;
-        has_peak = false;
-        peak = 0.0;
-    } else {
-        track_metadata_t next_meta;
-        metadata_read_without_artwork(next_path, &next_meta);
-        resolve_replaygain(&next_meta, &has_gain, &gain_db, &has_peak, &peak);
-        free(next_meta.picture_data); /* only needed the gain/peak fields, not the art or lyrics */
-        free(next_meta.lyrics);
+    uint64_t generation = audio_get_playback_generation();
+    if (armed_next_generation != generation || armed_next_gain_mode != current_settings.replaygain_mode ||
+        strcmp(armed_next_path, next_path) != 0) {
+        armed_next_path[0] = '\0';
+        audio_set_next_track(NULL, false, 0.0, false, 0.0);
     }
-    audio_set_next_track(next_path, has_gain, gain_db, has_peak, peak);
+    track_metadata_request_t request = { .token = ++metadata_next_token };
+    snprintf(request.path, sizeof(request.path), "%s", next_path);
+    request.read_file = seed_track_metadata(next_index, &request.metadata);
+    metadata_next_queue_revision = queue_revision;
+    metadata_next_audio_generation = audio_get_playback_generation();
+    snprintf(metadata_next_current_path, sizeof(metadata_next_current_path), "%s", playlist_path_at(index));
+    metadata_next_gain_mode = current_settings.replaygain_mode;
+    track_metadata_submit(TRACK_METADATA_NEXT, &request);
+}
+
+static void poll_track_started_notification(void) {
+    if (!metadata_ui_notify || !metadata_notify_ready) return;
+    if (audio_get_playback_generation() != metadata_ui_audio_generation) {
+        metadata_ui_notify = false;
+        metadata_notify_ready = false;
+        return;
+    }
+    audio_playback_progress_t progress;
+    if (!audio_get_playback_progress(metadata_ui_path, &progress) ||
+        progress.generation != metadata_ui_audio_generation ||
+        progress.state != AUDIO_PLAYBACK_PROGRESS_ACTIVE ||
+        (!progress.is_playing && !progress.is_paused)) return;
+#ifndef HOST_BUILD
+    hiby_sys_server_report_metadata(metadata_notify_payload.title, metadata_notify_payload.artist,
+        metadata_notify_payload.album, metadata_notify_payload.genre,
+        (long) (progress.duration_seconds * 1000.0));
+    hiby_sys_server_report_position((long) (progress.position_seconds * 1000.0));
+#endif
+    notify_plugin_track_started(&metadata_notify_payload, metadata_ui_path, progress.duration_seconds);
+    metadata_ui_notify = false;
+    metadata_notify_ready = false;
+}
+
+void gui_player_poll_track_metadata(void) {
+    poll_track_started_notification();
+    track_metadata_result_t result;
+    if (track_metadata_take(TRACK_METADATA_FAVORITE, &result) &&
+        result.request.token == favorite_request_token && favorite_request_revision == favorite_ui_revision &&
+        playlist_index >= 0 && playlist_index < playlist_count &&
+        strcmp(result.request.path, playlist_path_at(playlist_index)) == 0 &&
+        strcmp(result.request.path, favorite_request_path) == 0)
+        apply_loaded_favorite(result.favorite);
+    if (track_metadata_take(TRACK_METADATA_NEXT, &result) &&
+        result.request.token == metadata_next_token && queue_revision == metadata_next_queue_revision &&
+        audio_get_playback_generation() == metadata_next_audio_generation &&
+        playlist_index >= 0 && playlist_index < playlist_count &&
+        strcmp(playlist_path_at(playlist_index), metadata_next_current_path) == 0) {
+        next_metadata_cached = true;
+        snprintf(next_metadata_cached_path, sizeof(next_metadata_cached_path), "%s", result.request.path);
+        next_metadata_cache = result.request.metadata;
+        /* Resolve with the mode captured when this NEXT request was queued. */
+        track_metadata_t * tags = &result.request.metadata;
+        bool album = metadata_next_gain_mode == 2 && tags->has_replaygain_album;
+        bool gain = metadata_next_gain_mode != 0 && (album || tags->has_replaygain);
+        bool album_peak = album && tags->has_replaygain_album_peak;
+        bool peak = metadata_next_gain_mode != 0 && (album_peak || tags->has_replaygain_peak);
+        if (audio_set_next_track_for_generation(result.request.path, gain,
+            album ? tags->replaygain_album_gain_db : tags->replaygain_gain_db, peak,
+            album_peak ? tags->replaygain_album_peak : tags->replaygain_peak, metadata_next_audio_generation)) {
+            snprintf(armed_next_path, sizeof(armed_next_path), "%s", result.request.path);
+            armed_next_generation = metadata_next_audio_generation;
+            armed_next_gain_mode = metadata_next_gain_mode;
+        }
+    }
+    if (!track_metadata_take(TRACK_METADATA_CURRENT, &result)) return;
+    if (result.request.token != metadata_ui_token ||
+        playlist_index < 0 || playlist_index >= playlist_count || !player_screen ||
+        strcmp(result.request.path, playlist_path_at(playlist_index)) != 0 ||
+        strcmp(result.request.path, metadata_ui_path) != 0) return;
+    apply_loaded_track_metadata(playlist_index, &result.request.metadata, result.favorite);
+    if (metadata_ui_notify) {
+        metadata_notify_payload = result.request.metadata;
+        metadata_notify_ready = true;
+        poll_track_started_notification();
+    }
+    if (deferred_resume_pending && result.has_probe && result.probe.duration_seconds > 0.0) {
+        double position = isfinite(deferred_resume_position) ? deferred_resume_position : 0.0;
+        if (position < 0.0) position = 0.0;
+        if (position > result.probe.duration_seconds) position = result.probe.duration_seconds;
+
+        int32_t percent = (int32_t) ((position / result.probe.duration_seconds) * 100.0);
+        displayed_progress_percent = percent;
+        player_seekbar_set_value(progress_slider, percent);
+
+        displayed_position_second = (int) position;
+        displayed_duration_second = (int) result.probe.duration_seconds;
+        char time_str[24];
+        gui_format_time(position, time_str, sizeof(time_str));
+        if (pos_label) lv_label_set_text(pos_label, time_str);
+        gui_format_time(result.probe.duration_seconds, time_str, sizeof(time_str));
+        if (dur_label) lv_label_set_text(dur_label, time_str);
+    }
 }
 
 /* Song long-press context menu's "Add to Queue" -- splices `path` into the
@@ -5466,8 +5802,7 @@ void gui_player_queue_add_many(const char * const * paths, int count) {
         playlist = copies; playlist_count = count; playlist_index = 0;
         queued_pending_count = count - 1;
         queue_next_insert_index = count > 1 ? count : -1;
-        track_metadata_t meta;
-        apply_track_metadata_to_ui(0, &meta);
+        request_track_metadata(0, false, false, false);
         set_play_button_state(false);
         deferred_resume_pending = true; deferred_resume_position = 0.0;
         snprintf(current_settings.last_track, sizeof(current_settings.last_track), "%s", playlist[0]);
@@ -5587,11 +5922,11 @@ bool plugin_now_playing_loaded = false;
  * "track_started" plugin event. Called after audio_play_file_at()/the
  * gapless handoff has already happened in both call sites, so
  * audio_get_duration_seconds() reflects the new track. */
-static void notify_plugin_track_started(const track_metadata_t * meta, const char * path) {
+static void notify_plugin_track_started(const track_metadata_t * meta, const char * path, double duration) {
     snprintf(plugin_now_playing_title, sizeof(plugin_now_playing_title), "%s", meta->title);
     snprintf(plugin_now_playing_artist, sizeof(plugin_now_playing_artist), "%s", meta->artist);
     snprintf(plugin_now_playing_album, sizeof(plugin_now_playing_album), "%s", meta->album);
-    plugin_now_playing_duration = audio_get_duration_seconds();
+    plugin_now_playing_duration = duration;
     plugin_now_playing_loaded = true;
     gui_lock_screen_refresh(false);
 
@@ -5644,22 +5979,21 @@ static void play_track_at_from_internal(int index, double start_seconds, bool pu
     deferred_resume_position = 0.0;
     playlist_index = index;
 
-    track_metadata_t meta;
-    apply_track_metadata_to_ui(index, &meta); /* resolves this slot if it's a still-lazy All Songs entry */
     const char * path = playlist_path_at(index);
-    bool has_gain, has_peak;
-    double gain_db, peak;
-    resolve_replaygain(&meta, &has_gain, &gain_db, &has_peak, &peak);
-    audio_play_file_at(path, start_seconds, has_gain, gain_db, has_peak, peak);
+    track_metadata_t seed;
+    bool local = seed_track_metadata(index, &seed);
+    track_metadata_count_play(path);
+    next_metadata_cached = false;
+    if (local) audio_play_file_at_with_replaygain_mode(path, start_seconds, current_settings.replaygain_mode);
+    else {
+        bool has_gain, has_peak;
+        double gain_db, peak;
+        resolve_replaygain(&seed, &has_gain, &gain_db, &has_peak, &peak);
+        audio_play_file_at(path, start_seconds, has_gain, gain_db, has_peak, peak);
+    }
     current_playback_generation = audio_get_playback_generation();
+    request_track_metadata(index, true, false, true);
     arm_next_track_for_audio(index);
-
-#ifndef HOST_BUILD
-    hiby_sys_server_report_metadata(meta.title, meta.artist, meta.album, meta.genre,
-                                     (long) (audio_get_duration_seconds() * 1000.0));
-    hiby_sys_server_report_position((long) (start_seconds * 1000.0));
-#endif
-    notify_plugin_track_started(&meta, path);
 
     set_play_button_state(true);
     /* Manual next/previous and a deferred startup resume can already be on
@@ -5700,17 +6034,10 @@ void on_track_auto_advanced(int index) {
     progress_awaiting_seek = false;
     playlist_index = index;
 
-    track_metadata_t meta;
-    apply_track_metadata_to_ui(index, &meta); /* audio.c already applied this track's ReplayGain during the handoff */
     current_playback_generation = audio_get_playback_generation();
+    track_metadata_count_play(playlist_path_at(index));
+    request_track_metadata(index, true, false, false);
     arm_next_track_for_audio(index);
-
-#ifndef HOST_BUILD
-    hiby_sys_server_report_metadata(meta.title, meta.artist, meta.album, meta.genre,
-                                     (long) (audio_get_duration_seconds() * 1000.0));
-    hiby_sys_server_report_position(0);
-#endif
-    notify_plugin_track_started(&meta, playlist_path_at(index));
 
     set_play_button_state(true);
 
@@ -5817,7 +6144,7 @@ void set_player_source_file_browser(const char * dir, int row) {
     current_settings.last_source_name[0] = '\0';
 }
 
-/* Wraps on_file_selected() as file_browser_init()'s select_cb, rather than
+/* Wraps on_file_selected() as file_browser_create()'s on_select, rather than
  * passing on_file_selected directly, so the source snapshot above only
  * ever gets set for an actual folder-browse tap -- on_file_selected()
  * itself is shared by every play-launch path (All Songs, group songs,
@@ -6043,6 +6370,15 @@ void gui_player_set_gapless_enabled(bool enabled) {
     gui_shell_refresh_quick_drawer_expansion_toggles();
 }
 
+void gui_player_set_replaygain_mode(int mode) {
+    if (mode < 0 || mode > 2 || current_settings.replaygain_mode == mode) return;
+    current_settings.replaygain_mode = mode;
+    settings_save_async(&current_settings);
+    /* The already prepared successor captured the old gain mode. Rebuild it
+     * now so the new setting takes effect at the next transition. */
+    if (playlist_index >= 0) arm_next_track_for_audio(playlist_index);
+}
+
 void gapless_switch_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
     gui_player_set_gapless_enabled(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
@@ -6136,6 +6472,7 @@ void clock_24h_switch_event_cb(lv_event_t * e) {
 
 
 void gui_player_init(uint32_t screen_width, uint32_t screen_height) {
+    track_metadata_worker_start();
     /* Pay thread and stack setup during initialization, not inside the first
      * favorite tap where it would visibly block the LVGL event callback. */
     favorite_writer_start();
@@ -6156,8 +6493,15 @@ void gui_player_init(uint32_t screen_width, uint32_t screen_height) {
         lv_label_set_text_fmt(song_count_label, "%d/%d", playlist_index + 1, playlist_count);
         lv_obj_remove_flag(song_count_label, LV_OBJ_FLAG_HIDDEN);
     }
-    if (gui_player_has_active_track())
-        show_favorite_state(favorite_writer_is_set(gui_player_get_current_track_path()));
+    if (gui_player_has_active_track()) {
+        track_metadata_request_t request = { .token = ++metadata_ui_token, .probe = deferred_resume_pending };
+        snprintf(request.path, sizeof(request.path), "%s", playlist_path_at(playlist_index));
+        request.read_file = seed_track_metadata(playlist_index, &request.metadata);
+        snprintf(metadata_ui_path, sizeof(metadata_ui_path), "%s", request.path);
+        metadata_ui_audio_generation = audio_get_playback_generation();
+        metadata_favorite_revision = favorite_ui_revision;
+        track_metadata_submit(TRACK_METADATA_CURRENT, &request);
+    }
     /* A UI reload keeps the decoded cover; show it again rather than the
      * placeholder, since the next track of the same album skips decoding. */
     if (current_cover_bytes && current_cover_dsc.data && cover_img) {
@@ -6179,6 +6523,8 @@ void gui_player_init(uint32_t screen_width, uint32_t screen_height) {
  * (see build_confirm_popup()'s own comment), not as children of
  * player_screen, so deleting player_screen alone would not reach them. */
 void gui_player_teardown(void) {
+    ++metadata_ui_token;
+    ++favorite_ui_revision;
     /* Also cancel a pending fallback completion after an already-settled
      * transition, before any timeline or widget can be replaced. */
     player_lyrics_timeline_cancel_timer();
@@ -6240,6 +6586,8 @@ void gui_player_teardown(void) {
 }
 
 void gui_player_refresh_static_assets(void) {
+    asset_decoded_image_close(&play_btn_play_img);
+    asset_decoded_image_close(&play_btn_pause_img);
     refresh_play_btn_icon();
     if (!volume_popup) return;
     asset_decoded_image_close(&volume_popup_speaker_image);
@@ -6923,8 +7271,7 @@ bool gui_player_restore_sd_queue(bool is_boot) {
          * Without it, playlist_index is set but nothing is "current" in the
          * audio subsystem yet, so toggle_play_pause() would be a no-op. */
         playlist_index = resume_index;
-        track_metadata_t meta;
-        apply_track_metadata_to_ui(resume_index, &meta);
+        request_track_metadata(resume_index, false, false, false);
         set_play_button_state(false);
         deferred_resume_pending = true; deferred_resume_position = 0.0;
     }
@@ -7123,47 +7470,10 @@ bool install_saved_resume_playlist(char ** resume_playlist, int resume_count) {
 
 void prepare_deferred_resume(int index, double start_seconds) {
     playlist_index = index;
-    track_metadata_t meta;
-    apply_track_metadata_to_ui(index, &meta);
     set_play_button_state(false);
     deferred_resume_pending = true;
     deferred_resume_position = start_seconds;
-
-    /* apply_track_metadata_to_ui() just reset the progress slider/labels to
-     * 0:00 on the assumption a real decoder is about to open and the timer
-     * (gui_player_update_progress()) will pick up the true position/duration
-     * within its next tick -- see that function's own comment. That doesn't
-     * happen here: deferred resume deliberately leaves the audio subsystem
-     * untouched until the user presses Play (see install_saved_resume_
-     * playlist()'s own comment), so audio_get_position_seconds()/
-     * audio_get_duration_seconds() both read 0 the whole time this screen
-     * sits paused, and the progress UI would otherwise falsely show the
-     * track at its very beginning until Play is pressed. Probe the file
-     * directly instead -- the same lightweight, decoder-open/close-only
-     * call (no ALSA/output-device involvement) the Library screen's own
-     * track-info display already uses for showing duration without
-     * playing a track (see format_music_submenu_identity() in
-     * gui_library.c) -- so the seek bar and elapsed time reflect the real
-     * resume point immediately, not just after Play is pressed. */
-    const char * path = playlist_path_at(index);
-    audio_current_format_info_t probe;
-    if (path && isfinite(start_seconds) && audio_probe_file_format(path, &probe) && probe.duration_seconds > 0.0) {
-        double position = start_seconds;
-        if (position < 0.0) position = 0.0;
-        if (position > probe.duration_seconds) position = probe.duration_seconds;
-
-        int32_t percent = (int32_t) ((position / probe.duration_seconds) * 100.0);
-        displayed_progress_percent = percent;
-        player_seekbar_set_value(progress_slider, percent);
-
-        displayed_position_second = (int) position;
-        displayed_duration_second = (int) probe.duration_seconds;
-        char time_str[24];
-        gui_format_time(position, time_str, sizeof(time_str));
-        if (pos_label) lv_label_set_text(pos_label, time_str);
-        gui_format_time(probe.duration_seconds, time_str, sizeof(time_str));
-        if (dur_label) lv_label_set_text(dur_label, time_str);
-    }
+    request_track_metadata(index, false, true, false);
 
     nav_push(player_screen);
 }
@@ -7705,18 +8015,18 @@ bool gui_player_is_seeking(void) {
 
 
 int32_t gui_player_get_volume_percent(void) {
-    return volume_slider ? lv_slider_get_value(volume_slider) : (int32_t)(audio_get_volume() * 100.0f);
+    return audio_clamp_volume_percent(volume_slider ? lv_slider_get_value(volume_slider) : (int32_t)(audio_get_volume() * 100.0f + 0.5f));
 }
 
 void gui_player_set_volume_percent(int32_t percent) {
     /* External/hardware writes are newer than any coalesced drag sample. */
     hw_volume_coalesce_cancel(&volume_popup_hv);
+    percent = audio_clamp_volume_percent(percent);
     if (volume_slider) lv_slider_set_value(volume_slider, percent, LV_ANIM_OFF);
 }
 
 void gui_player_remember_volume_percent(int32_t percent) {
-    if (percent < 0) percent = 0;
-    if (percent > 100) percent = 100;
+    percent = audio_clamp_volume_percent(percent);
     if (current_settings.car_mode_enabled) {
         current_settings.car_mode_volume_percent = percent;
         gui_settings_sync_car_mode();
@@ -7731,7 +8041,8 @@ void gui_player_set_car_mode_enabled(bool enabled) {
         current_settings.car_mode_enabled = enabled;
         float volume = enabled ? (float) current_settings.car_mode_volume_percent / 100.0f
                                : current_settings.volume;
-        int32_t percent = (int32_t) (volume * 100.0f + 0.5f);
+        int32_t percent = audio_clamp_volume_percent((int32_t) (volume * 100.0f + 0.5f));
+        volume = (float) percent / 100.0f;
         gui_player_set_volume_percent(percent);
         audio_set_volume(volume);
         refresh_volume_topbar(percent);

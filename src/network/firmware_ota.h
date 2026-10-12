@@ -16,8 +16,8 @@
  * are never considered as a fallback.
  *
  * Download: fetches SHA256SUMS, then streams the image into
- * SD/.compas/ota/, checks its size and SHA-256 against the release, and
- * only then moves it to the SD card root under its release name,
+ * SD/.compas/ota/, checks its size, SHA-256 and firmware package structure,
+ * and only then moves it to the SD card root under its release name,
  * replacing an older copy of the same name. Nothing unverified ever
  * reaches the root, where the recovery image looks.
  *
@@ -26,10 +26,10 @@
  *
  * Install (a worker): re-checks that the record still describes GitHub's
  * latest release and re-hashes the image at the root against that record,
- * moves any other *.upt out of the root (renamed *.upt.parked, so recovery
- * cannot pick a different image) and reboots into recovery via
- * firmware_update_enter_ota_recovery_for_path(), the same preparation as the SD-card
- * update.
+ * then uses the shared recovery preparation. That preparation moves any
+ * other root *.upt aside (renamed *.upt.parked, with numbered names on
+ * collisions) before recovery and reboots via
+ * firmware_update_enter_ota_recovery_for_path().
  *
  * The check and download run on a worker thread; the UI polls
  * firmware_ota_get_status(). No function here touches LVGL. */
@@ -66,6 +66,8 @@ typedef struct {
 
 /* This board's release asset name. */
 const char * firmware_ota_board_asset(void);
+/* Moves every other root .upt aside before either manual or OTA recovery. */
+bool firmware_ota_park_other_upts(const char * selected_path, char * error, size_t error_size);
 
 /* Starts a check; false if one is already running or the thread fails. */
 bool firmware_ota_start_check(void);

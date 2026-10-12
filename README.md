@@ -65,17 +65,21 @@ Wi-Fi and plugins can be skipped and configured later. Failed plugin installatio
 
 ## What it can do
 
-- **Play music:** FLAC, MP3, WAV, AIFF, DSD, AAC, ALAC, APE, Opus and more; gapless playback, crossfade, ReplayGain, a 10-band PEQ, queue controls, hardware buttons, Bluetooth audio and USB DAC mode.
+- **Play music:** FLAC, MP3, WAV, AIFF, DSD, AAC, ALAC, APE, Opus, WavPack, CAF and more; gapless playback, crossfade, ReplayGain, a 10-band PEQ, queue controls, hardware buttons, Bluetooth audio and USB DAC mode.
 - **Organize a library:** browse files, artists, albums and playlists; scan incrementally; use Rockbox tagcache; read synced lyrics and plain-text books; handle SD card removal and insertion. Audiobook features are available as a plugin.
 - **Connect and stream:** Subsonic-compatible streaming over HTTPS, downloads, DLNA renderer, AirPlay through stock protocols where possible, Wi-Fi and Bluetooth remote control, and Wi-Fi music import.
 - **Tune the device:** charge limit and Safe Charging, suspend or idle shutdown, car mode, USB Storage/DAC/ADB selector, timezone and charge LED controls.
-- **Shape the interface:** swipe navigation, quick controls, themes, a customizable Home screen and non-Latin text including Cyrillic, Japanese, Korean and Thai.
+- **Shape the interface:** swipe navigation, quick controls, built-in Themes picker, a customizable Home screen, a More screen (Plugins, Themes, Now Playing layouts, USB DAC, Bluetooth DAC), and non-Latin text including Cyrillic, Japanese, Korean and Thai.
 
 Android client authors can use the [Remote Control API v1 contract](docs/REMOTE_CONTROL_API.md).
 
+## Themes
+
+Compás includes a built-in system theme picker accessible from **More → Themes**. Themes use the existing `.theme` key-value format and can be placed in `SD/Themes/` (including subfolders); no `Themes.lua` plugin is required to use them. Theme packs can also be browsed and installed through the Plugin Store catalog.
+
 ## Plugins
 
-Plugins add screens, settings, themes, streaming sources and other features using Lua. Install a ready-made plugin through the on-device Plugin Store or download it from the [compas-plugins repository](https://github.com/Starnished66/compas-plugins). The Store catalog is published as [`index.json`](https://github.com/Starnished66/compas-plugins/releases/latest/download/index.json); packaged plugin downloads are attached to [the latest catalog release](https://github.com/Starnished66/compas-plugins/releases/latest).
+Plugins add screens, settings, streaming sources and other features using Lua. Install a ready-made plugin through the on-device Plugin Store or download it from the [compas-plugins repository](https://github.com/Starnished66/compas-plugins). The Store catalog is published as [`index.json`](https://github.com/Starnished66/compas-plugins/releases/latest/download/index.json); packaged plugin downloads are attached to [the latest catalog release](https://github.com/Starnished66/compas-plugins/releases/latest).
 
 Start with **AutoEQ** for downloadable headphone EQ profiles, **Gain Mode** for low/high gain controls, **Audiobooks** for bookmarks and listening progress, or **Podcasts** and **EPUB Reader** for more ways to enjoy your library. Browse the repository for the full catalog and each plugin's requirements.
 
@@ -105,7 +109,7 @@ Download the R1 `r1.upt` from [releases](https://github.com/Starnished66/compas-
 
 Open **Settings → System → About → Firmware Update**. Online updates use only GitHub's designated latest published weekly release, with no fallback to older releases. A saved online download requires Wi-Fi when installing so the player can check that it still matches the latest release.
 
-For an offline update, place one firmware file in the SD card root, named `r1.upt`, `r3proii.upt`, or `r3ii_2025.upt` for your model, then choose **Install from SD card**. The player checks the package structure and chunk checksums before preparing recovery. Renaming another model's image does not make it compatible.
+For an offline update, place the firmware image in the SD card root using the filename for your model: `r1.upt`, `r3proii.upt`, or `r3ii_2025.upt`. Choose **Install from SD card**. Compás checks that the named file is a regular file, then moves other root `.upt` files aside so recovery sees only the selected image. Stock recovery checks the package contents and whether the image is compatible with the player; naming another model's image does not make it compatible. OTA downloads are checked for package structure and chunk checksums before they are placed on the card.
 
 Preparation runs in the background and records its phases and helper output in `SD/.compas/ota/update.log`. If preparation takes longer than expected, keep the player powered and wait: flash helpers are allowed to finish rather than being interrupted. Recovery performs the actual firmware installation after reboot.
 
@@ -172,6 +176,13 @@ board-specific assets, fonts, and every file under `firmware/overlay/`; local
 ignored stock files do not ship. Changes to those files require a full `.upt`
 to reach the device.
 
+All three images use the same asynchronous Wi-Fi MAC setup and readiness
+check, SD read-ahead tuning, and filesystem cache tuning. Packaging applies
+these through `scripts/standardize_boot_pipeline.sh`, preserving each board's
+radio setup and drivers. These startup changes require a full firmware update.
+The shared init hook's `stop` operation is terminal until reboot; ordinary
+Wi-Fi toggles continue to use the board's radio scripts.
+
 The daily workflow builds player and bootloader binaries for all three boards.
 It packages each board when its approved base image and matching checksum
 secret are available: `STAGING_IMAGE_SHA256` for R1,
@@ -208,3 +219,5 @@ Thanks to everyone who has contributed to the HiBy reverse-engineering ecosystem
 ## License
 
 This project is licensed under the [GNU General Public License, version 3](LICENSE). The project statically links [FAAD2](https://github.com/knik0/faad2) for AAC decoding, which is GPLv2-licensed. Other major dependencies, including `dr_libs`, LVGL and tinyalsa, use permissive licenses. A deployment that needs to avoid this copyleft combination would need to remove AAC support or replace FAAD2 with a compatible decoder; isolating the existing FAAD2 code does not change the resulting binary's license obligations.
+
+WavPack uses the BSD-licensed [libwavpack](https://github.com/dbry/WavPack), and CAF uses LGPL-licensed [libsndfile](https://github.com/libsndfile/libsndfile). The APE decoder includes an adapted [FFmpeg](https://ffmpeg.org/) decoder; its attribution is preserved in the source and its LGPL license is included in [APE_FFMPEG_CORE_LICENSE.txt](src/audio/APE_FFMPEG_CORE_LICENSE.txt).
