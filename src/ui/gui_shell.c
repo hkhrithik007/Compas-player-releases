@@ -6,6 +6,7 @@
 #include "gui_theme.h"
 #include "gui_notifications.h"
 #include "gui_library.h"
+#include "file_browser.h"
 #include "gui_queue.h"
 #include "gui_player.h"
 #include "gui_plugins.h"
@@ -652,11 +653,17 @@ static void quick_drawer_volume_event_cb(lv_event_t * e) {
         return;
     }
     if (code == LV_EVENT_VALUE_CHANGED) {
+        percent = audio_clamp_volume_percent(percent);
+        if (percent != lv_slider_get_value(lv_event_get_target(e)))
+            lv_slider_set_value(lv_event_get_target(e), percent, LV_ANIM_OFF);
         hw_volume_coalesce_drag_update(&quick_drawer_volume_hv, percent);
         if (quick_drawer_volume_label) lv_label_set_text_fmt(quick_drawer_volume_label, "%d", percent);
         refresh_volume_topbar(percent);
     } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        hw_volume_coalesce_drag_end(&quick_drawer_volume_hv, percent);
+        percent = audio_clamp_volume_percent(percent);
+        if (percent != lv_slider_get_value(lv_event_get_target(e)))
+            lv_slider_set_value(lv_event_get_target(e), percent, LV_ANIM_OFF);
+        percent = hw_volume_coalesce_drag_end(&quick_drawer_volume_hv, percent);
         /* Authoritative settled value -- sync the Player screen's own
          * volume_slider mirror now, same as the popup's own release
          * handler does, instead of on every drag tick (its previous spot)
@@ -1312,6 +1319,12 @@ void refresh_volume_topbar(int32_t percent) {
         if (quick_drawer_volume_label) lv_label_set_text_fmt(quick_drawer_volume_label, "%d", percent);
     }
 
+    /* Plugins can set startup volume before the shell is constructed. Leave
+     * the digit cache untouched so shell initialization renders that volume. */
+    for (int i = 0; i < 3; i++) {
+        if (!volume_topbar_digit[i]) return;
+    }
+
     char digits[4];
     snprintf(digits, sizeof(digits), "%d", (int) percent);
     int len = (int) strlen(digits);
@@ -1541,17 +1554,18 @@ static void recolor_toggle_on_accent(lv_draw_buf_t * buf, lv_color_t accent) {
 static void load_quick_drawer_toggle_on_images(void) {
     lv_color_t accent = accent_lv_color();
     for (int i = 0; i < QD_TOGGLE_COUNT; i++) {
-        asset_decoded_image_close(&qd_toggle_on_img[i]);
-        if (asset_decoded_image_open(&qd_toggle_on_img[i], qd_toggle_on_asset[i]))
+        if (asset_decoded_image_prepare_retint(&qd_toggle_on_img[i], qd_toggle_on_asset[i]))
             recolor_toggle_on_accent((lv_draw_buf_t *) qd_toggle_on_img[i].decoder.decoded, accent);
     }
     int plugin_count = plugin_manager_get_quick_toggle_count();
     if (plugin_count > PLUGIN_MAX_QUICK_TOGGLES) plugin_count = PLUGIN_MAX_QUICK_TOGGLES;
     for (int i = 0; i < PLUGIN_MAX_QUICK_TOGGLES; i++) {
-        asset_decoded_image_close(&qd_plugin_toggle_on_img[i]);
-        if (i >= plugin_count) continue;
-        if (asset_decoded_image_open(&qd_plugin_toggle_on_img[i],
-                                     plugin_manager_get_quick_toggle_icon_selected(i)))
+        if (i >= plugin_count) {
+            asset_decoded_image_close(&qd_plugin_toggle_on_img[i]);
+            continue;
+        }
+        if (asset_decoded_image_prepare_retint(&qd_plugin_toggle_on_img[i],
+                                               plugin_manager_get_quick_toggle_icon_selected(i)))
             recolor_toggle_on_accent((lv_draw_buf_t *) qd_plugin_toggle_on_img[i].decoder.decoded, accent);
     }
 }
@@ -1936,6 +1950,11 @@ void gui_shell_cancel_bt_reconnect(void) {
 static void clear_bt_audio_route_now(void);
 
 bool gui_shell_is_bt_audio_connected(void) { return bt_is_a2dp_connected_ui; }
+bool gui_shell_get_bt_audio_codec(char * out, size_t out_size) {
+    if (!out || out_size == 0 || !bt_is_a2dp_connected_ui || !bt_connected_codec_cached[0]) return false;
+    snprintf(out, out_size, "%s", bt_connected_codec_cached);
+    return out[0] != '\0';
+}
 
 static bool last_codec_eligible = false;
 static bt_codec_type_t last_codec_type = BT_CODEC_TYPE_NONE;
@@ -2320,7 +2339,9 @@ static void poll_refresh_bt_icon(void) {
     audio_set_bt_output(use_bt_output);
 
     /* Volume synchronization with Bluetooth audio output devices. */
-    bt_monitor_want_volume = use_bt_output && current_settings.bt_volume_sync_enabled;
+    /* Keep the BlueALSA source monitor alive for local software gain too;
+     * only its inbound AVRCP-to-player direction is mode-gated. */
+    bt_monitor_want_volume = use_bt_output;
     bt_monitor_want_output = use_bt_output;
     /* Retry missing monitors, without creating a thread on every healthy
      * radio poll. Failed starts and unexpected EOF are both retried here. */
@@ -3457,7 +3478,7 @@ static void poll_quick_drawer_drag(lv_timer_t * timer) {
                  * screen_gesture_event_cb's leftover fallback (which
                  * would then nav_pop after search already closed). */
                 bool consumed_in_place = search_close_if_active_for_screen(active) ||
-                                         file_browser_back_if_not_root_for_screen(active);
+                                         file_browser_go_up_for_screen(active);
                 DB_LOG("GESTURE", "back_swipe confirm screen=%s in_place=%d",
                        active == gui_library_get_files_screen() ? "files" : "other", consumed_in_place);
                 if (consumed_in_place) {
@@ -5215,6 +5236,7 @@ void gui_shell_teardown(void) {
         lv_obj_delete(status_bar_band);
         status_bar_band = NULL;
     }
+    for (int i = 0; i < 3; i++) volume_topbar_digit[i] = NULL;
     if (home_indicator_band) {
         lv_obj_delete(home_indicator_band);
         home_indicator_band = NULL;
@@ -5231,6 +5253,10 @@ void gui_shell_teardown(void) {
 
 void gui_shell_refresh_static_assets(void) {
     if (!quick_drawer) return;
+    /* Theme/plugin asset files may have changed in place, so discard source
+     * snapshots before rebuilding the accent variants. */
+    for (int i = 0; i < QD_TOGGLE_COUNT; i++) asset_decoded_image_close(&qd_toggle_on_img[i]);
+    for (int i = 0; i < PLUGIN_MAX_QUICK_TOGGLES; i++) asset_decoded_image_close(&qd_plugin_toggle_on_img[i]);
     asset_decoded_image_close(&quick_drawer_brightness_image);
     const void * brightness = asset_decoded_image_open(&quick_drawer_brightness_image, "pull_down/blk.png")
                             ? asset_decoded_image_source(&quick_drawer_brightness_image) : NULL;

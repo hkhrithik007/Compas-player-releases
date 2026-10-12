@@ -28,7 +28,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-05 22:08-0600\n"
+"POT-Creation-Date: 2026-10-11 13:10-0600\n"
 "PO-Revision-Date: 2026-10-01 00:00+0000\n"
 "Last-Translator: Machine draft\n"
 "Language-Team: Portuguese (Brazil)\n"
@@ -61,19 +61,12 @@ msgstr "Erro de reprodução"
 msgid "No SD card is mounted."
 msgstr "Sem cartão SD"
 
-msgid "Cannot read the SD card."
-msgstr "Não foi possível ler o cartão SD."
-
-msgid "No .upt firmware file found on SD card"
-msgstr "Nenhum arquivo de firmware .upt no cartão SD"
-
-#, fuzzy
-msgid "Keep only one .upt file in the SD card root."
-msgstr "Não foi possível separar os outros arquivos .upt no cartão SD."
+msgid "The firmware path is too long."
+msgstr ""
 
 #, c-format
-msgid "Use a regular %s file for this player. Check the SD card."
-msgstr ""
+msgid "Use a regular %s file in the SD card root."
+msgstr "Use um arquivo %s regular na raiz do cartão SD."
 
 #, c-format
 msgid "Could not prepare update helper: %s"
@@ -132,6 +125,9 @@ msgstr "Não foi possível colocar a atualização no cartão SD."
 #, fuzzy
 msgid "The update file changed during verification. Select it again."
 msgstr "O download do plugin falhou na verificação. Tente de novo."
+
+msgid "Could not move other .upt files aside on the SD card."
+msgstr "Não foi possível separar os outros arquivos .upt no cartão SD."
 
 msgid "A required recovery helper is missing. Update preparation stopped."
 msgstr ""
@@ -194,6 +190,9 @@ msgstr "Voltar"
 msgid "Previous"
 msgstr "Anterior"
 
+msgid "This folder is empty"
+msgstr "Esta pasta está vazia"
+
 msgid "No playable files here"
 msgstr "Nenhum arquivo reproduzível aqui"
 
@@ -234,6 +233,9 @@ msgstr "O GitHub está limitando as solicitações. Tente mais tarde."
 #, c-format
 msgid "GitHub returned HTTP %d."
 msgstr "O GitHub retornou HTTP %d."
+
+msgid "Cannot read the SD card."
+msgstr "Não foi possível ler o cartão SD."
 
 msgid "A newer or changed release is available. Check for updates again before downloading."
 msgstr ""
@@ -293,9 +295,6 @@ msgstr "Não foi possível baixar os checksums da versão."
 #, fuzzy
 msgid "This update no longer matches the latest release. Download the latest image again."
 msgstr "O arquivo de atualização no cartão SD mudou. Baixe de novo."
-
-msgid "Could not move other .upt files aside on the SD card."
-msgstr "Não foi possível separar os outros arquivos .upt no cartão SD."
 
 msgid "Could not enter recovery mode."
 msgstr "Não foi possível entrar no modo de recuperação."
@@ -478,6 +477,143 @@ msgstr "Abra um livro e toque no ícone de marcador para salvá-lo aqui."
 msgid "Add .txt files to the Books folder, then refresh the library."
 msgstr "Adicione arquivos .txt à pasta Livros e atualize a biblioteca."
 
+#
+msgid "Disconnect USB storage from the computer before changing files."
+msgstr "Desconecte o armazenamento USB do computador antes de alterar arquivos."
+
+#
+msgid "File Manager"
+msgstr "Gerenciador de arquivos"
+
+#, c-format
+msgid "%d selected"
+msgid_plural "%d selected"
+msgstr[0] "%d selecionado"
+msgstr[1] "%d selecionados"
+
+#
+msgid "Could not open this file"
+msgstr "Não foi possível abrir este arquivo"
+
+msgid "This type of file cannot be opened"
+msgstr "Este tipo de arquivo não pode ser aberto"
+
+#, c-format
+msgid ""
+"%u of %u\n"
+"%s"
+msgstr ""
+"%u de %u\n"
+"%s"
+
+#
+msgid "Stopped"
+msgstr "Interrompido"
+
+#, c-format
+msgid "%u item could not be completed"
+msgid_plural "%u items could not be completed"
+msgstr[0] "Não foi possível concluir %u item"
+msgstr[1] "Não foi possível concluir %u itens"
+
+msgid "Done. Update the music database to see the changes in your library."
+msgstr "Concluído. Atualize o banco de dados de músicas para ver as alterações na sua biblioteca."
+
+msgid "Done"
+msgstr "Concluído"
+
+#
+msgid "Stopping..."
+msgstr "Parando..."
+
+#
+msgid "Working..."
+msgstr "Processando..."
+
+msgid "Stop"
+msgstr "Parar"
+
+msgid "Cancel"
+msgstr "Cancelar"
+
+#
+msgid "Another file operation is still running"
+msgstr "Outra operação de arquivos ainda está em andamento"
+
+msgid "Open the destination folder, then choose Paste here from the menu."
+msgstr "Abra a pasta de destino e escolha Colar aqui no menu."
+
+#, c-format
+msgid "Move %d item?"
+msgid_plural "Move %d items?"
+msgstr[0] "Mover %d item?"
+msgstr[1] "Mover %d itens?"
+
+#, c-format
+msgid "Delete %d item?"
+msgid_plural "Delete %d items?"
+msgstr[0] "Excluir %d item?"
+msgstr[1] "Excluir %d itens?"
+
+msgid "Move"
+msgstr "Mover"
+
+msgid "Delete"
+msgstr "Excluir"
+
+msgid "This includes the player's own data (.compas or .plugins). Deleting or moving it can break features, lose data such as settings and installed plugins, and may require a restart."
+msgstr "Inclui dados do próprio player (.compas ou .plugins). Excluí-los ou movê-los pode quebrar funções, perder dados como configurações e plugins instalados e exigir uma reinicialização."
+
+#
+msgid "This cannot be undone."
+msgstr "Esta ação não pode ser desfeita."
+
+msgid "That name cannot be used"
+msgstr "Esse nome não pode ser usado"
+
+#
+msgid "Could not rename"
+msgstr "Não foi possível renomear"
+
+msgid "An item with that name already exists"
+msgstr "Já existe um item com esse nome"
+
+#
+msgid "Rename"
+msgstr "Renomear"
+
+#
+msgid "Could not create the folder"
+msgstr "Não foi possível criar a pasta"
+
+msgid "Nothing to select here"
+msgstr "Nada para selecionar aqui"
+
+#
+msgid "New folder"
+msgstr "Nova pasta"
+
+msgid "Copy"
+msgstr "Copiar"
+
+msgid "Select all"
+msgstr "Selecionar tudo"
+
+#, c-format
+msgid "Paste %d item here"
+msgid_plural "Paste %d items here"
+msgstr[0] "Colar %d item aqui"
+msgstr[1] "Colar %d itens aqui"
+
+msgid "Select"
+msgstr "Selecionar"
+
+msgid "Hide hidden files"
+msgstr "Ocultar arquivos ocultos"
+
+msgid "Show hidden files"
+msgstr "Mostrar arquivos ocultos"
+
 msgid "Playlist created"
 msgstr "Playlist criada"
 
@@ -540,12 +676,6 @@ msgstr "Iniciar em sequência"
 
 msgid "Shuffle from a random song"
 msgstr "Aleatório a partir de uma música"
-
-msgid "Cancel"
-msgstr "Cancelar"
-
-msgid "Done"
-msgstr "Concluído"
 
 msgid "Edit"
 msgstr "Editar"
@@ -648,9 +778,6 @@ msgstr "Excluir playlist?"
 
 msgid "The playlist file will be deleted. Music files are kept."
 msgstr "O arquivo da playlist será excluído. Os arquivos de música são mantidos."
-
-msgid "Delete"
-msgstr "Excluir"
 
 msgid "Delete Playlist"
 msgstr "Excluir playlist"
@@ -1363,21 +1490,6 @@ msgstr "Aplica na próxima vez que abrir o app"
 msgid "Resume Last Track"
 msgstr "Retomar última faixa"
 
-msgid "Play/Pause"
-msgstr "Tocar/Pausar"
-
-msgid "Previous Track"
-msgstr "Faixa anterior"
-
-msgid "Play/Pause + Previous Track (Double-Click)"
-msgstr "Tocar/Pausar + Faixa anterior (clique duplo)"
-
-msgid "Applies immediately"
-msgstr "Aplica imediatamente"
-
-msgid "Play/Pause Button"
-msgstr "Botão Tocar/Pausar"
-
 msgid "Small"
 msgstr "Pequeno"
 
@@ -1662,6 +1774,12 @@ msgstr "Gerenciar plugins"
 msgid "Download layouts"
 msgstr "Carregando layouts"
 
+msgid "Download themes"
+msgstr "Baixar temas"
+
+msgid "Extension updates"
+msgstr "Atualizações de extensões"
+
 msgid "Install"
 msgstr "Instalar"
 
@@ -1683,13 +1801,8 @@ msgstr "Escolher plugins"
 msgid "Needs newer firmware"
 msgstr "Precisa de firmware mais novo"
 
-#, c-format
-msgid "Update available · %s"
-msgstr "Atualização disponível · %s"
-
-#, c-format
-msgid "Installed · %s"
-msgstr "Instalado · %s"
+msgid "Update available"
+msgstr "Atualização disponível"
 
 msgid "Installed"
 msgstr "Instalado"
@@ -1701,11 +1814,16 @@ msgid "Installed manually"
 msgstr "Instalado manualmente"
 
 #, c-format
+msgid "Update available · %s"
+msgstr "Atualização disponível · %s"
+
+#, c-format
+msgid "Installed · %s"
+msgstr "Instalado · %s"
+
+#, c-format
 msgid "Available · %s"
 msgstr "Disponível · %s"
-
-msgid "Update available"
-msgstr "Atualização disponível"
 
 #, c-format
 msgid "Version %s · %s"
@@ -1741,9 +1859,11 @@ msgstr "Atualizando plugins"
 msgid "This may take a while"
 msgstr "Isso pode demorar"
 
-#, fuzzy
-msgid "No layouts are available in the catalog."
-msgstr "Nenhum plugin disponível no catálogo."
+msgid "No network detected. Connect to a network to download plugins."
+msgstr "Nenhuma rede detectada. Conecte-se a uma rede para baixar plugins."
+
+msgid "No updates available."
+msgstr "Nenhuma atualização disponível."
 
 msgid "Refresh plugin catalog"
 msgstr "Atualizar catálogo de plugins"
@@ -1753,6 +1873,16 @@ msgstr "Atualizações"
 
 msgid "Update All"
 msgstr "Atualizar tudo"
+
+msgid "Review updates"
+msgstr "Revisar atualizações"
+
+#, fuzzy
+msgid "No layouts are available in the catalog."
+msgstr "Nenhum plugin disponível no catálogo."
+
+msgid "No themes are available in the catalog."
+msgstr "Nenhum tema disponível no catálogo."
 
 msgid "Could not start the plugin operation"
 msgstr "Não foi possível iniciar a operação do plugin"
@@ -1770,10 +1900,6 @@ msgstr "Remover %s?"
 msgid "Update these plugins individually"
 msgstr "Atualize estes plugins individualmente"
 
-#, fuzzy
-msgid "Plugin is unavailable"
-msgstr "O plugin não está disponível no catálogo"
-
 msgid "Not enough memory to load the plugin store"
 msgstr "Memória insuficiente para carregar a loja de plugins"
 
@@ -1786,17 +1912,17 @@ msgstr "Não foi possível iniciar a atualização do catálogo"
 msgid "Loading layouts"
 msgstr "Carregando layouts"
 
+msgid "Loading themes"
+msgstr "Carregando temas"
+
+msgid "Loading updates"
+msgstr "Carregando atualizações"
+
 msgid "Loading plugins"
 msgstr "Carregando plugins"
 
-msgid "No network detected. Connect to a network to download plugins."
-msgstr "Nenhuma rede detectada. Conecte-se a uma rede para baixar plugins."
-
 msgid "Could not load the plugin catalog."
 msgstr "Não foi possível carregar o catálogo de plugins."
-
-msgid "Plugin is unavailable in the catalog"
-msgstr "O plugin não está disponível no catálogo"
 
 msgid "Some plugin files were changed on the card. Replace them?"
 msgstr "Alguns arquivos de plugin foram alterados no cartão. Substituí-los?"
@@ -1883,6 +2009,14 @@ msgstr "Personalizado"
 msgid "%d min remaining"
 msgstr "%d min restantes"
 
+#, fuzzy
+msgid "Crossfeed: Off"
+msgstr "Crossfade"
+
+#, c-format
+msgid "Crossfeed: %d%%"
+msgstr ""
+
 #, c-format
 msgid "Pre-Amp: %+.2f dB"
 msgstr "Pré-amp: %+.2f dB"
@@ -1893,6 +2027,9 @@ msgstr "%.0f Hz"
 
 msgid "Pre-Amp (dB, -12 to 12)"
 msgstr "Pré-amp (dB, -12 a 12)"
+
+msgid "Crossfeed (0 to 100)"
+msgstr ""
 
 msgid "Frequency (Hz, 20 to 20000)"
 msgstr "Frequência (Hz, 20 a 20000)"
@@ -2017,9 +2154,6 @@ msgstr "Escaneie com o celular para apoiar o Compás Player no PayPal"
 msgid "Compás Player"
 msgstr "Compás Player"
 
-msgid "Firmware Update"
-msgstr "Atualização de firmware"
-
 msgid "Developer Options"
 msgstr "Opções do desenvolvedor"
 
@@ -2103,6 +2237,13 @@ msgstr "Volume inicial"
 
 msgid "Launch at a fixed volume"
 msgstr "Iniciar com volume fixo"
+
+#, fuzzy
+msgid "Max Volume"
+msgstr "Volume inicial"
+
+msgid "Limits the player volume, including buttons, remote controls and plugins."
+msgstr ""
 
 msgid "Car Mode"
 msgstr "Modo carro"
@@ -2243,6 +2384,94 @@ msgstr "Equalizador"
 msgid "Sound"
 msgstr "Som"
 
+msgid "Power"
+msgstr "Energia"
+
+msgid "Play/Pause"
+msgstr "Tocar/Pausar"
+
+#, fuzzy
+msgid "Next Track"
+msgstr "Por faixa"
+
+msgid "Previous Track"
+msgstr "Faixa anterior"
+
+msgid "Clockwise"
+msgstr "Sentido horário"
+
+msgid "Counterclockwise"
+msgstr "Sentido anti-horário"
+
+msgid "Volume Up"
+msgstr "Aumentar volume"
+
+msgid "Volume Down"
+msgstr "Diminuir volume"
+
+msgid "Button"
+msgstr "Botão"
+
+msgid "Default (native behavior)"
+msgstr "Padrão (comportamento nativo)"
+
+msgid "Seek Forward"
+msgstr "Avançar na faixa"
+
+msgid "Seek Backward"
+msgstr "Voltar na faixa"
+
+msgid "Toggle Screen"
+msgstr "Alternar tela"
+
+msgid "Power Menu"
+msgstr "Menu de energia"
+
+msgid "Do Nothing"
+msgstr "Não fazer nada"
+
+msgid "Single press"
+msgstr "Pressão única"
+
+msgid "Double press"
+msgstr "Pressão dupla"
+
+msgid "Long press"
+msgstr "Pressão longa"
+
+msgid "Single"
+msgstr "Única"
+
+msgid "Double"
+msgstr "Dupla"
+
+msgid "Long"
+msgstr "Longa"
+
+msgid "Default"
+msgstr "Padrão"
+
+msgid "Disabled"
+msgstr "Desativado"
+
+msgid "Reset All"
+msgstr "Redefinir tudo"
+
+msgid "Button Mapping"
+msgstr "Mapeamento de botões"
+
+msgid "Keep a button assigned to Toggle Screen or Power Menu"
+msgstr "Mantenha um botão atribuído a Alternar tela ou ao Menu de energia"
+
+msgid "Reset all button mappings?"
+msgstr "Redefinir todos os mapeamentos de botões?"
+
+msgid "Reset"
+msgstr "Restaurar"
+
+msgid "Volume Lock (Screen Off)"
+msgstr "Bloqueio de volume (tela desligada)"
+
 msgid "In-line Remote"
 msgstr "Controle no cabo"
 
@@ -2345,9 +2574,6 @@ msgstr "LED indicador de carga"
 msgid "Charging"
 msgstr "Carregamento"
 
-msgid "Power"
-msgstr "Energia"
-
 msgid "Additional Tools"
 msgstr "Ferramentas adicionais"
 
@@ -2378,6 +2604,12 @@ msgstr "Restaurar padrão de fábrica"
 msgid "Maintenance"
 msgstr "Manutenção"
 
+msgid "Firmware Update"
+msgstr "Atualização de firmware"
+
+msgid "Plugins & Layouts"
+msgstr "Plugins e layouts"
+
 msgid "Applying language, this may take a while"
 msgstr "Aplicando o idioma, isso pode demorar"
 
@@ -2393,8 +2625,17 @@ msgstr "Configurações"
 msgid "Turn off ADB first (Settings > System > USB Mode), then enable USB DAC from here."
 msgstr "Desligue o ADB primeiro (Configurações > Sistema > Modo USB) e ative o DAC USB aqui."
 
-msgid "DAC"
-msgstr "DAC"
+msgid "Plugins"
+msgstr "Plugins"
+
+msgid "Themes"
+msgstr "Temas"
+
+msgid "Now Playing layouts"
+msgstr "Layouts do reprodutor"
+
+msgid "More"
+msgstr "Mais"
 
 msgid "Combined response (dB) · EQ off"
 msgstr "Resposta combinada (dB) · EQ desligado"
@@ -2407,9 +2648,6 @@ msgstr "PEQ restaurado ao padrão"
 
 msgid "Reset PEQ to defaults?"
 msgstr "Restaurar o PEQ ao padrão?"
-
-msgid "Reset"
-msgstr "Restaurar"
 
 msgid "Reset all settings and reboot?"
 msgstr "Restaurar todas as configurações e reiniciar?"
@@ -2534,6 +2772,9 @@ msgstr "Selecione pelo menos um plugin para continuar."
 msgid "Could not start the library scan. Please try again."
 msgstr "Não foi possível iniciar a busca na biblioteca. Tente novamente."
 
+msgid "Plugin is unavailable in the catalog"
+msgstr "O plugin não está disponível no catálogo"
+
 msgid "Insert an SD card to scan for music, or turn off Scan for music."
 msgstr "Insira um cartão SD para buscar músicas ou desative Buscar músicas."
 
@@ -2546,18 +2787,11 @@ msgstr "Não foi possível carregar o catálogo de plugins. Toque em Mais para t
 msgid "Loading plugin catalog..."
 msgstr "Carregando catálogo de plugins…"
 
-#, fuzzy
-msgid "Default"
-msgstr "Usar padrões"
-
 msgid "No network detected"
 msgstr "Nenhuma rede detectada"
 
 msgid "Time zone"
 msgstr "Fuso horário"
-
-msgid "Plugins"
-msgstr "Plugins"
 
 msgid "Quick setup"
 msgstr "Configuração rápida"
@@ -2617,12 +2851,11 @@ msgstr "Conecte-se a uma rede para baixar plugins."
 msgid "Connect to Wi-Fi"
 msgstr "Conectar ao Wi-Fi"
 
-#, fuzzy
 msgid "AutoEQ"
-msgstr "Auto"
+msgstr "AutoEQ"
 
-msgid "More"
-msgstr "Mais"
+msgid "Gain Mode"
+msgstr "Modo de ganho"
 
 msgid "Scan for music"
 msgstr "Buscar músicas"
@@ -2866,6 +3099,9 @@ msgstr "Configurações de download"
 msgid "Songs"
 msgstr "Músicas"
 
+msgid "Could not apply theme"
+msgstr "Não foi possível aplicar o tema"
+
 #, c-format
 msgid "%llu bytes"
 msgstr "%llu bytes"
@@ -2978,6 +3214,58 @@ msgstr "Controles de energia"
 
 msgid "Playback and device actions"
 msgstr "Ações de reprodução e do aparelho"
+
+#~ msgid "No .upt firmware file found on SD card"
+#~ msgstr "Nenhum arquivo de firmware .upt no cartão SD"
+
+#~ msgid "Download Themes"
+#~ msgstr "Baixar temas"
+
+#~ msgid "Add streaming services"
+#~ msgstr "Adicionar serviços de streaming"
+
+#~ msgid "Add book features"
+#~ msgstr "Adicionar recursos de livros"
+
+#~ msgid "Audiobooks"
+#~ msgstr "Audiolivros"
+
+#~ msgid "EPUB Reader"
+#~ msgstr "Leitor de EPUB"
+
+#~ msgid "Podcasts"
+#~ msgstr "Podcasts"
+
+#~ msgid "Net Radio"
+#~ msgstr "Rádio na Internet"
+
+#~ msgid "Last.fm Scrobbler"
+#~ msgstr "Scrobbler do Last.fm"
+
+#, fuzzy
+#~ msgid "Plugin is unavailable"
+#~ msgstr "O plugin não está disponível no catálogo"
+
+#~ msgid "Find Last.fm scrobbling"
+#~ msgstr "Encontrar scrobbling do Last.fm"
+
+#~ msgid "More appearance options"
+#~ msgstr "Mais opções de aparência"
+
+#~ msgid "DAC"
+#~ msgstr "DAC"
+
+#~ msgid "Find AutoEQ profiles"
+#~ msgstr "Encontrar perfis do AutoEQ"
+
+#~ msgid "Play/Pause + Previous Track (Double-Click)"
+#~ msgstr "Tocar/Pausar + Faixa anterior (clique duplo)"
+
+#~ msgid "Applies immediately"
+#~ msgstr "Aplica imediatamente"
+
+#~ msgid "Play/Pause Button"
+#~ msgstr "Botão Tocar/Pausar"
 
 #~ msgid "SD card checked"
 #~ msgstr "Cartão SD verificado"

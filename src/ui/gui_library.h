@@ -96,8 +96,10 @@ void plugin_stream_tile_click_cb(lv_event_t * e);
 void set_player_source_group_songs_direct(const group_song_entry_t * entries, int count, const char * title, int selected_index);
 
 bool search_close_if_active_for_screen(lv_obj_t * screen);
-bool file_browser_back_if_not_root_for_screen(lv_obj_t * screen);
 void refresh_now_playing_indicators(void);
+/* UI-thread poll for the coalesced worker result requested by
+ * refresh_now_playing_indicators(). */
+void gui_library_poll_now_playing_indicators(void);
 
 /* Shared song identity used by library and queue rows: display title on the
  * first line, then Artist · Album on the metadata line. */

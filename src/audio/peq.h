@@ -41,6 +41,67 @@ void peq_set_bypass(bool bypass);
 double peq_get_preamp_db(void);
 void peq_set_preamp_db(double db);
 
+/* Stereo width: 0 folds stereo to mono, 1 is neutral, 2 widens.
+ * Smoothed in the PCM thread; mono input is unaffected. Widening applies
+ * headroom compensation and reduces center level. Saved with PEQ profiles,
+ * reset to 1 by old profiles/defaults, and disabled by PEQ bypass. Native
+ * DoP output bypasses the PCM processing stage entirely. */
+double peq_get_stereo_width(void);
+void peq_set_stereo_width(double width);
+
+/* Headphone crossfeed strength, 0 (off) through 1 (full effect).
+ *
+ * Filtered-difference headphone blend, not a stereo-width matrix and not a
+ * room or HRTF model. Each channel keeps its
+ * sample and adds k times the one-pole low-pass difference between the
+ * channels (cutoff PEQ_CROSSFEED_FC_HZ): yL = xL + k * (lpR - lpL), and the
+ * mirror for R. There is no interaural delay. A steady mono (L == R) signal
+ * stays at unity gain because the same low-pass is removed and added back.
+ *
+ * At strength s the low-frequency cross coefficient is
+ * k = s * PEQ_CROSSFEED_MAX_BLEND (direct 1 - k once the low-pass has
+ * settled). High frequencies approach direct = 1, cross = 0. k <= 0.30, so
+ * a full-scale hard-panned steady tone cannot exceed full scale from the
+ * mix itself. A polarity reversal can still reach about 1 + 2k times full
+ * scale while the low-pass holds the previous sample. The 1 ms limiter
+ * attack does not cover those first samples. While crossfeed is active,
+ * that same sample applies a stereo-linked gain so the frame peak does not
+ * exceed the limiter ceiling (32760 in 16-bit, 8386560 in 24-bit) unless
+ * the pre-crossfeed peak was already above it. In-range audio is not
+ * attenuated. Strength 0 does not apply this gain, and the baseline limiter
+ * is unchanged.
+ *
+ * Processing order for an active PCM buffer: per-channel preamp, per-channel
+ * EQ, crossfeed (including that immediate gain), stereo width, limiter and
+ * clamp. Mono buffers skip crossfeed and width. Strength 0 is an exact
+ * no-op (the PCM fast path returns before the sample loop when preamp,
+ * bands, width, and crossfeed are all idle). Bypass and native DoP skip
+ * this stage entirely; DoP never enters peq_process(). Enabling only
+ * crossfeed is enough to run the PCM stage.
+ *
+ * The stored default is 0 for new installs, reset, and profiles that omit
+ * the key. PEQ_CROSSFEED_SUGGESTED is a conservative strength for a caller
+ * that is explicitly turning the effect on. The audio thread ramps strength
+ * over PEQ_CROSSFEED_RAMP_SEC. Going idle, bypass, or a non-stereo buffer
+ * clears the low-pass memory. A sample-rate or PCM-format change, and a
+ * PCM discontinuity noted by the audio thread, replace that memory with the
+ * next input sample so the previous stream is not replayed and a steady
+ * tone does not step. Continuous gapless PCM and ordinary block boundaries
+ * do not. Toggling strength ramps. */
+#define PEQ_CROSSFEED_FC_HZ 700.0
+#define PEQ_CROSSFEED_MAX_BLEND 0.30
+#define PEQ_CROSSFEED_RAMP_SEC 0.020
+#define PEQ_CROSSFEED_SUGGESTED 0.65
+double peq_get_crossfeed(void);
+void peq_set_crossfeed(double strength);
+
+/* Audio thread only. Sets a flag; it does not write filter memory. The next
+ * peq_process / peq_process_s32 on that thread drops the crossfeed low-pass
+ * and restarts it from the following input sample. Call it at a real PCM
+ * break (stop/restart, seek, A-B loop jump, A-B source switch, DoP leaving
+ * or returning to PCM). Do not call it for continuous gapless PCM or for
+ * the next block of the same stream. */
+void peq_note_pcm_discontinuity(void);
 const peq_band_t * peq_get_band(int index);
 /* Recomputes that band's filter coefficients from the new params -- takes
  * effect on the next processed buffer, no audible click beyond the normal
@@ -61,7 +122,8 @@ void peq_get_response_db(const double * frequencies_hz, double * response_db,
                          size_t count, unsigned int sample_rate);
 
 /* In-place processing of an interleaved S16 buffer. No-op (fast path) if
- * bypassed or no bands are enabled and preamp is 0dB. */
+ * bypassed or no bands are enabled, preamp is 0 dB, width is neutral, and
+ * crossfeed strength is 0. */
 void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int sample_rate);
 
 /* In-place processing of an interleaved S24_LE/S32 buffer (low 24 bits active).
@@ -92,12 +154,12 @@ bool peq_load_from_path(const char * path);
  * if root can't be read or has no *.peq files in it. */
 bool peq_scan_profiles(const char * root, char *** out_paths, int * out_count);
 
-/* Restores every band, the preamp, and bypass to their original defaults
- * (the same values peq_init() starts from before any saved file is loaded --
- * see peq.c's own set_defaults()). A full factory reset of the current PEQ,
- * distinct from loading a named profile. Caller refreshes UI widgets and
- * calls peq_save() afterward itself, same division of responsibility as
- * peq_load_from_path(). */
+/* Restores every band, the preamp, bypass, stereo width, and crossfeed to
+ * their original defaults (the same values peq_init() starts from before any
+ * saved file is loaded -- see peq.c's own set_defaults()). Crossfeed defaults
+ * off. A full factory reset of the current PEQ, distinct from loading a named
+ * profile. Caller refreshes UI widgets and calls peq_save() afterward itself,
+ * same division of responsibility as peq_load_from_path(). */
 void peq_reset_to_defaults(void);
 
 #endif /* PEQ_H */

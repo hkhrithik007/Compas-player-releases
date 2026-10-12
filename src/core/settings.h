@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "button_mapping.h"
+
 #define DEFAULT_ACCENT_COLOR 0xF4E58C /* soft light yellow */
 
 /* Discrete screen-timeout presets. The original useful coarse progression
@@ -52,13 +54,20 @@ typedef struct {
      * Car Mode has its own separate, always-on, headphone-gated resume. */
     int resume_mode;
 
-    /* Settings -> Playback -> Play/Pause Button. What the physical
-     * play/pause button does: 0 = Play/Pause (default, matches the
-     * button's own label), 1 = Previous Track, 2 = Play/Pause on a single
-     * press, but Previous Track if a second press follows within
-     * PLAY_PAUSE_DOUBLE_CLICK_MS (gui.c) -- lets one physical button cover
-     * both without a dedicated previous-track button. */
+    /* Legacy field retained for settings compatibility. On load, configurations
+     * without explicit Play/Pause mappings migrate this selector into bindings.
+     * Mode 2 retains its 700 ms double window until the Play/Pause mapping is edited. */
     int play_pause_button_mode;
+
+    /* Persistent action for each physical button and gesture. DEFAULT keeps
+     * the existing hardware-specific behavior for that gesture. */
+    button_mapping_binding_t button_bindings[BUTTON_MAPPING_BUTTON_COUNT];
+
+    /* Settings -> Playback & Controls -> Buttons & Remote. When enabled,
+     * volume actions are blocked while the screen is off, including volume
+     * assigned to another button. Remapped non-volume actions remain available.
+     * Defaults off to preserve existing hardware behavior. */
+    bool volume_lock_screen_off;
 
     uint32_t accent_color;     /* packed 0xRRGGBB, applied to sliders/switches app-wide */
     bool accent_dynamic;       /* "Match album art": the playing cover's color replaces accent_color while shown */
@@ -295,16 +304,8 @@ typedef struct {
      * for. */
     bool idle_suspend_enabled;
 
-    /* Internal bookkeeping, not exposed in any UI: whether this install has
-     * already gone through settings_load()'s one-time forced migration of
-     * the three fields above to their new (on) defaults. Lets an existing
-     * settings.txt saved by a version predating that default flip -- which
-     * would otherwise keep pinning idle_shutdown_enabled/idle_suspend_enabled/
-     * idle_shutdown_minutes back to their old off/off/30 values forever,
-     * since settings_save() always writes every field -- get force-migrated
-     * exactly once, the same way a brand new install already gets the new
-     * defaults from set_defaults(). A user who deliberately turns any of
-     * the three back off afterward is not touched again. */
+    /* Legacy on-disk marker retained for compatibility. It no longer causes
+     * settings_load() to rewrite saved idle-action choices. */
     bool idle_suspend_default_migrated;
 
     /* USB gadget mode (Storage/USB DAC/ADB): see usb_mode_control.h for
@@ -353,6 +354,10 @@ typedef struct {
     /* Dedicated volume applied whenever Car Mode is enabled. */
     int car_mode_volume_percent;
 
+    /* Users chosen hard ceiling on the volume. 100 (the default) means no
+     * limit. */
+    int max_volume_percent;
+
     /* Duration the quick-drawer sleep icon arms next time it's tapped --
      * see gui.c's quick_drawer_sleep_event_cb()/poll_sleep_timer(). Always
      * one of SLEEP_TIMER_STEPS (settings_load() snaps any hand-edited or
@@ -382,7 +387,7 @@ typedef struct {
     int font_size_tier;
 
     /* Settings -> Display -> Appearance -> Keyboard. Layout used by every text
-     * field and inline search: 0 = T9 keypad (default), 1 = QWERTY. Numeric
+     * field and inline search: 0 = T9 keypad, 1 = QWERTY (default). Numeric
      * fields always use the T9 numeric keypad. */
     int keyboard_layout;
 
@@ -451,14 +456,23 @@ void settings_bt_set_rate_for(player_settings_t * settings, const char * mac, un
  * Rapid requests are coalesced to the newest complete snapshot. */
 void settings_save_async(const player_settings_t * settings);
 
+/* Terminal persistence barrier. Prevents later synchronous and asynchronous
+ * saves, then waits for the newest queued snapshot and any active write to
+ * finish. Call before deleting settings or exiting the process. */
+void settings_shutdown_flush(void);
+
+/* Reopen settings persistence after an aborted terminal transition. Call only
+ * after settings_shutdown_flush() has returned and the terminal action failed. */
+void settings_shutdown_cancel(void);
+
 /* Upserts a Saved Servers profile by URL. Does not write disk -- call
  * settings_save() after, same as every other settings mutation. */
 void settings_subsonic_server_upsert(player_settings_t * settings, const char * url, const char * username,
                                       const char * password, bool verify_tls);
 
 /* Settings > System > Factory Reset: wipes all configuration files and data
- * in /usr/data except the "mnt" directory (the SD card mount point), then reboots
- * into default settings. */
+ * in /usr/data except the "mnt" directory (the SD card mount point), then
+ * reboots into default settings. Host builds remove only the settings files. */
 void settings_factory_reset(void);
 
 

@@ -4,6 +4,7 @@
 #include "gui_theme.h"
 #include "gui_notifications.h"
 #include "gui_library.h"
+#include "file_browser.h"
 #include "gui_queue.h"
 #include "gui_player.h"
 #include "gui_plugins.h"
@@ -23,6 +24,7 @@
 #include "device_config.h"
 #include "transition_compositor.h"
 #include "db_log.h"
+#include "backlight.h"
 
 static lv_obj_t * nav_stack[NAV_STACK_MAX] = { NULL };
 static int nav_depth = 0;
@@ -254,6 +256,23 @@ static lv_draw_buf_t * build_flattened_transition_frame(lv_obj_t * target_screen
 static lv_obj_t * static_snapshot_screen[STATIC_SNAPSHOT_SCREEN_COUNT];
 static lv_draw_buf_t * static_snapshot_buf[STATIC_SNAPSHOT_SCREEN_COUNT];
 static uint64_t static_snapshot_scroll_state[STATIC_SNAPSHOT_SCREEN_COUNT];
+/* Theme invalidations can arrive in bursts while accent colors are being
+ * applied. Coalesce them, then capture at most one static screen per timer
+ * pass so rebuilding nine full-screen buffers cannot monopolize the UI. */
+#define THEME_SNAPSHOT_REBUILD_DELAY_MS 250
+#define THEME_SNAPSHOT_REBUILD_PERIOD_MS 100
+static lv_timer_t * theme_snapshot_rebuild_timer;
+static uint32_t theme_snapshot_rebuild_after;
+static int theme_snapshot_rebuild_index;
+
+static void theme_snapshot_rebuild_timer_cb(lv_timer_t * timer);
+
+static bool static_snapshot_rebuild_input_active(void) {
+    for (lv_indev_t * indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_state(indev) == LV_INDEV_STATE_PRESSED) return true;
+    }
+    return false;
+}
 
 /* Static screen content can still contain scrollable containers. Include
  * every descendant's scroll offsets in the cache key so a screen cached at
@@ -368,14 +387,43 @@ void gui_navigation_invalidate_font_snapshots(void) {
     lv_async_call(rebuild_font_snapshots_async_cb, NULL);
 }
 
-static void rebuild_theme_snapshots_async_cb(void * unused) {
-    (void) unused;
-    for (int i = 0; i < STATIC_SNAPSHOT_SCREEN_COUNT; i++) {
-        if (static_snapshot_screen[i] && !static_snapshot_buf[i]) {
-            static_snapshot_buf[i] = snapshot_screen_base(static_snapshot_screen[i]);
-            static_snapshot_scroll_state[i] = static_snapshot_scroll_state_for(static_snapshot_screen[i]);
-        }
+static void theme_snapshot_rebuild_timer_cb(lv_timer_t * timer) {
+    if (!backlight_screen_is_on()) {
+        lv_timer_pause(timer);
+        return;
     }
+    if (gui_navigation_transition_in_progress() || static_snapshot_rebuild_input_active()) return;
+
+    /* Let a burst of accent changes settle before capturing anything. */
+    if ((int32_t) (lv_tick_get() - theme_snapshot_rebuild_after) < 0) return;
+
+    while (theme_snapshot_rebuild_index < STATIC_SNAPSHOT_SCREEN_COUNT) {
+        int i = theme_snapshot_rebuild_index++;
+        lv_obj_t * screen = static_snapshot_screen[i];
+        if (!screen || static_snapshot_buf[i]) continue;
+
+        lv_draw_buf_t * fresh = snapshot_screen_base(screen);
+        if (!fresh) {
+            /* OOM or snapshot failure: leave remaining slots uncached and
+             * rely on the existing live-render fallback. A later explicit
+             * invalidation can retry; do not spin on a failing allocation. */
+            theme_snapshot_rebuild_timer = NULL;
+            lv_timer_delete(timer);
+            return;
+        }
+        static_snapshot_buf[i] = fresh;
+        static_snapshot_scroll_state[i] = static_snapshot_scroll_state_for(screen);
+        return; /* One expensive capture per eligible UI pass. */
+    }
+
+    theme_snapshot_rebuild_timer = NULL;
+    lv_timer_delete(timer);
+}
+
+void gui_navigation_poll_snapshot_rebuild(void) {
+    if (!theme_snapshot_rebuild_timer) return;
+    if (backlight_screen_is_on()) lv_timer_resume(theme_snapshot_rebuild_timer);
+    else lv_timer_pause(theme_snapshot_rebuild_timer);
 }
 
 void gui_navigation_invalidate_theme_snapshots(void) {
@@ -385,7 +433,16 @@ void gui_navigation_invalidate_theme_snapshots(void) {
     }
     player_transition_discard_cache();
     back_target_cache_discard();
-    lv_async_call(rebuild_theme_snapshots_async_cb, NULL);
+    theme_snapshot_rebuild_index = 0;
+    theme_snapshot_rebuild_after = lv_tick_get() + THEME_SNAPSHOT_REBUILD_DELAY_MS;
+    if (!theme_snapshot_rebuild_timer) {
+        theme_snapshot_rebuild_timer = lv_timer_create(theme_snapshot_rebuild_timer_cb,
+                                                       THEME_SNAPSHOT_REBUILD_PERIOD_MS, NULL);
+    } else {
+        lv_timer_set_period(theme_snapshot_rebuild_timer, THEME_SNAPSHOT_REBUILD_PERIOD_MS);
+        lv_timer_reset(theme_snapshot_rebuild_timer);
+    }
+    gui_navigation_poll_snapshot_rebuild();
 }
 
 /* Player-screen transition-frame cache. gui_player_get_screen() is dynamic
@@ -551,6 +608,11 @@ static void back_target_cache_note_replaced(lv_obj_t * old_screen, lv_obj_t * ne
 /* slide_transition_ctx_t defined in gui.h */
 
 static bool slide_transition_active = false;
+/* Fixed navigation snapshots are prepared synchronously while LVGL's tick is
+ * frozen. Start their animation from a one-shot timer so lv_anim_start() gets
+ * a fresh loop-top tick instead of charging snapshot time to the animation. */
+static lv_timer_t * fixed_transition_start_timer;
+static slide_transition_ctx_t * fixed_transition_start_ctx;
 
 /* The home pill is a persistent top-layer object, but Lyrics deliberately
  * disables its gesture. Apply its visibility at real screen handoffs so it
@@ -666,6 +728,14 @@ void slide_transition_cancel(slide_transition_ctx_t ** pctx) {
     }
     slide_transition_ctx_t * ctx = *pctx;
     *pctx = NULL;
+
+    if (fixed_transition_start_ctx == ctx) {
+        fixed_transition_start_ctx = NULL;
+        if (fixed_transition_start_timer) {
+            lv_timer_delete(fixed_transition_start_timer);
+            fixed_transition_start_timer = NULL;
+        }
+    }
 
     /* Delete any pending or in-flight animation for this context to prevent use-after-free */
     lv_anim_delete(ctx, slide_transition_anim_x_cb);
@@ -974,6 +1044,51 @@ slide_transition_ctx_t * begin_slide_transition_ex(lv_obj_t * to_scr, bool forwa
     return ctx;
 }
 
+static void fixed_transition_start_animation(slide_transition_ctx_t *ctx);
+static void fixed_transition_start_timer_cb(lv_timer_t * timer);
+
+static void fixed_transition_schedule_start(slide_transition_ctx_t *ctx) {
+    fixed_transition_start_ctx = ctx;
+    fixed_transition_start_timer = lv_timer_create(fixed_transition_start_timer_cb, 1, ctx);
+    if (fixed_transition_start_timer) {
+        lv_timer_set_repeat_count(fixed_transition_start_timer, 1);
+    } else {
+        fixed_transition_start_ctx = NULL;
+        fixed_transition_start_animation(ctx);
+    }
+}
+
+static void fixed_transition_start_timer_cb(lv_timer_t * timer) {
+    slide_transition_ctx_t *ctx = lv_timer_get_user_data(timer);
+    /* Clear before starting: lv_anim_start() applies frame zero immediately,
+     * and its callback can complete/finalize the transition on failure. */
+    if (fixed_transition_start_timer == timer) fixed_transition_start_timer = NULL;
+    if (fixed_transition_start_ctx == ctx) fixed_transition_start_ctx = NULL;
+    fixed_transition_start_animation(ctx);
+}
+
+static void fixed_transition_start_animation(slide_transition_ctx_t *ctx) {
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, ctx);
+    lv_anim_set_user_data(&a, ctx);
+    lv_anim_set_values(&a, 0, -ctx->to_offset);
+    lv_anim_set_duration(&a, gui_anim_ms(NAV_ANIM_TIME_MS));
+    lv_anim_set_exec_cb(&a, slide_transition_anim_x_cb);
+    lv_anim_set_completed_cb(&a, slide_transition_done_cb);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    if (!lv_anim_start(&a)) {
+        /* No animation callback ran, so reuse the normal completed cleanup
+         * after ending compositor ownership. Fixed navigation is committed. */
+        transition_compositor_end();
+        lv_anim_t failed_anim;
+        lv_anim_init(&failed_anim);
+        lv_anim_set_user_data(&failed_anim, ctx);
+        slide_transition_done_cb(&failed_anim);
+        lv_async_call(full_redraw_async_cb, NULL);
+    }
+}
+
 static void screen_transition_slide_ex(lv_obj_t * to_scr, bool forward, bool vertical, bool reveal) {
     /* Animation Speed Off: cut straight to the screen, no snapshots. */
     slide_transition_ctx_t * ctx = gui_anims_off() ? NULL : begin_slide_transition_ex(to_scr, forward, vertical, reveal);
@@ -984,16 +1099,7 @@ static void screen_transition_slide_ex(lv_obj_t * to_scr, bool forward, bool ver
         return;
     }
 
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, ctx);
-    lv_anim_set_user_data(&a, ctx);
-    lv_anim_set_values(&a, 0, -ctx->to_offset);
-    lv_anim_set_duration(&a, gui_anim_ms(NAV_ANIM_TIME_MS));
-    lv_anim_set_exec_cb(&a, slide_transition_anim_x_cb);
-    lv_anim_set_completed_cb(&a, slide_transition_done_cb);
-    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-    lv_anim_start(&a);
+    fixed_transition_schedule_start(ctx);
 }
 
 void nav_push(lv_obj_t * scr) {
@@ -1202,7 +1308,7 @@ static void screen_gesture_event_cb(lv_event_t * e) {
         DB_LOG("GESTURE", "screen_gesture_event_cb RIGHT fired screen=%s",
                active_screen == gui_library_get_files_screen() ? "files" : "other");
         if (!search_close_if_active_for_screen(active_screen) &&
-            !file_browser_back_if_not_root_for_screen(active_screen)) {
+            !file_browser_go_up_for_screen(active_screen)) {
             nav_pop();
         }
         /* The finger is still down mid-gesture when the screen swaps out
@@ -1285,6 +1391,16 @@ void gui_navigation_init(void) {
  * rebuilt) re-registers the snapshots and restores nav_stack/nav_depth to
  * Home on its own -- no separate "restore navigation" step is needed. */
 void gui_navigation_teardown(void) {
+    if (fixed_transition_start_ctx) {
+        slide_transition_ctx_t *pending = fixed_transition_start_ctx;
+        slide_transition_cancel(&pending);
+    }
+    if (theme_snapshot_rebuild_timer) {
+        lv_timer_delete(theme_snapshot_rebuild_timer);
+        theme_snapshot_rebuild_timer = NULL;
+    }
+    theme_snapshot_rebuild_index = 0;
+    theme_snapshot_rebuild_after = 0;
     for (int i = 0; i < NAV_STACK_MAX; i++) nav_stack[i] = NULL;
     nav_depth = 0;
     for (int i = 0; i < STATIC_SNAPSHOT_SCREEN_COUNT; i++) {

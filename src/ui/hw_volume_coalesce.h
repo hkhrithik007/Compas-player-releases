@@ -51,7 +51,7 @@ void hw_volume_coalesce_drag_update(hw_volume_coalesce_t * hv, int percent);
  * its own extra per-screen UI sync afterward (e.g. the Player screen's
  * own volume_slider widget, or the drawer's snapshot-dirty mark) and for
  * persisting settings -- this only owns the audio-facing debounce. */
-void hw_volume_coalesce_drag_end(hw_volume_coalesce_t * hv, int percent);
+int hw_volume_coalesce_drag_end(hw_volume_coalesce_t * hv, int percent);
 
 /* An external, authoritative volume write (not from this slider) just
  * happened -- drop any pending drag sample and stop the timer without
