@@ -13,6 +13,12 @@
 #ifndef _DBUS_CONFIG_H
 #define _DBUS_CONFIG_H
 
+/* dbus-sysdeps.h warns unless this macro is already defined, which is how
+ * it checks that config.h was included. Upstream's generated config.h sets
+ * it to the package version (dbus 1.16.2). The client objects compiled here
+ * do not read the string; the tools that print it are not in DBUS_SRCS. */
+#define VERSION "1.16.2"
+
 #define DBUS_UNIX 1
 
 /* Headers -- all standard, present in musl */

@@ -4,6 +4,7 @@ extern int subprocess_run(char * const argv[], char ** out_output, int timeout_s
 #include "i18n.h"
 #include "gui_theme.h"
 #include "gui_network.h"
+#include "gui_settings.h"
 #include "gui_text_input.h"
 #include "audio.h"
 #include "plugin_manager.h"
@@ -105,6 +106,11 @@ static bool usb_dac_mode_active = false;
 static lv_obj_t * usb_dac_hint_label;
 static lv_obj_t * usb_dac_input_label;
 static lv_obj_t * usb_dac_path_label;
+static pthread_t usb_dac_charging_thread;
+static bool usb_dac_charging_active;
+static atomic_bool usb_dac_charging_done = false;
+static volatile bool usb_dac_charging_succeeded;
+static bool usb_dac_charging_target_disabled;
 static lv_obj_t * import_wifi_screen;
 static lv_obj_t * airplay_screen;
 static lv_obj_t * airplay_overlay_screen;
@@ -2693,6 +2699,7 @@ static void flush_sd_view_after_usb_storage(void);
 static uint32_t usb_storage_host_check_tick;
 
 static void usb_mode_option_row_cb(lv_event_t * e);
+static void finish_usb_dac_charging_update(bool show_failure, bool thread_already_joined);
 /* ADB is a separate toggle, not a third equal option alongside Storage/DAC
  * -- matches the stock firmware's own USB device mode screen (confirmed by
  * the user against a real stock device: ADB overrides Storage/DAC while
@@ -2801,6 +2808,7 @@ static bool adb_owns_usb_port(void) {
 }
 
 void poll_usb_mode_switch(void) {
+    finish_usb_dac_charging_update(true, false);
     if (usb_bridge_restart_active &&
         atomic_load_explicit(&usb_bridge_restart_done, memory_order_acquire)) {
         usb_bridge_restart_active = false;
@@ -3072,6 +3080,55 @@ static void usb_dac_overlay_back_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     gui_popup_show(&usb_dac_leave_popup);
 }
+
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+static void * usb_dac_charging_thread_func(void * arg) {
+    (void) arg;
+    usb_dac_charging_succeeded =
+        usb_mode_control_set_dac_charging_disabled(usb_dac_charging_target_disabled);
+    atomic_store_explicit(&usb_dac_charging_done, true, memory_order_release);
+    return NULL;
+}
+#endif
+
+static void finish_usb_dac_charging_update(bool show_failure, bool thread_already_joined) {
+    if (!usb_dac_charging_active ||
+        !atomic_load_explicit(&usb_dac_charging_done, memory_order_acquire)) return;
+    usb_dac_charging_active = false;
+    if (!thread_already_joined) pthread_join(usb_dac_charging_thread, NULL);
+    if (usb_dac_charging_succeeded) {
+        current_settings.usb_dac_disable_charging = usb_dac_charging_target_disabled;
+        settings_save_async(&current_settings);
+    }
+    gui_settings_sync_usb_dac_charging_toggle();
+    if (!usb_dac_charging_succeeded && show_failure)
+        show_error_toast(TR("Failed to update USB charging"));
+}
+
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+void gui_network_set_usb_dac_charging_disabled(bool disabled) {
+    if (usb_dac_charging_active) {
+        show_info_toast(TR("USB charging setting is busy"));
+        gui_settings_sync_usb_dac_charging_toggle();
+        return;
+    }
+
+    usb_dac_charging_target_disabled = disabled;
+    atomic_store_explicit(&usb_dac_charging_done, false, memory_order_relaxed);
+    usb_dac_charging_active = true;
+    int rc = pthread_create(&usb_dac_charging_thread, NULL, usb_dac_charging_thread_func, NULL);
+    if (rc != 0) {
+        usb_dac_charging_active = false;
+        show_error_toast(TR("Could not start USB charging update"));
+        gui_settings_sync_usb_dac_charging_toggle();
+        return;
+    }
+}
+#else
+void gui_network_set_usb_dac_charging_disabled(bool disabled) {
+    (void) disabled;
+}
+#endif
 
 void build_usb_dac_leave_popup(void) {
     usb_dac_leave_popup.popup = build_confirm_popup(TR("Leave USB DAC mode?"), LV_LABEL_LONG_WRAP, NULL, NULL, TR("Leave"),
@@ -4505,6 +4562,7 @@ bool gui_network_has_background_work(void) {
            wifi_scan_active || wifi_forget_active || wifi_settings_snapshot_active ||
            bt_connect_active || bt_forget_active ||
            bt_scan_active || usb_mode_switch_active || usb_bridge_restart_active || import_web_stop_active ||
+           usb_dac_charging_active ||
            network_service_work;
 }
 
@@ -4561,6 +4619,10 @@ void gui_network_cancel_background_work(void) {
         if (!usb_mode_switch_queued) pthread_join(usb_mode_switch_thread, NULL);
         usb_mode_switch_queued = false;
         usb_mode_switch_active = false;
+    }
+    if (usb_dac_charging_active) {
+        pthread_join(usb_dac_charging_thread, NULL);
+        finish_usb_dac_charging_update(false, true);
     }
     /* Drain the serialized service worker before teardown. If a worker could
      * not be created, execute its bounded queue synchronously so cancellation

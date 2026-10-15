@@ -1,0 +1,68 @@
+--- a/src/opusfile.c
++++ b/src/opusfile.c
+@@ -936,6 +936,9 @@
+   for(pi=0;pi<op_count;pi++){
+     if(cur_page_eos){
+       ogg_int64_t diff;
++      /* op_granpos_diff() writes diff on success. Release builds do not
++       * abort when it fails, so start from a defined value. */
++      diff=0;
+       OP_ALWAYS_TRUE(!op_granpos_diff(&diff,cur_page_gp,prev_packet_gp));
+       diff=durations[pi]-diff;
+       /*If we have samples to trim...*/
+@@ -1164,6 +1167,8 @@
+     end_searched=_sr[sri-1].search_start;
+     next=_sr[sri-1].offset;
+     end_gp=-1;
++    /*Set with end_gp when a page from this link is found. Defined if not.*/
++    end_offset=0;
+     if(sri<nsr){
+       _searched=_sr[sri].offset+_sr[sri].size;
+       if(_sr[sri].serialno==links[nlinks-1].serialno){
+@@ -1763,7 +1768,10 @@
+   links=_of->links;
+   /*We verify that the granule position differences are larger than the
+      pre-skip and that the total duration does not overflow during link
+-     enumeration, so we don't have to check here.*/
++     enumeration, so we don't have to check here.
++    op_granpos_diff() writes diff on success. Initialize it so a failure
++     in a build without assertions is defined.*/
++  diff=0;
+   pcm_total=0;
+   if(_li<0){
+     pcm_total=links[nlinks-1].pcm_file_offset;
+@@ -2209,6 +2217,8 @@
+   int                li_lo;
+   int                li_hi;
+   OP_ASSERT(_pcm_offset>=0);
++  /*Defined if op_granpos_diff() fails in a build without assertions.*/
++  duration=0;
+   nlinks=_of->nlinks;
+   links=_of->links;
+   li_lo=0;
+@@ -2302,6 +2312,9 @@
+   int                ret;
+   _of->bytes_tracked=0;
+   _of->samples_tracked=0;
++  /*op_granpos_add()/op_granpos_diff() fill these on success.*/
++  pcm_pre_skip=0;
++  diff=0;
+   link=_of->links+_li;
+   best_gp=pcm_start=link->pcm_start;
+   pcm_end=link->pcm_end;
+@@ -2370,6 +2383,7 @@
+           }
+           else{
+             ogg_int64_t prev_page_gp;
++            prev_page_gp=0;
+             /*We might get lucky and already have the packet with the target
+                buffered.
+               Worth checking.
+@@ -2424,6 +2438,7 @@
+       if(force_bisect)bisect=begin+(end-begin>>1);
+       else{
+         ogg_int64_t diff2;
++        diff2=0;
+         OP_ALWAYS_TRUE(!op_granpos_diff(&diff,_target_gp,pcm_start));
+         OP_ALWAYS_TRUE(!op_granpos_diff(&diff2,pcm_end,pcm_start));
+         /*Take a (pretty decent) guess.*/

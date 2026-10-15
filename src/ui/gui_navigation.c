@@ -1165,6 +1165,17 @@ void nav_pop_stack_only(void) {
     note_text_view_if_dropped();
 }
 
+void nav_pop_immediate(void) {
+    if (!current_settings.setup_complete && lv_screen_active() == gui_setup_get_screen()) return;
+    if (nav_depth <= 0) return;
+    nav_pop_stack_only();
+    if (nav_depth <= 0) return;
+    lv_obj_t * target = nav_stack[nav_depth - 1];
+    lv_screen_load(target);
+    sync_player_topbar_visibility(target);
+    sync_home_indicator_visibility(target);
+}
+
 /* Splices the stack slot at `index` out entirely (shifting everything
  * above it down by one), with no screen load of any kind -- used when a
  * transient interstitial screen (Wi-Fi/Subsonic's "Connecting..."/

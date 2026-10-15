@@ -28,7 +28,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-11 13:10-0600\n"
+"POT-Creation-Date: 2026-10-13 10:21-0600\n"
 "PO-Revision-Date: 2026-10-01 00:00+0000\n"
 "Last-Translator: Machine draft\n"
 "Language-Team: Portuguese (Brazil)\n"
@@ -178,17 +178,28 @@ msgstr "Falha na captura (framebuffer)"
 msgid "Screenshot failed (worker)"
 msgstr "Falha na captura (processo)"
 
+#, fuzzy, c-format
+msgid "Page %d of %d"
+msgstr "Etapa %d de %d"
+
+#, fuzzy
+msgid "Go to page"
+msgstr "Próxima página"
+
+msgid "Cancel"
+msgstr "Cancelar"
+
+msgid "Previous"
+msgstr "Anterior"
+
+msgid "Next"
+msgstr "Próxima"
+
 msgid "Folder too large to index (tap Back)"
 msgstr "Pasta grande demais para indexar (toque em Voltar)"
 
 msgid "Unable to read folder (tap Back and retry)"
 msgstr "Não foi possível ler a pasta (toque em Voltar e tente de novo)"
-
-msgid "Back"
-msgstr "Voltar"
-
-msgid "Previous"
-msgstr "Anterior"
 
 msgid "This folder is empty"
 msgstr "Esta pasta está vazia"
@@ -201,9 +212,6 @@ msgstr "Nenhum arquivo de áudio reproduzível encontrado"
 
 msgid "Open a folder containing supported audio files."
 msgstr "Abra uma pasta com arquivos de áudio compatíveis."
-
-msgid "Next"
-msgstr "Próxima"
 
 msgid "Unexpected reply from GitHub"
 msgstr "Resposta inesperada do GitHub"
@@ -533,9 +541,6 @@ msgstr "Processando..."
 msgid "Stop"
 msgstr "Parar"
 
-msgid "Cancel"
-msgstr "Cancelar"
-
 #
 msgid "Another file operation is still running"
 msgstr "Outra operação de arquivos ainda está em andamento"
@@ -614,6 +619,14 @@ msgstr "Ocultar arquivos ocultos"
 msgid "Show hidden files"
 msgstr "Mostrar arquivos ocultos"
 
+#, fuzzy
+msgid "Playlist selection expired"
+msgstr "Playlist excluída"
+
+#, fuzzy
+msgid "Playlist name is too long"
+msgstr "Playlist renomeada"
+
 msgid "Playlist created"
 msgstr "Playlist criada"
 
@@ -632,11 +645,71 @@ msgstr "Adicionada à playlist"
 msgid "Failed to add to playlist"
 msgstr "Falha ao adicionar à playlist"
 
-msgid "+ New Playlist"
-msgstr "+ Nova playlist"
+#, fuzzy
+msgid "Added folder to playlist"
+msgstr "Adicionada à playlist"
+
+#, fuzzy
+msgid "Failed to add folder to playlist"
+msgstr "Falha ao adicionar à playlist"
+
+#, fuzzy
+msgid "Folder is too large to add to queue"
+msgstr "Pasta grande demais para indexar (toque em Voltar)"
+
+msgid "Playback changed before folder was ready"
+msgstr ""
+
+msgid "Cannot add folder within queue memory limit"
+msgstr ""
+
+#, fuzzy
+msgid "Cannot play this folder"
+msgstr "Não é possível tocar a pasta"
+
+#
+#, fuzzy
+msgid "Folder action is still running"
+msgstr "Outra operação de arquivos ainda está em andamento"
+
+#, fuzzy
+msgid "Cannot start folder action"
+msgstr "Não é possível tocar a pasta"
+
+#, fuzzy
+msgid "Adding folder to queue"
+msgstr "Adicionar álbum à fila"
+
+#, fuzzy
+msgid "Adding folder to playlist"
+msgstr "Adicionada à playlist"
+
+msgid "Preparing folder playback"
+msgstr ""
+
+#, fuzzy
+msgid "Scanning playable files"
+msgstr "Nenhum arquivo reproduzível aqui"
+
+msgid "File path is too long"
+msgstr ""
+
+#, fuzzy
+msgid "Play All (Sequential)"
+msgstr "Tocar em sequência"
+
+#, fuzzy
+msgid "Play All (Shuffle)"
+msgstr "Tocar tudo em aleatório"
+
+msgid "Add to Queue"
+msgstr "Adicionar à fila"
 
 msgid "Add to Playlist"
 msgstr "Adicionar à playlist"
+
+msgid "+ New Playlist"
+msgstr "+ Nova playlist"
 
 msgid "Files"
 msgstr "Arquivos"
@@ -1942,6 +2015,10 @@ msgstr "Plugin"
 msgid "Plugin Settings"
 msgstr "Configurações do plugin"
 
+#, fuzzy
+msgid "Select a file"
+msgstr "Selecionar tudo"
+
 msgid "Played"
 msgstr "Tocada"
 
@@ -1998,9 +2075,6 @@ msgstr "Não foi possível salvar: itens inválidos ou de streaming"
 
 msgid "Play Next"
 msgstr "Tocar a seguir"
-
-msgid "Add to Queue"
-msgstr "Adicionar à fila"
 
 msgid "Custom"
 msgstr "Personalizado"
@@ -2145,14 +2219,48 @@ msgstr ""
 "\n"
 "Baixar e reinstalar mesmo assim? Isso pode demorar."
 
+#, fuzzy
+msgid "Create a plugin"
+msgstr "Escolher plugins"
+
+msgid "Create a theme"
+msgstr ""
+
+msgid "Creator guides"
+msgstr ""
+
 msgid "Buy Me a Coffee"
 msgstr "Me pague um café"
 
 msgid "Scan with your phone to support Compás Player on PayPal"
 msgstr "Escaneie com o celular para apoiar o Compás Player no PayPal"
 
+msgid "Scan for the full guide"
+msgstr ""
+
+msgid "github.com/Starnished66/compas-player"
+msgstr ""
+
+msgid "Guide: docs/CREATING.md"
+msgstr ""
+
+msgid "Write a Lua plugin on your computer. Copy its .lua file to the .plugins folder on your SD card."
+msgstr ""
+
+msgid "Open More > Plugins > Refresh Plugins. Scan for a working example and the full API guide."
+msgstr ""
+
+msgid "Edit a .theme text file on your computer. Copy it to the Themes folder on your SD card, then select it in More > Themes."
+msgstr ""
+
+msgid "Scan for a starter theme and instructions. To redesign the player screen, see the XML layout guide linked there."
+msgstr ""
+
 msgid "Compás Player"
 msgstr "Compás Player"
+
+msgid "Create plugins & themes"
+msgstr ""
 
 msgid "Developer Options"
 msgstr "Opções do desenvolvedor"
@@ -3214,6 +3322,9 @@ msgstr "Controles de energia"
 
 msgid "Playback and device actions"
 msgstr "Ações de reprodução e do aparelho"
+
+#~ msgid "Back"
+#~ msgstr "Voltar"
 
 #~ msgid "No .upt firmware file found on SD card"
 #~ msgstr "Nenhum arquivo de firmware .upt no cartão SD"

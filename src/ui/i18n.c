@@ -90,10 +90,17 @@ const char * i18n_tr(const char * english)
 
 unsigned i18n_plural_index(const char * code, long n)
 {
-    /* Must match each catalog's Plural-Forms header. pt_BR and fr: 0 and 1
-     * are singular (plural=(n > 1)). en, es, it: only exactly one is.
-     * TODO(ru): three forms (n%10==1 && n%100!=11 -> 0; n%10 in 2..4 and
-     * n%100 not in 12..14 -> 1; else 2). */
+    /* Must match each catalog's Plural-Forms header. Russian and Ukrainian
+     * distinguish one, few, and many; the teens always use the many form.
+     * pt_BR and fr treat 0 and 1 as singular. The other two-form catalogs,
+     * including European Portuguese, use singular only for exactly one. */
+    if (code && (strcmp(code, "ru") == 0 || strcmp(code, "uk") == 0)) {
+        long ones = n % 10;
+        long tens = n % 100;
+        if (ones == 1 && tens != 11) return 0u;
+        if (ones >= 2 && ones <= 4 && (tens < 12 || tens > 14)) return 1u;
+        return 2u;
+    }
     if (code && (strcmp(code, "pt_BR") == 0 || strcmp(code, "fr") == 0))
         return n > 1 ? 1u : 0u;
     return n == 1 ? 0u : 1u;

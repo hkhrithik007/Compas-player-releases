@@ -315,7 +315,29 @@ static void rebuild_info_text(const audio_current_format_info_t * runtime, bool 
         if (!local_path[0] && runtime_valid && !runtime->is_stream &&
             !strstr(runtime->path, "://"))
             local_path = runtime->path;
-        add_info_line(TR("Location"), local_path);
+        /* Display the card name without changing the path used for I/O. */
+        const char * card_path = NULL;
+        const char * card_roots[] = { "/data/mnt/sd_0", "/usr/data/mnt/sd_0"
+#ifdef HOST_BUILD
+            , "./music"
+#endif
+        };
+        for (size_t i = 0; i < sizeof(card_roots) / sizeof(card_roots[0]); i++) {
+            size_t len = strlen(card_roots[i]);
+            if (strncmp(local_path, card_roots[i], len) == 0 &&
+                (local_path[len] == '/' || local_path[len] == '\0')) {
+                card_path = local_path + len;
+                while (*card_path == '/') card_path++;
+                break;
+            }
+        }
+        if (card_path) {
+            char location[sizeof(current_context.path) + 3];
+            snprintf(location, sizeof(location), "SD/%s", card_path);
+            add_info_line(TR("Location"), location);
+        } else {
+            add_info_line(TR("Location"), local_path);
+        }
     }
 
     if (info_line_count == 0) {

@@ -1,6 +1,6 @@
 Stream Media row icon generation
 
-Generated at 192x192 RGBA by scripts/generate_stream_media_icons.py.
+Row icons: 192x192 RGBA.
 Normal and selected row filenames use the _row and _row_s suffixes.
 Selected files retain the normal artwork, following the custom radio/category icon convention.
 The UI provides the pressed/selected row highlight.
@@ -25,7 +25,7 @@ tidal_row.png and tidal_row_s.png
 
 podcasts_row.png and podcasts_row_s.png
   Original vector-style microphone and broadcast-wave geometry is
-  drawn by the generator in the existing purple/cyan palette.
+  drawn in the existing purple/cyan palette.
 
 Qobuz and Tidal marks are normalized from the supplied stock image files;
 this file does not claim a third-party icon-library source.

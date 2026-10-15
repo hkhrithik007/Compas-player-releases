@@ -31,6 +31,7 @@ bool playlist_files_rename(const char * path, const char * name, char * out, siz
 /* Entry offsets count nonempty, non-comment lines, including unavailable files.
  * to < 0 removes exactly one occurrence; otherwise moves it before offset to. */
 bool playlist_files_edit_entry(const char * path, int from, int to);
+typedef bool (*playlist_files_path_provider)(void * context, int index, const char ** path);
 /* playlist_files_edit_entry() that first rereads the entries (as
  * playlist_files_read_ex() resolves them) under the same lock and lets
  * check accept or refuse them, so a revision check cannot race another
@@ -41,7 +42,6 @@ playlist_edit_status_t playlist_files_edit_entry_checked(const char * path, int 
                                                          playlist_files_entries_check check, void * context);
 bool playlist_files_write_new(const char * dir, const char * name,
                               const char * const * paths, int count, char * out, size_t size);
-typedef bool (*playlist_files_path_provider)(void * context, int index, const char ** path);
 bool playlist_files_write_new_stream(const char * dir, const char * name,
                                      int count, playlist_files_path_provider provider,
                                      void * context, char * out, size_t size);
@@ -70,6 +70,10 @@ playlist_import_status_t playlist_files_import_stream(const char * dir, const ch
  * file (but not its parent directory) if it doesn't already exist. Returns
  * false if the file can't be opened for appending. */
 bool playlist_files_append(const char * m3u_path, const char * song_path);
+/* Atomically appends paths supplied by a bounded/streaming caller. Existing
+ * contents and supplied entries are published together or left untouched. */
+bool playlist_files_append_stream(const char * m3u_path, int count,
+                                  playlist_files_path_provider provider, void * context);
 
 /* True if song_path already appears as a line in the M3U file at m3u_path
  * (exact string match). False if the file doesn't exist/can't be read, or

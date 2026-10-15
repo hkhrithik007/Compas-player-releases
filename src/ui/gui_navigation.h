@@ -74,6 +74,9 @@ void nav_pop_ex(bool forward, bool vertical, bool reveal);
  * back-swipe), matching nav_push_stack_only()'s own reasoning: the actual
  * lv_screen_load() must wait for slide_transition_done_cb(). */
 void nav_pop_stack_only(void);
+/* Pop and load the previous screen without a transition. Reserved for a
+ * transient interstitial whose caller must immediately start navigation. */
+void nav_pop_immediate(void);
 void nav_remove_stack_slot(int index);
 void nav_reset_to_home(void);
 /* Stack-only counterpart to nav_reset_to_home() -- collapses nav_stack back

@@ -98,6 +98,7 @@ static void reference_s16(const int16_t * in, int16_t * out, size_t frames,
 static void test_defaults_and_setter(void) {
     idle();
     assert(peq_get_crossfeed() == 0.0);
+    assert(peq_get_crossfeed_angle() == 0);
     assert(PEQ_CROSSFEED_SUGGESTED > 0.0 && PEQ_CROSSFEED_SUGGESTED < 1.0);
     peq_set_crossfeed(PEQ_CROSSFEED_SUGGESTED);
     assert(fabs(peq_get_crossfeed() - PEQ_CROSSFEED_SUGGESTED) < 1e-6);
@@ -111,11 +112,71 @@ static void test_defaults_and_setter(void) {
     assert(peq_get_crossfeed() == 1.0);
     peq_reset_to_defaults();
     assert(peq_get_crossfeed() == 0.0);
+    assert(peq_get_crossfeed_angle() == 0);
     assert(fabs(peq_get_stereo_width() - 1.0) < 1e-6);
+}
+
+static unsigned int expected_crossfeed_tap(unsigned int rate, int angle) {
+    static const int angles[] = { 0, 30, 45, 60, 90 };
+    static const unsigned int delays_us[] = { 0, 261, 381, 488, 655 };
+    for (size_t i = 0; i < sizeof angles / sizeof angles[0]; i++) {
+        if (angles[i] == angle)
+            return (unsigned int) floor((double) delays_us[i] * rate / 1000000.0 + 0.5);
+    }
+    assert(0 && "unsupported test angle");
+    return 0;
+}
+
+static void test_angle_impulse_delay_s16(unsigned int rate, int angle) {
+    size_t pulse = ramp_frames(rate) + 2;
+    size_t frames = pulse + expected_crossfeed_tap(rate, angle) + 8;
+    int16_t * pcm = calloc(frames * 2, sizeof(*pcm));
+    assert(pcm);
+    pcm[pulse * 2] = 12000;
+
+    idle();
+    peq_set_crossfeed(1.0);
+    peq_set_crossfeed_angle(angle);
+    peq_process(pcm, frames, 2, rate);
+
+    size_t first = 0;
+    while (first < frames && pcm[first * 2 + 1] == 0) first++;
+    assert(first == pulse + expected_crossfeed_tap(rate, angle));
+    free(pcm);
+}
+
+static void test_angle_impulse_delay_s32(unsigned int rate, int angle) {
+    size_t pulse = ramp_frames(rate) + 2;
+    size_t frames = pulse + expected_crossfeed_tap(rate, angle) + 8;
+    int32_t * pcm = calloc(frames * 2, sizeof(*pcm));
+    assert(pcm);
+    pcm[pulse * 2] = 3000000;
+
+    idle();
+    peq_set_crossfeed(1.0);
+    peq_set_crossfeed_angle(angle);
+    peq_process_s32(pcm, frames, 2, rate);
+
+    size_t first = 0;
+    while (first < frames && pcm[first * 2 + 1] == 0) first++;
+    assert(first == pulse + expected_crossfeed_tap(rate, angle));
+    free(pcm);
+}
+
+static void test_angle_impulse_delays(void) {
+    static const unsigned int rates[] = { 44100, 48000, 192000 };
+    static const int angles[] = { 0, 30, 45, 60, 90 };
+    for (size_t r = 0; r < sizeof rates / sizeof rates[0]; r++) {
+        for (size_t a = 0; a < sizeof angles / sizeof angles[0]; a++) {
+            test_angle_impulse_delay_s16(rates[r], angles[a]);
+            test_angle_impulse_delay_s32(rates[r], angles[a]);
+        }
+    }
 }
 
 static void test_disabled_and_mono_identity(void) {
     idle();
+    peq_set_crossfeed_angle(90);
     int16_t stereo[] = {0, 0, 1, -1, 32767, -32768, -32768, 32767, 1234, -5678};
     int16_t copy[10];
     memcpy(copy, stereo, sizeof stereo);
@@ -374,6 +435,7 @@ static void test_transitions(void) {
 
     idle();
     peq_set_crossfeed(1.0);
+    peq_set_crossfeed_angle(90);
     preroll(48000);
     int16_t loud[2];
     for (int i = 0; i < 500; i++) {
@@ -474,36 +536,54 @@ static void test_profiles(void) {
     snprintf(bad, sizeof bad, "%s/bad.peq", dir);
 
     peq_set_crossfeed(0.4);
+    peq_set_crossfeed_angle(45);
     peq_set_stereo_width(1.25);
     peq_set_preamp_db(-1.5);
     assert(peq_save_to_path(path));
     peq_set_crossfeed(0.0);
+    peq_set_crossfeed_angle(0);
     peq_set_stereo_width(1.0);
     peq_set_preamp_db(0.0);
     assert(peq_load_from_path(path));
     assert(fabs(peq_get_crossfeed() - 0.4) < 1e-5);
+    assert(peq_get_crossfeed_angle() == 45);
     assert(fabs(peq_get_stereo_width() - 1.25) < 1e-5);
     assert(fabs(peq_get_preamp_db() + 1.5) < 1e-6);
+
+    static const int angles[] = { 0, 30, 45, 60, 90 };
+    for (size_t i = 0; i < sizeof angles / sizeof angles[0]; i++) {
+        peq_set_crossfeed_angle(angles[i]);
+        assert(peq_save_to_path(path));
+        peq_set_crossfeed_angle(-1);
+        assert(peq_get_crossfeed_angle() == 0);
+        assert(peq_load_from_path(path));
+        assert(peq_get_crossfeed_angle() == angles[i]);
+    }
 
     FILE * f = fopen(legacy, "w");
     assert(f);
     fputs("bypass=0\npreamp=0.00\nstereo_width=1.500000\nband3_enabled=1\nband3_gain=2.50\n", f);
     fclose(f);
     peq_set_crossfeed(0.8);
+    peq_set_crossfeed_angle(90);
     assert(peq_load_from_path(legacy));
     assert(peq_get_crossfeed() == 0.0);
+    assert(peq_get_crossfeed_angle() == 0);
     assert(fabs(peq_get_stereo_width() - 1.5) < 1e-5);
     assert(peq_get_band(3)->enabled);
     assert(fabs(peq_get_band(3)->gain_db - 2.5) < 1e-6);
 
     f = fopen(bad, "w");
     assert(f);
-    fputs("bypass=0\npreamp=1.00\ncrossfeed=bogus\ncrossfeed=nan\ncrossfeed=inf\n"
+    fputs("bypass=0\npreamp=1.00\ncrossfeed_angle=bogus\ncrossfeed_angle=31\n"
+          "crossfeed=bogus\ncrossfeed=nan\ncrossfeed=inf\n"
           "crossfeed=1.5\ncrossfeed=\ncrossfeed=0.25xyz\nband1_enabled=1\n", f);
     fclose(f);
     peq_set_crossfeed(0.7);
+    peq_set_crossfeed_angle(60);
     assert(peq_load_from_path(bad));
     assert(peq_get_crossfeed() == 1.0); /* 1.5 is the last finite in-range-clamped value */
+    assert(peq_get_crossfeed_angle() == 0);
     assert(fabs(peq_get_preamp_db() - 1.0) < 1e-6);
     assert(peq_get_band(1)->enabled);
 
@@ -513,6 +593,7 @@ static void test_profiles(void) {
     fclose(f);
     assert(peq_load_from_path(bad));
     assert(peq_get_crossfeed() == 0.0);
+    assert(peq_get_crossfeed_angle() == 0);
 
     peq_set_crossfeed(0.2);
     assert(!peq_load_from_path("/tmp/peq-crossfeed-missing-file"));
@@ -796,6 +877,7 @@ static void test_reverse_transient_headroom(void) {
 int main(void) {
     test_defaults_and_setter();
     test_disabled_and_mono_identity();
+    test_angle_impulse_delays();
     test_center_identity_and_opposite_contribution();
     test_frequency_dependence();
     test_reference_order_and_formats();

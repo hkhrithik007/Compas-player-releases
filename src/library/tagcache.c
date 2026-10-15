@@ -291,8 +291,16 @@ static const char * ascii_casestr(const char * hay, const char * needle) {
     return NULL;
 }
 
-static void db_path(char * out, size_t out_size, const char * name) {
-    snprintf(out, out_size, "%s/%s", db_dir, name);
+static bool db_path(char * out, size_t out_size, const char * name) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    if (!name) return false;
+    int n = snprintf(out, out_size, "%s/%s", db_dir, name);
+    if (n < 0 || (size_t) n >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
 }
 
 /* 1 = logical path still names the pinned directory, 0 = a different
@@ -621,16 +629,14 @@ static void unlink_other_generations(int32_t keep, int32_t previous) {
             long parsed = strtol(name + sizeof(refs_prefix) - 1, &end, 10);
             if (*end == '\0' && parsed > 0 && parsed <= INT32_MAX &&
                 (parsed == keep || parsed == previous)) continue;
-            db_path(path, sizeof(path), name);
-            unlink(path);
+            if (db_path(path, sizeof(path), name)) unlink(path);
             continue;
         }
         if (strncmp(name, "migration.g", 11) == 0) {
             char *end;
             long gen = strtol(name + 11, &end, 10);
             if (*end == '\0' && gen > 0 && gen != keep && gen != previous) {
-                db_path(path, sizeof(path), name);
-                unlink(path);
+                if (db_path(path, sizeof(path), name)) unlink(path);
             }
             continue;
         }
@@ -638,20 +644,17 @@ static void unlink_other_generations(int32_t keep, int32_t previous) {
         if (gpos) {
             int gen = atoi(gpos + 6);
             if ((keep > 0 && gen == keep) || (previous > 0 && gen == previous)) continue;
-            db_path(path, sizeof(path), name);
-            unlink(path);
+            if (db_path(path, sizeof(path), name)) unlink(path);
             continue;
         }
         size_t n = strlen(name);
         if (n >= 4 && strcmp(name + n - 4, ".new") == 0) {
-            db_path(path, sizeof(path), name);
-            unlink(path);
+            if (db_path(path, sizeof(path), name)) unlink(path);
             continue;
         }
         if (keep > 0 && (strcmp(name, "database_idx.tcd") == 0 ||
                          (strncmp(name, "database_", 9) == 0 && n >= 4 && strcmp(name + n - 4, ".tcd") == 0))) {
-            db_path(path, sizeof(path), name);
-            unlink(path);
+            if (db_path(path, sizeof(path), name)) unlink(path);
         }
     }
     closedir(d);
@@ -2722,6 +2725,19 @@ int tagcache_album_group_sorted_offset(int sort, const char *album, const char *
                       (off_t)canonical * sizeof(sorted)) != STATS_READ_OK ||
         sorted < 0 || sorted >= tagcache_group_count(TAGCACHE_GROUP_ALBUM)) return canonical;
     return sorted;
+}
+
+bool tagcache_album_group_sorted_rank(int sort, int canonical_rank, int *sorted_rank_out) {
+    if (!db_open || !sorted_rank_out || sort < 1 || sort > 2 ||
+        canonical_rank < 0 || canonical_rank >= tagcache_group_count(TAGCACHE_GROUP_ALBUM) ||
+        !tagcache_album_sort_available(sort)) return false;
+    int32_t sorted;
+    int index = sort - 1;
+    if (stats_read_at(reader_album_inverse_fd[index], &sorted, sizeof(sorted),
+                      (off_t)canonical_rank * sizeof(sorted)) != STATS_READ_OK ||
+        sorted < 0 || sorted >= tagcache_group_count(TAGCACHE_GROUP_ALBUM)) return false;
+    *sorted_rank_out = sorted;
+    return true;
 }
 
 int tagcache_group_index(int kind, const char *name, const char *aa) {

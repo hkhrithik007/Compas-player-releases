@@ -150,6 +150,12 @@ lv_obj_t * song_count_label = NULL;
 lv_obj_t * song_title_label = NULL;
 lv_obj_t * quality_pill = NULL;
 lv_obj_t * format_badge_label = NULL;
+typedef struct {
+    bool valid;
+    int32_t count_x, count_width;
+    int32_t pill_x, pill_width, gap;
+} player_count_row_geometry_t;
+static player_count_row_geometry_t player_count_row_geometry;
 lv_obj_t * play_mode_img = NULL;
 static lv_obj_t * order_icon = NULL;
 lv_obj_t * favorite_circle = NULL;
@@ -165,6 +171,119 @@ lv_obj_t * volume_slider = NULL;
 
 static lv_obj_t * pos_label = NULL;
 static lv_obj_t * dur_label = NULL;
+
+static void player_count_row_refresh(void);
+
+/* Keep the original count and badge geometry as the baseline. Each update is
+ * recomputed from that snapshot so changing queue or format text cannot cause
+ * cumulative position or width drift. */
+static void player_set_song_count(int index, int total) {
+    if (!song_count_label) return;
+    char text[48];
+    snprintf(text, sizeof(text), "%d/%d", index + 1, total);
+    if (strcmp(lv_label_get_text(song_count_label), text) == 0) return;
+    lv_label_set_text(song_count_label, text);
+    player_count_row_refresh();
+}
+
+static void player_set_format_badge_text(const char * text) {
+    if (!format_badge_label) return;
+    if (strcmp(lv_label_get_text(format_badge_label), text) == 0) return;
+    lv_label_set_text(format_badge_label, text);
+    player_count_row_refresh();
+}
+
+static int32_t player_label_text_width(lv_obj_t * label) {
+    if (!label) return 0;
+    const char * text = lv_label_get_text(label);
+    const lv_font_t * font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    if (!text || !font || !text[0]) return 0;
+    lv_point_t size;
+    lv_text_get_size(&size, text, font,
+                     lv_obj_get_style_text_letter_space(label, LV_PART_MAIN),
+                     lv_obj_get_style_text_line_space(label, LV_PART_MAIN),
+                     LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return size.x > 0 ? size.x : 0;
+}
+
+static void player_count_row_refresh(void) {
+    player_count_row_geometry_t * g = &player_count_row_geometry;
+    if (!g->valid || !song_count_label || !quality_pill || !format_badge_label) return;
+
+    const int32_t count_text_width = player_label_text_width(song_count_label);
+    const int32_t count_content_width = count_text_width + (count_text_width > 0 ? 1 : 0) +
+        lv_obj_get_style_pad_left(song_count_label, LV_PART_MAIN) +
+        lv_obj_get_style_pad_right(song_count_label, LV_PART_MAIN) +
+        2 * lv_obj_get_style_border_width(song_count_label, LV_PART_MAIN);
+    int32_t badge_text_width = player_label_text_width(format_badge_label);
+    if (badge_text_width == 0) {
+        /* An empty badge keeps the full authored slot available for a later
+         * format update, avoiding a needless jump when metadata arrives. */
+        badge_text_width = g->pill_width;
+    } else {
+        badge_text_width += lv_obj_get_style_pad_left(format_badge_label, LV_PART_MAIN) +
+                            lv_obj_get_style_pad_right(format_badge_label, LV_PART_MAIN) +
+                            2 * lv_obj_get_style_border_width(format_badge_label, LV_PART_MAIN) +
+                            lv_obj_get_style_pad_left(quality_pill, LV_PART_MAIN) +
+                            lv_obj_get_style_pad_right(quality_pill, LV_PART_MAIN) +
+                            2 * lv_obj_get_style_border_width(quality_pill, LV_PART_MAIN);
+    }
+
+    int32_t count_width = count_content_width > g->count_width ? count_content_width : g->count_width;
+    int32_t growth_limit = g->pill_width > badge_text_width ? g->pill_width - badge_text_width : 0;
+    if (count_width > g->count_width + growth_limit)
+        count_width = g->count_width + growth_limit;
+
+    int32_t pill_x = g->count_x + count_width + g->gap;
+    int32_t pill_width = g->pill_x + g->pill_width - pill_x;
+    lv_obj_set_width(song_count_label, count_width);
+    lv_obj_set_x(quality_pill, pill_x);
+    lv_obj_set_width(quality_pill, pill_width);
+}
+
+static void player_count_row_capture(lv_obj_t * count, lv_obj_t * pill, lv_obj_t * badge) {
+    player_count_row_geometry = (player_count_row_geometry_t){0};
+    if (!count || !pill || !badge || lv_obj_get_parent(count) != lv_obj_get_parent(pill) ||
+        lv_obj_get_parent(badge) != pill || lv_obj_get_child_count(pill) != 1) return;
+    lv_obj_t * parent = lv_obj_get_parent(count);
+    if (!parent || lv_obj_get_style_layout(parent, LV_PART_MAIN) != LV_LAYOUT_NONE) return;
+    lv_align_t count_align = lv_obj_get_style_align(count, LV_PART_MAIN);
+    lv_align_t pill_align = lv_obj_get_style_align(pill, LV_PART_MAIN);
+    lv_align_t badge_align = lv_obj_get_style_align(badge, LV_PART_MAIN);
+    if ((count_align != LV_ALIGN_DEFAULT && count_align != LV_ALIGN_TOP_LEFT) ||
+        (pill_align != LV_ALIGN_DEFAULT && pill_align != LV_ALIGN_TOP_LEFT) ||
+        (badge_align != LV_ALIGN_DEFAULT && badge_align != LV_ALIGN_TOP_LEFT) ||
+        lv_obj_get_style_x(count, LV_PART_MAIN) != lv_obj_get_x(count) ||
+        lv_obj_get_style_y(count, LV_PART_MAIN) != lv_obj_get_y(count) ||
+        lv_obj_get_style_x(pill, LV_PART_MAIN) != lv_obj_get_x(pill) ||
+        lv_obj_get_style_y(pill, LV_PART_MAIN) != lv_obj_get_y(pill) ||
+        !LV_COORD_IS_PX(lv_obj_get_style_x(count, LV_PART_MAIN)) ||
+        !LV_COORD_IS_PX(lv_obj_get_style_y(count, LV_PART_MAIN)) ||
+        !LV_COORD_IS_PX(lv_obj_get_style_x(pill, LV_PART_MAIN)) ||
+        !LV_COORD_IS_PX(lv_obj_get_style_y(pill, LV_PART_MAIN)) ||
+        lv_obj_get_style_x(badge, LV_PART_MAIN) != 0 ||
+        !LV_COORD_IS_PCT(lv_obj_get_style_width(badge, LV_PART_MAIN)) ||
+        LV_COORD_GET_PCT(lv_obj_get_style_width(badge, LV_PART_MAIN)) != 100) return;
+    int32_t count_authored_width = lv_obj_get_style_width(count, LV_PART_MAIN);
+    int32_t pill_authored_width = lv_obj_get_style_width(pill, LV_PART_MAIN);
+    if (!LV_COORD_IS_PX(count_authored_width) || count_authored_width <= 0 ||
+        !LV_COORD_IS_PX(pill_authored_width) || pill_authored_width <= 0) return;
+    int32_t count_x = lv_obj_get_x(count), pill_x = lv_obj_get_x(pill);
+    int32_t count_width = lv_obj_get_width(count), pill_width = lv_obj_get_width(pill);
+    int32_t gap = pill_x - (count_x + count_width);
+    if (count_width <= 0 || pill_width <= 0 || gap < 0 ||
+        lv_obj_get_y(count) + lv_obj_get_height(count) <= lv_obj_get_y(pill) ||
+        lv_obj_get_y(pill) + lv_obj_get_height(pill) <= lv_obj_get_y(count)) return;
+
+    player_count_row_geometry = (player_count_row_geometry_t){
+        .valid = true,
+        .count_x = count_x,
+        .count_width = count_width,
+        .pill_x = pill_x,
+        .pill_width = pill_width,
+        .gap = gap,
+    };
+}
 
 /* Player layout state, see the layout section above build_player_screen().
  * Declared here because the metadata and lyrics code read it. */
@@ -303,6 +422,13 @@ lv_obj_t * volume_popup = NULL;
 lv_obj_t * volume_popup_backdrop = NULL;
 lv_obj_t * more_menu_popup = NULL;
 lv_obj_t * more_menu_popup_backdrop = NULL;
+
+typedef struct {
+    uint32_t registry_generation;
+    int index;
+} player_plugin_menu_callback_t;
+
+static player_plugin_menu_callback_t player_plugin_menu_callbacks[PLUGIN_MAX_PLAYER_LIST_ITEMS];
 
 static lv_obj_t * volume_popup_track = NULL;
 static lv_obj_t * volume_popup_speaker_icon = NULL;
@@ -1141,9 +1267,12 @@ static bool player_read_flac_format(const char * path, audio_current_format_info
                         ((unsigned int) header[19] << 4) | (header[20] >> 4);
     unsigned int depth = (((header[20] & 1u) << 4) | (header[21] >> 4)) + 1;
     if (!rate || depth < 4) return false;
+    /* A truncated path would attach this format snapshot to the wrong file. */
+    size_t path_len = strlen(path);
+    if (path_len >= sizeof(out->path)) return false;
     memset(out, 0, sizeof(*out));
     out->valid = true;
-    snprintf(out->path, sizeof(out->path), "%s", path);
+    memcpy(out->path, path, path_len + 1);
     out->source_sample_rate = rate;
     out->source_bit_depth = depth;
     return true;
@@ -1426,17 +1555,13 @@ static void player_artwork_cache_service(lv_timer_t * timer) {
     }
 }
 
-/* Called every tick from update_timer_cb. Applies the finished decode to
+/* Called from the player UI timer. Applies the finished decode to
  * cover_img/player_overlay_panel -- unless playlist_index has already moved
  * on to a different track by the time this lands (another launch_cover_
  * decode() call superseded it via cover_decode_pending, in which case that
  * one is now either running or about to be), in which case the result is
  * just discarded rather than briefly flashing a stale track's art. */
 void poll_cover_decode(void) {
-    /* Pressure checks also run during transitions. The ordinary maintenance
-     * poll starts optional idle work; a short-lived timer continues slices. */
-    player_artwork_cache_service(NULL);
-
     /* Slides display owned snapshots. Applying artwork now cannot update
      * those frames, but image/layout work can delay their presentation.
      * Leave the completed result owned by the worker until the next poll. */
@@ -1612,6 +1737,12 @@ void poll_cover_decode(void) {
         cover_decode_pending.picture_data = NULL;
         cover_decode_pending.picture_size = 0;
     }
+}
+
+/* Keep optional cache pressure checks and idle candidate cleanup on the
+ * slower system timer; decoding completion polling remains cheap. */
+void gui_player_service_artwork_cache(void) {
+    player_artwork_cache_service(NULL);
 }
 
 void gui_player_begin_cover_reload(void) {
@@ -2161,7 +2292,7 @@ static void request_track_metadata(int index, bool notify, bool probe, bool audi
     if (dur_label) lv_label_set_text(dur_label, "--:--");
 
     if (song_count_label) {
-        lv_label_set_text_fmt(song_count_label, "%d/%d", index + 1, playlist_count);
+        player_set_song_count(index, playlist_count);
         lv_obj_remove_flag(song_count_label, LV_OBJ_FLAG_HIDDEN);
     }
     player_transition_mark_dirty(); /* title/artist/format badge/progress reset above all just changed player_screen's own content -- see the cache's own doc comment */
@@ -2312,6 +2443,14 @@ static void more_menu_information_cb(lv_event_t * e) {
     gui_track_info_open();
 }
 
+static void more_menu_plugin_item_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    hide_more_menu_popup();
+    player_plugin_menu_callback_t * callback = lv_event_get_user_data(e);
+    if (!callback || callback->registry_generation != plugin_manager_get_list_registry_generation()) return;
+    plugin_manager_player_list_item_clicked(callback->index);
+}
+
 static void more_menu_eq_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     hide_more_menu_popup();
@@ -2327,10 +2466,15 @@ static void more_menu_delete_cb(lv_event_t * e) {
     gui_popup_show(&delete_song_popup);
 }
 
+static void build_more_menu_popup(void);
+
 static void more_icon_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     if (playlist_index < 0) return;
 
+    /* Plugin availability can change after a reload. Rebuild the popup from
+     * the current registry each time it opens. */
+    build_more_menu_popup();
     lv_obj_remove_flag(more_menu_popup_backdrop, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(more_menu_popup, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(more_menu_popup_backdrop);
@@ -2338,16 +2482,31 @@ static void more_icon_event_cb(lv_event_t * e) {
 }
 
 static void build_more_menu_popup(void) {
-    const menu_popup_row_t rows[] = {
-        { TR("Queue"), more_menu_queue_cb, false },
-        { TR("Add to Playlist"), more_menu_add_to_playlist_cb, false },
-        { TR("Information"), more_menu_information_cb, false },
-        { TR("EQ"), more_menu_eq_cb, false },
-        { TR("Delete"), more_menu_delete_cb, true },
-        { TR("Cancel"), more_menu_popup_backdrop_cb, false, true },
-    };
-    more_menu_popup = build_menu_popup(rows, (int) (sizeof(rows) / sizeof(rows[0])), more_menu_popup_backdrop_cb,
-                                        &more_menu_popup_backdrop);
+    if (more_menu_popup) { lv_obj_delete(more_menu_popup); more_menu_popup = NULL; }
+    if (more_menu_popup_backdrop) { lv_obj_delete(more_menu_popup_backdrop); more_menu_popup_backdrop = NULL; }
+
+    menu_popup_row_t rows[6 + PLUGIN_MAX_PLAYER_LIST_ITEMS];
+    int row_count = 0;
+    rows[row_count++] = (menu_popup_row_t) { TR("Queue"), more_menu_queue_cb, false };
+    rows[row_count++] = (menu_popup_row_t) { TR("Add to Playlist"), more_menu_add_to_playlist_cb, false };
+    rows[row_count++] = (menu_popup_row_t) { TR("Information"), more_menu_information_cb, false };
+
+    int plugin_count = plugin_manager_get_player_list_item_count();
+    if (plugin_count > PLUGIN_MAX_PLAYER_LIST_ITEMS) plugin_count = PLUGIN_MAX_PLAYER_LIST_ITEMS;
+    uint32_t generation = plugin_manager_get_list_registry_generation();
+    for (int i = 0; i < plugin_count; i++) {
+        player_plugin_menu_callbacks[i].registry_generation = generation;
+        player_plugin_menu_callbacks[i].index = i;
+        rows[row_count++] = (menu_popup_row_t) {
+            plugin_manager_get_player_list_item_label(i), more_menu_plugin_item_cb, false,
+            false, &player_plugin_menu_callbacks[i]
+        };
+    }
+
+    rows[row_count++] = (menu_popup_row_t) { TR("EQ"), more_menu_eq_cb, false };
+    rows[row_count++] = (menu_popup_row_t) { TR("Delete"), more_menu_delete_cb, true };
+    rows[row_count++] = (menu_popup_row_t) { TR("Cancel"), more_menu_popup_backdrop_cb, false, true };
+    more_menu_popup = build_menu_popup(rows, row_count, more_menu_popup_backdrop_cb, &more_menu_popup_backdrop);
 }
 
 /* Song context menu moved to gui_queue.c. */
@@ -3956,17 +4115,14 @@ static lv_timer_t * pending_progress_seek_timer = NULL;
 static double pending_progress_seek_percent = 0.0;
 /* Best-effort ESTIMATE of where that percent lands, in seconds -- used only
  * by the "has the seek landed yet" poll heuristic below, never passed to
- * audio_seek()/audio_seek_percent() itself. Fine if this is occasionally
- * stale (same track-switch race as above): the only consequence is the
- * progress UI falling back to its normal 8-tick timeout instead of
- * detecting the landed position early, not an incorrect seek. */
+ * audio_seek()/audio_seek_percent() itself. */
 static double pending_progress_seek_seconds = 0.0;
 bool user_seeking = false;
 /* True from finger-up until audio position catches the requested seek, so
- * the 500ms progress poll does not yank the knob back to the pre-seek
+ * the progress poll does not yank the knob back to the pre-seek
  * playhead while the playback thread is applying it. */
 static bool progress_awaiting_seek = false;
-static int progress_awaiting_seek_ticks = 0;
+static uint32_t progress_awaiting_seek_started_ms = 0;
 
 static void cancel_pending_progress_seek(void) {
     if (pending_progress_seek_timer) {
@@ -4058,7 +4214,7 @@ static void progress_slider_event_cb(lv_event_t * e) {
         pending_progress_seek_seconds = duration * ((double) percent / 100.0);
         displayed_progress_percent = percent;
         progress_awaiting_seek = (duration > 0.0);
-        progress_awaiting_seek_ticks = 0;
+        progress_awaiting_seek_started_ms = lv_tick_get();
         cancel_pending_progress_seek();
         pending_progress_seek_timer = lv_timer_create(pending_progress_seek_timer_cb, 150, NULL);
         lv_timer_set_repeat_count(pending_progress_seek_timer, 1);
@@ -4147,10 +4303,8 @@ lv_obj_t * player_layout_create_builtin(lv_obj_t * scr) {
     lv_obj_add_style(fav_icon, &icon_press_style, LV_STATE_PRESSED);
     lv_obj_center(fav_icon);
 
-    /* The supplied reference is the R1 480x800 composition. Keep the
-     * existing compact typography on shorter panels so the three metadata
-     * lines do not collide with the cover there. */
-    const bool reference_player = BOARD_SCREEN_HEIGHT >= 800;
+    /* The supplied reference is the R1 480x800 composition. These compact
+     * fonts keep the three metadata lines clear of the cover on shorter panels. */
     const lv_font_t * player_title_font = &app_font_player_title;
     const lv_font_t * player_meta_font = &app_font_player_meta;
 
@@ -4200,7 +4354,14 @@ lv_obj_t * player_layout_create_builtin(lv_obj_t * scr) {
      * back arrow on the Player. Retain the transparent hit target so the
      * established tap-to-dismiss behavior remains available. */
     lv_obj_t * dismiss_arrow = lv_obj_get_child(dismiss, 0);
-    if (dismiss_arrow) lv_obj_add_flag(dismiss_arrow, LV_OBJ_FLAG_HIDDEN);
+    if (dismiss_arrow) {
+        /* The Now Playing dismiss target intentionally retains its original
+         * hidden stock back asset; the visible navigation back glyph is for
+         * standard screen headers only. */
+        lv_image_set_src(dismiss_arrow, asset_path("sub_back/btn_back.png"));
+        lv_obj_set_style_image_recolor_opa(dismiss_arrow, LV_OPA_TRANSP, 0);
+        lv_obj_add_flag(dismiss_arrow, LV_OBJ_FLAG_HIDDEN);
+    }
 
     /* Quality pill */
     lv_obj_t * pill = lv_obj_create(scr);
@@ -4413,6 +4574,7 @@ static void player_screen_loaded_cb(lv_event_t * e) {
  * caller can discard the tree and fall back to the built-in layout. */
 static bool player_bind_widgets(lv_obj_t * scr) {
     const bool builtin = player_layout_builtin;
+    player_count_row_geometry = (player_count_row_geometry_t){0};
 
     /* Everything that can fail comes first. */
     lv_obj_t * r_cover_card = player_find_role(scr, "cover_card", NULL);
@@ -4608,6 +4770,24 @@ static bool player_bind_widgets(lv_obj_t * scr) {
         if (r_order) lv_image_set_src(r_order, asset_path(play_mode_icon_asset((play_mode_t) current_settings.play_mode)));
         if (!lv_image_get_src(r_cover_img)) lv_image_set_src(r_cover_img, asset_path("playing_plane/default_cover_565.png"));
     }
+
+    /* Queue counts must stay on one line even when an XML layout gives the
+     * label a narrow fixed width. Keep content-width labels content-sized so
+     * their existing layout behavior is preserved. */
+    if (r_count) {
+        const lv_font_t * count_font = lv_obj_get_style_text_font(r_count, LV_PART_MAIN);
+        int32_t line_height = count_font ? lv_font_get_line_height(count_font) : 0;
+        int32_t vertical_padding = lv_obj_get_style_pad_top(r_count, LV_PART_MAIN) +
+                                   lv_obj_get_style_pad_bottom(r_count, LV_PART_MAIN);
+        if (line_height > 0) lv_obj_set_height(r_count, line_height + vertical_padding);
+
+        if (lv_obj_get_style_width(r_count, LV_PART_MAIN) != LV_SIZE_CONTENT)
+            lv_label_set_long_mode(r_count, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    }
+
+    lv_obj_update_layout(scr);
+    player_count_row_capture(r_count, r_pill, r_badge);
+    player_count_row_refresh();
 
     lv_obj_add_flag(r_cover_img, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(r_cover_img, cover_img_tap_cb, LV_EVENT_CLICKED, NULL);
@@ -4860,6 +5040,7 @@ static void player_reset_widget_globals(void) {
     song_title_label = NULL;
     quality_pill = NULL;
     format_badge_label = NULL;
+    player_count_row_geometry = (player_count_row_geometry_t){0};
     order_icon = NULL;
     favorite_circle = NULL;
     favorite_icon = NULL;
@@ -4984,7 +5165,7 @@ static const char * stream_format_hint_name(const char * hint) {
 void refresh_format_badge(void) {
     const char * path = playlist_index >= 0 ? playlist_path_at(playlist_index) : NULL;
     if (!path || !path[0]) {
-        if (format_badge_label) lv_label_set_text(format_badge_label, "");
+        player_set_format_badge_text("");
         gui_shell_update_quick_drawer_format("");
         return;
     }
@@ -5035,8 +5216,7 @@ void refresh_format_badge(void) {
         snprintf(text, sizeof(text), "%s", ext);
     }
     /* Polling unchanged text must not restart its marquee every tick. */
-    if (format_badge_label && strcmp(lv_label_get_text(format_badge_label), text) != 0)
-        lv_label_set_text(format_badge_label, text);
+    player_set_format_badge_text(text);
     gui_shell_update_quick_drawer_format(text);
 }
 
@@ -5129,11 +5309,19 @@ double deferred_resume_position = 0.0;
 static int * shuffle_order = NULL;
 static int shuffle_order_count = 0; /* playlist_count this bag was generated for -- staleness check */
 static int shuffle_pos = -1;        /* index into shuffle_order such that shuffle_order[shuffle_pos] == playlist_index */
+static bool shuffle_rng_seeded = false;
 
 /* Precomputed reshuffled continuation bag for the shuffle-wrap case.
  * Invalidated on playlist change by ensure_shuffle_order_current(). */
 static int * pending_shuffle_order = NULL;
 static uint64_t queue_revision = 1;
+/* Advances only when a caller explicitly starts a track (push_nav=true).
+ * Audio's playback generation and queue revision also advance during normal
+ * gapless playback, so background folder preparation must not use them as an
+ * intent-change signal. */
+static uint64_t playback_intent_epoch = 1;
+
+uint64_t gui_player_playback_intent_epoch(void) { return playback_intent_epoch; }
 
 
 
@@ -5268,6 +5456,12 @@ static void fisher_yates_shuffle(int * arr, int count) {
     }
 }
 
+static void ensure_shuffle_rng_seeded(void) {
+    if (shuffle_rng_seeded) return;
+    srand((unsigned int) time(NULL));
+    shuffle_rng_seeded = true;
+}
+
 /* (Re)generates shuffle_order if it's stale (playlist size changed, or it
  * was never generated) and points shuffle_pos at wherever the currently
  * playing track landed in the new order -- switching into shuffle mode, or
@@ -5276,11 +5470,7 @@ static void fisher_yates_shuffle(int * arr, int count) {
 static void ensure_shuffle_order_current(void) {
     if (shuffle_order && shuffle_order_count == playlist_count) return;
 
-    static bool rng_seeded = false;
-    if (!rng_seeded) {
-        srand((unsigned int) time(NULL));
-        rng_seeded = true;
-    }
+    ensure_shuffle_rng_seeded();
 
     free(shuffle_order);
     shuffle_order = malloc(sizeof(int) * (size_t) playlist_count);
@@ -5780,19 +5970,47 @@ void queue_add_song(const char * path) {
     if (path && path[0]) gui_player_queue_add_many(&path, 1);
 }
 
-void gui_player_queue_add_many(const char * const * paths, int count) {
+static bool queue_budget_add(size_t * total, size_t bytes) {
+    if (*total > SIZE_MAX - bytes) return false;
+    *total += bytes;
+    return true;
+}
+
+static bool queue_batch_fits_budget(const char * const * paths, int count,
+                                    size_t staging_bytes, size_t memory_limit) {
+    if (!paths || count <= 0 || count > INT_MAX - playlist_count ||
+        count > INT_MAX - queued_pending_count) return false;
+    size_t total = staging_bytes;
+    /* Admit the folder's incremental peak only. A retained lazy All Songs
+     * queue can contain tens of thousands of entries and is already resident;
+     * charging it again here made even a tiny folder impossible to append. */
+    if ((size_t)count > SIZE_MAX / (3 * sizeof(char *) + sizeof(int)) ||
+        !queue_budget_add(&total, (size_t)count * (3 * sizeof(char *) + sizeof(int)))) return false;
+    for (int i = 0; i < count; i++) {
+        if (!paths[i] || !queue_budget_add(&total, strlen(paths[i]) + 1)) return false;
+    }
+    return total <= memory_limit;
+}
+
+bool gui_player_queue_try_add_many_bounded(const char * const * paths, int count,
+                                           size_t staging_bytes, size_t memory_limit) {
+    if (!queue_batch_fits_budget(paths, count, staging_bytes, memory_limit)) return false;
+    return gui_player_queue_try_add_many(paths, count);
+}
+
+bool gui_player_queue_try_add_many(const char * const * paths, int count) {
     if (audio_consume_track_advanced()) gui_player_handle_auto_advance();
-    if (count <= 0) return;
-    if (count > INT_MAX - playlist_count || count > INT_MAX - queued_pending_count) return;
+    if (count <= 0) return false;
+    if (count > INT_MAX - playlist_count || count > INT_MAX - queued_pending_count) return false;
 
     char ** copies = calloc((size_t) count, sizeof(*copies));
-    if (!copies) return;
+    if (!copies) return false;
     for (int i = 0; i < count; i++) {
         copies[i] = paths[i] ? strdup(paths[i]) : NULL;
         if (!copies[i]) {
             for (int j = 0; j < count; j++) free(copies[j]);
             free(copies);
-            return;
+            return false;
         }
     }
 
@@ -5811,7 +6029,7 @@ void gui_player_queue_add_many(const char * const * paths, int count) {
         current_settings.last_source_name[0] = '\0';
         settings_save_async(&current_settings);
         show_info_toast(TR("Queue ready. Press Play to start."));
-        return;
+        return true;
     }
     int pos = (queue_next_insert_index >= 0 && queue_next_insert_index <= playlist_count)
         ? queue_next_insert_index : playlist_index + 1;
@@ -5819,7 +6037,7 @@ void gui_player_queue_add_many(const char * const * paths, int count) {
     if (!grown) {
         for (int i = 0; i < count; i++) free(copies[i]);
         free(copies);
-        return;
+        return false;
     }
     playlist = grown;
     int * grown_order = playlist_lazy_sort_order
@@ -5828,7 +6046,7 @@ void gui_player_queue_add_many(const char * const * paths, int count) {
     if (playlist_lazy_sort_order && !grown_order) {
         for (int i = 0; i < count; i++) free(copies[i]);
         free(copies);
-        return;
+        return false;
     }
     if (grown_order) playlist_lazy_sort_order = grown_order;
 
@@ -5847,12 +6065,17 @@ void gui_player_queue_add_many(const char * const * paths, int count) {
     queued_pending_count += count;
     queue_next_insert_index = pos + count;
     queue_shuffle_insert(pos, count);
-    if (song_count_label) lv_label_set_text_fmt(song_count_label, "%d/%d", playlist_index + 1, playlist_count);
+    player_set_song_count(playlist_index, playlist_count);
     arm_next_track_for_audio(playlist_index);
 
     char msg[128];
     snprintf(msg, sizeof(msg), TR_N("Added %d song to queue", "Added %d songs to queue", count), count);
     show_info_toast(msg);
+    return true;
+}
+
+void gui_player_queue_add_many(const char * const * paths, int count) {
+    (void) gui_player_queue_try_add_many(paths, count);
 }
 
 void queue_remove_song_at_offset(int offset) {
@@ -5868,7 +6091,7 @@ void queue_remove_song_at_offset(int offset) {
     playlist_count--;
     queued_pending_count--;
     queue_next_insert_index = queued_pending_count > 0 ? playlist_index + 1 + queued_pending_count : -1;
-    if (song_count_label) lv_label_set_text_fmt(song_count_label, "%d/%d", playlist_index + 1, playlist_count);
+    player_set_song_count(playlist_index, playlist_count);
     arm_next_track_for_audio(playlist_index);
     show_info_toast(TR("Removed from queue"));
 }
@@ -5991,6 +6214,7 @@ static void play_track_at_from_internal(int index, double start_seconds, bool pu
         resolve_replaygain(&seed, &has_gain, &gain_db, &has_peak, &peak);
         audio_play_file_at(path, start_seconds, has_gain, gain_db, has_peak, peak);
     }
+    if (push_nav) playback_intent_epoch++;
     current_playback_generation = audio_get_playback_generation();
     request_track_metadata(index, true, false, true);
     arm_next_track_for_audio(index);
@@ -6198,6 +6422,22 @@ bool gui_player_play_folder_track(const char * track_path) {
     if (!file_browser_open_lazy_directory(track_path, &index, &playable, &selected)) return false;
     /* The index owns its directory string for as long as the queue holds it. */
     return play_file_browser_index(index, playable, selected, file_browser_index_directory(index), -1);
+}
+
+bool gui_player_play_folder_index(file_browser_index_t *index, unsigned playable_count,
+                                  int play_mode) {
+    if (play_mode != PLAY_MODE_SEQUENTIAL && play_mode != PLAY_MODE_SHUFFLE) {
+        if (index) file_browser_index_close(index);
+        return false;
+    }
+    unsigned initial = 0;
+    if (play_mode == PLAY_MODE_SHUFFLE && playable_count > 1) {
+        ensure_shuffle_rng_seeded();
+        initial = (unsigned)(rand() % playable_count);
+    }
+    gui_player_set_play_mode(play_mode);
+    return play_file_browser_index(index, playable_count, initial,
+                                   index ? file_browser_index_directory(index) : "", -1);
 }
 
 void toggle_play_pause(void) {
@@ -6490,7 +6730,7 @@ void gui_player_init(uint32_t screen_width, uint32_t screen_height) {
     displayed_position_second = -1;
     displayed_duration_second = -1;
     if (song_count_label && gui_player_has_active_track()) {
-        lv_label_set_text_fmt(song_count_label, "%d/%d", playlist_index + 1, playlist_count);
+        player_set_song_count(playlist_index, playlist_count);
         lv_obj_remove_flag(song_count_label, LV_OBJ_FLAG_HIDDEN);
     }
     if (gui_player_has_active_track()) {
@@ -6622,12 +6862,29 @@ void gui_player_poll_confirmed_playback(void) {
     }
 }
 
+/* Queue reconciliation must run even with the display off or while seeking.
+ * Only drawing the published result belongs in the visual refresh path. */
+void gui_player_poll_waveform(void) {
+    if (!player_waveform_seekbar || !progress_slider) {
+        waveform_cancel();
+        return;
+    }
+    const char * path = gui_player_get_current_track_path();
+    waveform_request(path);
+    /* Use the same prediction as natural playback, including explicit
+     * queued tracks, shuffle bags and repeat. This also works with
+     * gapless disabled, where audio.c does not have a staged decoder. */
+    int next_index = audio_is_playing() && playlist_index >= 0 &&
+                     playlist_index < playlist_count ?
+                     compute_auto_advance_index(playlist_index) : -1;
+    waveform_prefetch(next_index >= 0 && next_index < playlist_count ?
+                      playlist_path_at(next_index) : NULL);
+}
+
 void gui_player_update_progress(void) {
-    gui_player_poll_confirmed_playback();
     if (player_waveform_seekbar && progress_slider) {
         const char * path = gui_player_get_current_track_path();
         waveform_data_t data;
-        waveform_request(path);
         player_seekbar_update(progress_slider, waveform_copy(path, &data) ? &data : NULL);
     }
     if (deferred_resume_pending) return; /* audio_get_position_seconds()/
@@ -6641,7 +6898,7 @@ void gui_player_update_progress(void) {
 
     if (progress_awaiting_seek) {
         if (fabs(position - pending_progress_seek_seconds) < 0.4 ||
-            ++progress_awaiting_seek_ticks >= 8)
+            lv_tick_elaps(progress_awaiting_seek_started_ms) >= 4000)
             progress_awaiting_seek = false;
         else
             return;
@@ -7890,11 +8147,23 @@ bool gui_player_queue_save_as(const char * name) {
     }
     if (playlist_lazy_snapshot) {
         w->provider.snapshot = metadata_db_snapshot_retain(playlist_lazy_snapshot);
-        if (!w->provider.snapshot) { for (int i = 0; i < count; i++) free(w->provider.explicit_paths[i]); free(w->provider.explicit_paths); free(w->provider.ranks); free(order); free(w); return false; }
+        if (!w->provider.snapshot) {
+            for (int i = 0; i < count; i++) free(w->provider.explicit_paths[i]);
+            free(w->provider.explicit_paths);
+            free(w->provider.ranks);
+            free(order);
+            free(w);
+            return false;
+        }
     }
     if (playlist_lazy_file_index && !file_browser_index_retain(playlist_lazy_file_index, &w->provider.file_index)) {
         if (w->provider.snapshot) metadata_db_snapshot_close(w->provider.snapshot);
-        for (int i = 0; i < count; i++) free(w->provider.explicit_paths[i]); free(w->provider.explicit_paths); free(w->provider.ranks); free(order); free(w); return false;
+        for (int i = 0; i < count; i++) free(w->provider.explicit_paths[i]);
+        free(w->provider.explicit_paths);
+        free(w->provider.ranks);
+        free(order);
+        free(w);
+        return false;
     }
     bool has_sd = false;
     for (int i = 0; i < count; i++) if (playlist[i] && is_sd_card_path(playlist[i])) has_sd = true;

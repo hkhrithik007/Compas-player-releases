@@ -409,8 +409,7 @@ they appear exactly inside its rectangle instead:
 <lv_label name="lyrics_active" text="" hidden="true" style_text_color="0x1062f2"/>
 ```
 
-`plugins_examples/player_layouts/hiby_stock.xml` is a complete layout built
-this way, with `lyrics_open` and `lyrics_close` timelines that dim the cover.
+The [HiBy Stock Player example](https://github.com/Starnished66/compas-plugins/tree/main/examples/HiByStockPlayer) includes a complete layout built this way, with `lyrics_open` and `lyrics_close` timelines that dim the cover.
 
 Tips:
 
@@ -437,7 +436,7 @@ while the plugin stays installed. Called from a callback, it switches to the
 layout right away, for this session only. The background options of
 `set_player_layout` (`flat`, `bg_color`, blur) are global and apply to every
 layout, so a layout that wants its own background should paint it itself.
-`plugins_examples/HiByStockPlayer.lua` is a complete example. See `plugin.set_player_layout` in
+The [HiBy Stock Player example](https://github.com/Starnished66/compas-plugins/tree/main/examples/HiByStockPlayer) is a complete example. See `plugin.set_player_layout` in
 [PLUGINS.md](../PLUGINS.md) for the details. Published plugins, including ones
 that ship layouts, live in the
 [compas-plugins repository](https://github.com/Starnished66/compas-plugins).

@@ -52,7 +52,7 @@ extern const char * const home_layout_tile_keys[HOME_LAYOUT_TILE_COUNT];
  * plugin.refresh_theme() replaces Home. Restarting still discards it, so a
  * plugin that wants persistence must save its choice and reapply it from
  * top-level script code on every boot -- see PLUGINS.md and
- * plugins_examples/Themes.lua. */
+ * the Themes plugin in the compas-plugins repository. */
 typedef struct {
     bool has_bg_color;   uint32_t bg_color;
     bool has_text_color; uint32_t text_color;

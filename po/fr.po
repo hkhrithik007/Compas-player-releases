@@ -29,7 +29,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-11 13:10-0600\n"
+"POT-Creation-Date: 2026-10-13 10:21-0600\n"
 "PO-Revision-Date: 2026-10-01 00:00+0000\n"
 "Last-Translator: Machine draft\n"
 "Language-Team: French\n"
@@ -179,17 +179,28 @@ msgstr "Échec de la capture (framebuffer)"
 msgid "Screenshot failed (worker)"
 msgstr "Échec de la capture (processus)"
 
+#, fuzzy, c-format
+msgid "Page %d of %d"
+msgstr "Étape %d sur %d"
+
+#, fuzzy
+msgid "Go to page"
+msgstr "Page suivante"
+
+msgid "Cancel"
+msgstr "Annuler"
+
+msgid "Previous"
+msgstr "Précédent"
+
+msgid "Next"
+msgstr "Suivant"
+
 msgid "Folder too large to index (tap Back)"
 msgstr "Dossier trop volumineux à indexer (appuyez sur Retour)"
 
 msgid "Unable to read folder (tap Back and retry)"
 msgstr "Lecture du dossier impossible (appuyez sur Retour et réessayez)"
-
-msgid "Back"
-msgstr "Retour"
-
-msgid "Previous"
-msgstr "Précédent"
 
 msgid "This folder is empty"
 msgstr "Ce dossier est vide"
@@ -202,9 +213,6 @@ msgstr "Aucun fichier audio lisible trouvé"
 
 msgid "Open a folder containing supported audio files."
 msgstr "Ouvrez un dossier contenant des fichiers audio pris en charge."
-
-msgid "Next"
-msgstr "Suivant"
 
 msgid "Unexpected reply from GitHub"
 msgstr "Réponse inattendue de GitHub"
@@ -534,9 +542,6 @@ msgstr "Traitement..."
 msgid "Stop"
 msgstr "Arrêter"
 
-msgid "Cancel"
-msgstr "Annuler"
-
 #
 msgid "Another file operation is still running"
 msgstr "Une autre opération sur les fichiers est en cours"
@@ -615,6 +620,14 @@ msgstr "Masquer les fichiers cachés"
 msgid "Show hidden files"
 msgstr "Afficher les fichiers cachés"
 
+#, fuzzy
+msgid "Playlist selection expired"
+msgstr "Playlist supprimée"
+
+#, fuzzy
+msgid "Playlist name is too long"
+msgstr "Playlist renommée"
+
 msgid "Playlist created"
 msgstr "Playlist créée"
 
@@ -633,11 +646,71 @@ msgstr "Ajouté à la playlist"
 msgid "Failed to add to playlist"
 msgstr "Échec de l'ajout à la playlist"
 
-msgid "+ New Playlist"
-msgstr "+ Nouvelle playlist"
+#, fuzzy
+msgid "Added folder to playlist"
+msgstr "Ajouté à la playlist"
+
+#, fuzzy
+msgid "Failed to add folder to playlist"
+msgstr "Échec de l'ajout à la playlist"
+
+#, fuzzy
+msgid "Folder is too large to add to queue"
+msgstr "Dossier trop volumineux à indexer (appuyez sur Retour)"
+
+msgid "Playback changed before folder was ready"
+msgstr ""
+
+msgid "Cannot add folder within queue memory limit"
+msgstr ""
+
+#, fuzzy
+msgid "Cannot play this folder"
+msgstr "Impossible de lire le dossier"
+
+#
+#, fuzzy
+msgid "Folder action is still running"
+msgstr "Une autre opération sur les fichiers est en cours"
+
+#, fuzzy
+msgid "Cannot start folder action"
+msgstr "Impossible de lire le dossier"
+
+#, fuzzy
+msgid "Adding folder to queue"
+msgstr "Ajouter l'album à la file"
+
+#, fuzzy
+msgid "Adding folder to playlist"
+msgstr "Ajouté à la playlist"
+
+msgid "Preparing folder playback"
+msgstr ""
+
+#, fuzzy
+msgid "Scanning playable files"
+msgstr "Aucun fichier lisible ici"
+
+msgid "File path is too long"
+msgstr ""
+
+#, fuzzy
+msgid "Play All (Sequential)"
+msgstr "Lire dans l'ordre"
+
+#, fuzzy
+msgid "Play All (Shuffle)"
+msgstr "Tout lire en aléatoire"
+
+msgid "Add to Queue"
+msgstr "Ajouter à la file"
 
 msgid "Add to Playlist"
 msgstr "Ajouter à une playlist"
+
+msgid "+ New Playlist"
+msgstr "+ Nouvelle playlist"
 
 msgid "Files"
 msgstr "Fichiers"
@@ -1943,6 +2016,10 @@ msgstr "Plugin"
 msgid "Plugin Settings"
 msgstr "Réglages du plugin"
 
+#, fuzzy
+msgid "Select a file"
+msgstr "Tout sélectionner"
+
 msgid "Played"
 msgstr "Lu"
 
@@ -1999,9 +2076,6 @@ msgstr "Enregistrement impossible : éléments invalides ou en streaming"
 
 msgid "Play Next"
 msgstr "Lire ensuite"
-
-msgid "Add to Queue"
-msgstr "Ajouter à la file"
 
 msgid "Custom"
 msgstr "Perso"
@@ -2146,14 +2220,48 @@ msgstr ""
 "\n"
 "La télécharger et la réinstaller quand même ? Cela peut prendre un certain temps."
 
+#, fuzzy
+msgid "Create a plugin"
+msgstr "Choisir des plugins"
+
+msgid "Create a theme"
+msgstr ""
+
+msgid "Creator guides"
+msgstr ""
+
 msgid "Buy Me a Coffee"
 msgstr "Offrez-moi un café"
 
 msgid "Scan with your phone to support Compás Player on PayPal"
 msgstr "Scannez avec votre téléphone pour soutenir Compás Player sur PayPal"
 
+msgid "Scan for the full guide"
+msgstr ""
+
+msgid "github.com/Starnished66/compas-player"
+msgstr ""
+
+msgid "Guide: docs/CREATING.md"
+msgstr ""
+
+msgid "Write a Lua plugin on your computer. Copy its .lua file to the .plugins folder on your SD card."
+msgstr ""
+
+msgid "Open More > Plugins > Refresh Plugins. Scan for a working example and the full API guide."
+msgstr ""
+
+msgid "Edit a .theme text file on your computer. Copy it to the Themes folder on your SD card, then select it in More > Themes."
+msgstr ""
+
+msgid "Scan for a starter theme and instructions. To redesign the player screen, see the XML layout guide linked there."
+msgstr ""
+
 msgid "Compás Player"
 msgstr "Compás Player"
+
+msgid "Create plugins & themes"
+msgstr ""
 
 msgid "Developer Options"
 msgstr "Options pour développeurs"
@@ -3215,6 +3323,9 @@ msgstr "Commandes d'alimentation"
 
 msgid "Playback and device actions"
 msgstr "Actions de lecture et de l'appareil"
+
+#~ msgid "Back"
+#~ msgstr "Retour"
 
 #~ msgid "No .upt firmware file found on SD card"
 #~ msgstr "Aucun fichier firmware .upt trouvé sur la carte SD"

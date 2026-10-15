@@ -5,6 +5,7 @@
 #include "lvgl/lvgl.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 
 /* Called when the user taps a playable file. `playlist` holds `count`
  * heap-allocated absolute paths -- every playable file in the same
@@ -35,15 +36,24 @@ typedef void (*file_browser_index_select_cb_t)(file_browser_index_t *index,
 /* Called when the user taps a file that is not media (only listed with
  * on_open_other). path is valid only during the call. */
 typedef void (*file_browser_open_cb_t)(const char * path);
+/* Called for every tapped file before playable/playlist/cue dispatch. The
+ * path is valid only for the duration of the call. */
+typedef void (*file_browser_pick_file_cb_t)(const char * path);
 /* Called when selection mode starts or ends or the selection changes. */
 typedef void (*file_browser_selection_cb_t)(file_browser_t * browser);
+/* Called on a long press of a folder or playable audio file. The path is
+ * valid only for the duration of the callback. When on_selection is also
+ * set, selection mode keeps precedence (File Manager behavior). */
+typedef void (*file_browser_long_press_cb_t)(const char * path, bool is_dir);
 
 typedef struct {
     file_browser_select_cb_t on_select;             /* playable files and .m3u playlists */
     file_browser_cue_select_cb_t on_cue_select;     /* NULL hides .cue sheets */
     file_browser_index_select_cb_t on_index_select; /* NULL: playable taps go to on_select */
     file_browser_open_cb_t on_open_other;           /* non-NULL lists every file */
+    file_browser_pick_file_cb_t on_pick_file;       /* non-NULL selects any file as a raw path */
     file_browser_selection_cb_t on_selection;       /* non-NULL: long press selects */
+    file_browser_long_press_cb_t on_long_press;    /* folders/playable files; ignored with on_selection */
 } file_browser_options_t;
 
 /* Builds a file browser (current-path label + scrollable list) as a child of
@@ -65,6 +75,11 @@ void file_browser_refresh(file_browser_t * browser);
 /* Refreshes every browser, after files changed on the card. */
 void file_browser_refresh_all(void);
 const char * file_browser_current_dir(const file_browser_t * browser);
+/* True when this browser has a ready directory index spanning more than one
+ * page. */
+bool file_browser_can_jump_pages(const file_browser_t * browser);
+/* Opens the existing page picker when file_browser_can_jump_pages() is true. */
+void file_browser_show_page_jump(file_browser_t * browser);
 /* Shows dir, which must be an existing folder at or under the browser's
  * root. False leaves the browser where it was. */
 bool file_browser_open_dir(file_browser_t * browser, const char * dir);
@@ -81,9 +96,9 @@ unsigned file_browser_selected_count(const file_browser_t * browser);
  * each path and the array. False when nothing is selected or on error. */
 bool file_browser_selected_paths(const file_browser_t * browser, char *** out_paths, int * out_count);
 
-/* In-screen back for the browser on `screen`: ends selection mode, else
- * steps up one folder. False when there is no browser on screen or it is
- * already at its root (the caller pops the screen). */
+/* In-screen back for the browser on `screen`: dismisses its page picker,
+ * ends selection mode, then steps up one folder. False when there is no
+ * browser on screen or it is already at its root (the caller pops the screen). */
 bool file_browser_go_up_for_screen(lv_obj_t * screen);
 
 /* One-shot lookup that doesn't touch (or require) any browser UI state:
@@ -150,6 +165,8 @@ typedef enum {
 void file_browser_set_sort_mode(file_browser_sort_mode_t mode);
 file_browser_sort_mode_t file_browser_get_sort_mode(void);
 bool file_browser_index_open(const char * directory, file_browser_index_t ** out, unsigned * out_count);
+bool file_browser_index_open_cancelable(const char * directory, file_browser_index_t ** out,
+                                       unsigned * out_count, atomic_bool * cancel);
 bool file_browser_index_retain(const file_browser_index_t * source, file_browser_index_t ** out);
 bool file_browser_index_path_at(const file_browser_index_t * index, unsigned ordinal,
                                 char * out_path, size_t out_size);

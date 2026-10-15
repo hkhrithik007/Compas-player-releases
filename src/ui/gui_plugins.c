@@ -10,6 +10,7 @@
 #include "gui_player.h"
 #include "gui_text_input.h"
 #include "screen_builders.h"
+#include "gui_navigation.h"
 #include "metadata.h"
 #include "audio.h"
 #include "settings.h"
@@ -62,6 +63,45 @@ static lv_obj_t * plugin_list_title_labels[PLUGIN_LIST_SCREEN_POOL_SIZE];
 static lv_obj_t * plugin_list_lists[PLUGIN_LIST_SCREEN_POOL_SIZE];
 static int plugin_list_pool_next = 0;
 static int plugin_list_selected_indices[PLUGIN_LIST_SCREEN_POOL_SIZE];
+
+/* A single native picker screen shares the library browser's indexed list.
+ * The browser owns no Lua state; it reports a copied result after navigation
+ * has left the screen, so plugin code never runs inside an LVGL row event. */
+static lv_obj_t * plugin_picker_screen;
+static file_browser_t * plugin_picker_browser;
+static bool plugin_picker_finishing;
+static bool plugin_picker_active;
+static lv_timer_t * plugin_picker_timer;
+static char plugin_picker_result[PATH_MAX];
+
+static void plugin_picker_dispatch(void) {
+    char result[PATH_MAX];
+    snprintf(result, sizeof(result), "%s", plugin_picker_result);
+    plugin_picker_active = false;
+    plugin_picker_result[0] = '\0';
+    plugin_manager_file_picker_complete(result[0] ? result : NULL);
+}
+
+static void plugin_picker_timer_cb(lv_timer_t * timer) {
+    if (!plugin_picker_active || gui_navigation_transition_in_progress()) return;
+    if (gui_navigation_is_top(plugin_picker_screen)) return;
+    plugin_picker_finishing = true;
+    plugin_picker_active = false;
+    /* Back/Home may leave the reusable screen below other navigation items.
+     * Remove every occurrence only after transitions have settled. */
+    for (int i = gui_navigation_get_depth() - 1; i >= 0; i--)
+        if (gui_navigation_get_screen_at(i) == plugin_picker_screen) nav_remove_stack_slot(i);
+    plugin_picker_timer = NULL;
+    lv_timer_delete(timer);
+    plugin_picker_dispatch();
+}
+
+static void plugin_picker_file_selected(const char * path) {
+    if (plugin_picker_finishing) return;
+    snprintf(plugin_picker_result, sizeof(plugin_picker_result), "%s", path ? path : "");
+    plugin_picker_finishing = true;
+    nav_pop();
+}
 
 /* A plugin progress overlay is deliberately independent of navigation: a
  * download can continue while the user dismisses this small status card. */
@@ -645,12 +685,14 @@ void gui_plugin_set_text_color(const char * slot, uint32_t rgb) {
 
     if (strcmp(slot, "primary") == 0) {
         lv_style_set_text_color(&style_theme_text_primary, color);
+        lv_style_set_image_recolor(&style_theme_text_primary, color);
         lv_obj_report_style_change(&style_theme_text_primary);
         lv_style_set_text_color(&list_row_style, color);
         lv_obj_report_style_change(&list_row_style);
         gui_theme_update_surface_contrast();
     } else if (strcmp(slot, "muted") == 0) {
         lv_style_set_text_color(&style_theme_text_muted, color);
+        lv_style_set_image_recolor(&style_theme_text_muted, color);
         lv_obj_report_style_change(&style_theme_text_muted);
     }
     /* Else: unreachable -- see gui_plugin_set_background_color()'s own
@@ -1200,6 +1242,16 @@ void gui_plugins_init(void) {
  * already-freed pointers. */
 void gui_plugins_teardown(void) {
     gui_plugin_close_progress();
+    plugin_picker_active = false;
+    plugin_picker_finishing = true;
+    plugin_picker_result[0] = '\0';
+    if (plugin_picker_timer) { lv_timer_delete(plugin_picker_timer); plugin_picker_timer = NULL; }
+    if (plugin_picker_screen) {
+        gui_navigation_remove_screen_instances(&plugin_picker_screen, 1);
+        plugin_picker_browser = NULL;
+        lv_obj_delete(plugin_picker_screen);
+        plugin_picker_screen = NULL;
+    }
     for (int i = 0; i < PLUGIN_LIST_SCREEN_POOL_SIZE; i++) {
         if (plugin_list_screens[i]) { lv_obj_delete(plugin_list_screens[i]); plugin_list_screens[i] = NULL; }
     }
@@ -1273,6 +1325,45 @@ bool gui_plugin_refresh_library(void) {
 
 bool gui_plugin_open_file_manager(const char * folder) {
     return gui_file_manager_open(folder);
+}
+
+static void plugin_picker_back_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    if (!file_browser_go_up_for_screen(plugin_picker_screen)) nav_pop();
+}
+
+bool gui_plugin_pick_file(const char * folder) {
+    if (plugin_picker_active) return false;
+    if (!plugin_picker_screen) {
+        plugin_picker_screen = lv_obj_create(NULL);
+        if (!plugin_picker_screen) return false;
+        lv_obj_add_style(plugin_picker_screen, &style_theme_screen_bg, 0);
+        build_screen_header(plugin_picker_screen, TR("Select a file"), plugin_picker_back_cb, NULL, NULL);
+    }
+    plugin_picker_finishing = false;
+    plugin_picker_result[0] = '\0';
+    if (!plugin_picker_browser) {
+        file_browser_options_t options = { .on_pick_file = plugin_picker_file_selected };
+        plugin_picker_browser = file_browser_create(plugin_picker_screen, MUSIC_ROOT_DIR, &options);
+        if (!plugin_picker_browser) return false;
+        finalize_screen_navigation(plugin_picker_screen);
+    }
+    if (!file_browser_open_dir(plugin_picker_browser, folder ? folder : MUSIC_ROOT_DIR)) return false;
+    if (plugin_picker_timer) lv_timer_delete(plugin_picker_timer);
+    plugin_picker_timer = lv_timer_create(plugin_picker_timer_cb, 25, NULL);
+    if (!plugin_picker_timer) return false;
+    nav_push(plugin_picker_screen);
+    plugin_picker_active = true;
+    return true;
+}
+
+void gui_plugin_cancel_file_picker(void) {
+    plugin_picker_finishing = true;
+    plugin_picker_active = false;
+    if (plugin_picker_timer) { lv_timer_delete(plugin_picker_timer); plugin_picker_timer = NULL; }
+    if (!plugin_picker_screen) return;
+    if (gui_navigation_is_top(plugin_picker_screen)) nav_pop();
+    else gui_navigation_remove_screen_instances(&plugin_picker_screen, 1);
 }
 
 void gui_plugin_refresh_file_browsers(void) {

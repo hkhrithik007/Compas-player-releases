@@ -3,6 +3,7 @@
 #include "i18n.h"
 #include "assets.h"
 #include "screen_builders.h" /* STATUS_BAR_CLEARANCE / TITLE_ROW_HEIGHT / LIST_ROW_* */
+#include "gui_navigation.h" /* enable_gesture_bubble_recursive() for rebuilt pager controls */
 #include "playlist_files.h" /* playlist_files_resolve_path() -- shared M3U line resolution */
 #include "library_endian.h"
 #include "fallback_font.h"
@@ -67,6 +68,9 @@ struct file_browser {
     lv_obj_t * screen;
     lv_obj_t * path_label;
     lv_obj_t * list;
+    gui_popup_t page_jump_popup;
+    lv_obj_t * page_jump_slider;
+    lv_obj_t * page_jump_label;
     lv_timer_t * index_poll_timer;
     char root_dir[PATH_MAX];
     char current_dir[PATH_MAX];
@@ -122,6 +126,54 @@ static int last_selected_row = -1;
 
 static void rebuild_list(file_browser_t * fb);
 static void scan_current_dir(file_browser_t * fb);
+static void page_jump_hide(file_browser_t * fb);
+
+static void browser_screen_unloaded_cb(lv_event_t * event) {
+    file_browser_t * fb = lv_event_get_user_data(event);
+    if (fb && lv_event_get_code(event) == LV_EVENT_SCREEN_UNLOADED) page_jump_hide(fb);
+}
+
+/* Keep the browser's heading useful on the small display while leaving the
+ * actual paths in current_dir untouched for navigation and callbacks. */
+static void set_path_label(file_browser_t *fb) {
+    char friendly[PATH_MAX + 8];
+    const char *root = fb->root_dir;
+    const char *current = fb->current_dir;
+    size_t root_len = strlen(root);
+    while (root_len > 1 && root[root_len - 1] == '/') root_len--;
+
+    size_t current_len = strlen(current);
+    while (current_len > 1 && current[current_len - 1] == '/') current_len--;
+
+    const char *relative = NULL;
+    if (root_len > 0 && current_len >= root_len && memcmp(current, root, root_len) == 0 &&
+        (current_len == root_len || root[root_len - 1] == '/' || current[root_len] == '/')) {
+        relative = current + root_len;
+        while (*relative == '/') relative++;
+    }
+
+    if (relative && !*relative) {
+        snprintf(friendly, sizeof(friendly), "SD/");
+    } else if (relative) {
+        snprintf(friendly, sizeof(friendly), "SD/%.*s", (int)(current_len - (size_t)(relative - current)), relative);
+    } else {
+        snprintf(friendly, sizeof(friendly), "%.*s", (int)current_len, current);
+    }
+
+    const lv_font_t *font = lv_obj_get_style_text_font(fb->path_label, LV_PART_MAIN);
+    int32_t letter_space = lv_obj_get_style_text_letter_space(fb->path_label, LV_PART_MAIN);
+    lv_obj_update_layout(fb->path_label);
+    int32_t available = lv_obj_get_content_width(fb->path_label);
+    lv_point_t text_size;
+    lv_text_get_size(&text_size, friendly, font, letter_space, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    if (text_size.x > available) {
+        const char *end = current + current_len;
+        const char *base = end;
+        while (base > current && base[-1] != '/') base--;
+        snprintf(friendly, sizeof(friendly), "./%.*s", (int)(end - base), base);
+    }
+    lv_label_set_text(fb->path_label, friendly);
+}
 
 /* Kept in sync with audio.c's decoder dispatch. */
 static const char * const PLAYABLE_EXTENSIONS[] = {
@@ -247,7 +299,8 @@ static int index_write_run(int directory_fd, dir_entry_t *rows, size_t count, fi
     qsort(rows, count, sizeof(*rows), sort_comparator(mode));
     int fd = index_temp_fd(directory_fd);
     if (fd < 0 || !index_write_full(fd, rows, count * sizeof(*rows))) {
-        if (fd >= 0) close(fd); return -1;
+        if (fd >= 0) close(fd);
+        return -1;
     }
     lseek(fd, 0, SEEK_SET); return fd;
 }
@@ -366,6 +419,10 @@ static bool file_browser_index_open_ex(const char *directory, file_browser_index
     if (idx->fd < 0 || idx->playable_fd < 0 || idx->directory_fd < 0) { if (idx->fd >= 0) close(idx->fd); if (idx->playable_fd >= 0) close(idx->playable_fd); if (idx->directory_fd >= 0) close(idx->directory_fd); free(idx); goto fail_closed; }
     dir_entry_t row;
     for (unsigned i = 0; i < idx->count; i++) {
+        if (index_cancelled(cancel)) {
+            file_browser_index_close(idx);
+            goto fail_closed;
+        }
         if (pread(idx->fd, &row, sizeof(row), (off_t)i * sizeof(row)) != (ssize_t)sizeof(row)) { close(idx->fd); close(idx->playable_fd); close(idx->directory_fd); free(idx); goto fail_closed; }
         row.playable_ordinal = -1;
         if (index_row_playable(&row)) {
@@ -374,6 +431,10 @@ static bool file_browser_index_open_ex(const char *directory, file_browser_index
                 !index_write_full(idx->playable_fd, &row, sizeof(row))) { close(idx->fd); close(idx->playable_fd); close(idx->directory_fd); free(idx); goto fail_closed; }
             idx->playable_count++;
         }
+    }
+    if (index_cancelled(cancel)) {
+        file_browser_index_close(idx);
+        goto fail_closed;
     }
     lseek(idx->playable_fd, 0, SEEK_SET);
     snprintf(idx->directory, sizeof(idx->directory), "%s", directory);
@@ -388,8 +449,15 @@ bool file_browser_index_open(const char *directory, file_browser_index_t **out, 
     return file_browser_index_open_ex(directory, out, out_count, 0, NULL, sort_mode_snapshot());
 }
 
+bool file_browser_index_open_cancelable(const char *directory, file_browser_index_t **out,
+                                        unsigned *out_count, atomic_bool *cancel) {
+    return file_browser_index_open_ex(directory, out, out_count, 0, cancel, sort_mode_snapshot());
+}
+
 bool file_browser_index_retain(const file_browser_index_t *source, file_browser_index_t **out) {
-    if (!source || !out) return false; file_browser_index_t *copy = calloc(1, sizeof(*copy)); if (!copy) return false;
+    if (!source || !out) return false;
+    file_browser_index_t *copy = calloc(1, sizeof(*copy));
+    if (!copy) return false;
     if (source->memory_backed) {
         copy->fd = -1; copy->playable_fd = -1;
         copy->directory_fd = dup(source->directory_fd);
@@ -701,6 +769,7 @@ static void index_poll_cb(lv_timer_t *timer) {
 }
 
 static void scan_current_dir(file_browser_t * fb) {
+    page_jump_hide(fb);
     free_entries(fb);
     pthread_mutex_lock(&index_worker_mu);
     unsigned generation = ++fb->index_request_generation;
@@ -722,7 +791,12 @@ static void browser_delete_cb(lv_event_t *event) {
     for (file_browser_t ** link = &browsers; *link; link = &(*link)->next) {
         if (*link == fb) { *link = fb->next; break; }
     }
+    lv_obj_remove_event_cb_with_user_data(fb->screen, browser_screen_unloaded_cb, fb);
     if (fb->index_poll_timer) lv_timer_delete(fb->index_poll_timer);
+    page_jump_hide(fb);
+    gui_popup_teardown(&fb->page_jump_popup);
+    fb->page_jump_slider = NULL;
+    fb->page_jump_label = NULL;
     free(fb->selected);
     pthread_mutex_lock(&index_worker_mu);
     ++fb->index_request_generation;
@@ -733,6 +807,16 @@ static void browser_delete_cb(lv_event_t *event) {
     fb->deleted = worker_frees;
     pthread_mutex_unlock(&index_worker_mu);
     if (!worker_frees) free(fb);
+}
+
+/* Child path must fit entirely. A truncated join would name a different file. */
+static bool join_child_path(char * out, size_t out_size, const char * dir, const char * name) {
+    int n = snprintf(out, out_size, "%s/%s", dir, name);
+    if (n <= 0 || (size_t) n >= out_size) {
+        if (out_size > 0) out[0] = '\0';
+        return false;
+    }
+    return true;
 }
 
 /* Builds the playlist from every playable file in the current directory
@@ -759,10 +843,10 @@ static void build_playlist_and_select(file_browser_t * fb, int file_display_inde
 
     for (int i = 0; i < all_count; i++) {
         if (all[i].is_dir || all[i].is_playlist || all[i].is_cue) continue;
-        if (strcmp(all[i].name, selected_entry.name) == 0) selected = count;
 
         char full_path[PATH_MAX];
-        snprintf(full_path, sizeof(full_path), "%s/%s", fb->current_dir, all[i].name);
+        if (!join_child_path(full_path, sizeof(full_path), fb->current_dir, all[i].name)) continue;
+        if (strcmp(all[i].name, selected_entry.name) == 0) selected = count;
         playlist[count] = strdup(full_path);
         if (!playlist[count]) { for (int j = 0; j < count; j++) free(playlist[j]); free(playlist); free(all); return; }
         count++;
@@ -853,6 +937,11 @@ static void go_up(file_browser_t * fb) {
 bool file_browser_go_up_for_screen(lv_obj_t * screen) {
     for (file_browser_t * fb = browsers; fb; fb = fb->next) {
         if (fb->screen != screen) continue;
+        if (fb->page_jump_popup.popup &&
+            !lv_obj_has_flag(fb->page_jump_popup.popup, LV_OBJ_FLAG_HIDDEN)) {
+            page_jump_hide(fb);
+            return true;
+        }
         if (fb->selecting) { file_browser_set_selecting(fb, false); return true; }
         if (at_root(fb)) return false;
         go_up(fb);
@@ -866,17 +955,45 @@ static file_browser_t * browser_of(lv_event_t * e) {
     return lv_obj_get_user_data(lv_obj_get_parent(lv_event_get_current_target_obj(e)));
 }
 
-static void up_click_cb(lv_event_t * e) {
-    go_up(browser_of(e));
+static int browser_page_count(const file_browser_t * fb) {
+    return fb->entry_count > 0 ? 1 + (fb->entry_count - 1) / FILE_BROWSER_PAGE_SIZE : 1;
 }
 
-static void page_click_cb(lv_event_t * e) {
-    file_browser_t * fb = browser_of(e);
-    int delta = (int) (intptr_t) lv_event_get_user_data(e);
-    int next = fb->page_start + delta;
-    if (next < 0) next = 0;
-    if (next >= fb->entry_count) next = fb->entry_count > 0
-        ? ((fb->entry_count - 1) / FILE_BROWSER_PAGE_SIZE) * FILE_BROWSER_PAGE_SIZE : 0;
+bool file_browser_can_jump_pages(const file_browser_t * fb) {
+    return fb && fb->current_index && fb->entry_count > 0 &&
+           browser_page_count(fb) > 1;
+}
+
+static void page_jump_update_label(file_browser_t * fb) {
+    if (!fb || !fb->page_jump_label || !fb->page_jump_slider) return;
+    lv_label_set_text_fmt(fb->page_jump_label, TR("Page %d of %d"),
+                          (int)lv_slider_get_value(fb->page_jump_slider), browser_page_count(fb));
+}
+
+static void page_jump_slider_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+    page_jump_update_label(lv_event_get_user_data(e));
+}
+
+static void page_jump_hide(file_browser_t * fb) {
+    if (fb) gui_popup_hide(&fb->page_jump_popup);
+}
+
+static void page_jump_cancel_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    page_jump_hide(lv_event_get_user_data(e));
+}
+
+static void page_jump_apply_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    file_browser_t * fb = lv_event_get_user_data(e);
+    if (!fb || !fb->page_jump_slider) return;
+    int page = (int)lv_slider_get_value(fb->page_jump_slider);
+    int page_count = browser_page_count(fb);
+    if (page < 1) page = 1;
+    if (page > page_count) page = page_count;
+    page_jump_hide(fb);
+    int next = (page - 1) * FILE_BROWSER_PAGE_SIZE;
     if (next == fb->page_start) return;
     fb->page_start = next;
     if (!load_visible_entries(fb)) {
@@ -884,6 +1001,177 @@ static void page_click_cb(lv_event_t * e) {
         fb->entry_count = -1;
     }
     rebuild_list(fb);
+}
+
+static lv_obj_t * page_jump_action_row(lv_obj_t * parent, const char * text,
+                                       lv_event_cb_t callback, file_browser_t * fb) {
+    lv_obj_t * row = lv_obj_create(parent);
+    style_popup_action_row(row);
+    lv_obj_add_event_cb(row, callback, LV_EVENT_CLICKED, fb);
+    lv_obj_t * label = lv_label_create(row);
+    lv_label_set_text(label, text);
+    lv_obj_add_style(label, &style_theme_text_primary, 0);
+    lv_obj_set_style_text_font(label, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    return row;
+}
+
+static void page_jump_create(file_browser_t * fb) {
+    if (!fb || fb->page_jump_popup.popup) return;
+    lv_obj_t * backdrop = lv_obj_create(fb->screen);
+    lv_obj_set_size(backdrop, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_bg_color(backdrop, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(backdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(backdrop, 0, 0);
+    lv_obj_remove_flag(backdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(backdrop, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(backdrop, page_jump_cancel_cb, LV_EVENT_CLICKED, fb);
+
+    lv_obj_t * popup = lv_obj_create(fb->screen);
+    lv_obj_set_width(popup, lv_pct(92));
+    lv_obj_set_height(popup, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(popup,
+        lv_display_get_vertical_resolution(lv_display_get_default()) - 2 * STATUS_BAR_CLEARANCE, 0);
+    lv_obj_center(popup);
+    lv_obj_set_style_radius(popup, BOARD_SCALE_PX(20), 0);
+    lv_obj_add_style(popup, &style_theme_card_bg, 0);
+    lv_obj_set_style_bg_opa(popup, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(popup, 1, 0);
+    lv_obj_set_style_border_color(popup, lv_color_hex(GUI_COLOR_BORDER), 0);
+    lv_obj_set_style_pad_all(popup, BOARD_SCALE_PX(12), 0);
+    lv_obj_set_style_pad_row(popup, GUI_ROW_GAP, 0);
+    lv_obj_set_flex_flow(popup, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(popup, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(popup, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(popup, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t * title = lv_label_create(popup);
+    lv_label_set_text(title, TR("Go to page"));
+    lv_obj_add_style(title, &style_theme_text_primary, 0);
+    lv_obj_set_style_text_font(title, gui_theme_font(GUI_FONT_ROLE_ROW), 0);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+
+    fb->page_jump_label = lv_label_create(popup);
+    lv_obj_add_style(fb->page_jump_label, &style_theme_text_muted, 0);
+    lv_obj_set_style_text_font(fb->page_jump_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_obj_set_width(fb->page_jump_label, lv_pct(100));
+    lv_obj_set_style_text_align(fb->page_jump_label, LV_TEXT_ALIGN_CENTER, 0);
+
+    fb->page_jump_slider = lv_slider_create(popup);
+    lv_obj_set_width(fb->page_jump_slider, lv_pct(90));
+    lv_slider_set_range(fb->page_jump_slider, 1, browser_page_count(fb));
+    lv_obj_add_style(fb->page_jump_slider, gui_theme_accent_style(), LV_PART_INDICATOR);
+    lv_obj_add_style(fb->page_jump_slider, gui_theme_accent_knob_style(), LV_PART_KNOB);
+    lv_obj_add_event_cb(fb->page_jump_slider, page_jump_slider_cb, LV_EVENT_VALUE_CHANGED, fb);
+    page_jump_action_row(popup, TR("Go to page"), page_jump_apply_cb, fb);
+    page_jump_action_row(popup, TR("Cancel"), page_jump_cancel_cb, fb);
+    fb->page_jump_popup = (gui_popup_t) { .popup = popup, .backdrop = backdrop };
+    page_jump_update_label(fb);
+}
+
+void file_browser_show_page_jump(file_browser_t * fb) {
+    if (!file_browser_can_jump_pages(fb)) return;
+    page_jump_create(fb);
+    if (!fb->page_jump_popup.popup || !fb->page_jump_slider) return;
+    int pages = browser_page_count(fb);
+    int current = fb->page_start / FILE_BROWSER_PAGE_SIZE + 1;
+    lv_slider_set_range(fb->page_jump_slider, 1, pages);
+    lv_slider_set_value(fb->page_jump_slider, current, LV_ANIM_OFF);
+    page_jump_update_label(fb);
+    gui_popup_show(&fb->page_jump_popup);
+}
+
+static void page_move_to(file_browser_t * fb, int next) {
+    if (!fb || fb->entry_count <= 0) return;
+    int last_page_start = ((fb->entry_count - 1) / FILE_BROWSER_PAGE_SIZE) * FILE_BROWSER_PAGE_SIZE;
+    if (next < 0) next = 0;
+    if (next > last_page_start) next = last_page_start;
+    if (next == fb->page_start) return;
+    fb->page_start = next;
+    if (!load_visible_entries(fb)) {
+        atomic_store(&fb->index_worker_error, true);
+        fb->entry_count = -1;
+    }
+    rebuild_list(fb);
+    lv_obj_update_layout(fb->list);
+    lv_obj_scroll_to_y(fb->list, 0, LV_ANIM_OFF);
+}
+
+static void page_pager_previous_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    file_browser_t * fb = lv_obj_get_user_data(lv_obj_get_parent(lv_event_get_current_target_obj(e)));
+    if (fb) page_move_to(fb, fb->page_start - FILE_BROWSER_PAGE_SIZE);
+}
+
+static void page_pager_next_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    file_browser_t * fb = lv_obj_get_user_data(lv_obj_get_parent(lv_event_get_current_target_obj(e)));
+    if (fb) page_move_to(fb, fb->page_start + FILE_BROWSER_PAGE_SIZE);
+}
+
+static lv_obj_t * page_pager_button(lv_obj_t * pager, const char * label_text,
+                                    lv_event_cb_t callback, bool enabled, int32_t height) {
+    lv_obj_t * button = lv_obj_create(pager);
+    lv_obj_set_size(button, lv_pct(30), height);
+    lv_obj_add_style(button, &pill_row_bg_style, 0);
+    lv_obj_add_style(button, &list_row_pressed_style, LV_STATE_PRESSED);
+    lv_obj_remove_flag(button, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(button, 0, 0);
+    lv_obj_set_style_border_width(button, 0, 0);
+    if (enabled) {
+        lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, NULL);
+    } else {
+        lv_obj_remove_flag(button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_state(button, LV_STATE_DISABLED);
+        lv_obj_set_style_opa(button, LV_OPA_50, 0);
+    }
+
+    lv_obj_t * label = lv_label_create(button);
+    lv_label_set_text(label, label_text);
+    lv_obj_add_style(label, &style_theme_text_primary, 0);
+    lv_obj_set_style_text_font(label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    return button;
+}
+
+static void add_page_pager(file_browser_t * fb) {
+    lv_obj_t * pager = lv_obj_create(fb->list);
+    int32_t height = lv_font_get_line_height(gui_theme_font(GUI_FONT_ROLE_SUBTEXT)) + BOARD_SCALE_PX(24);
+    if (height < BOARD_SCALE_PX(64)) height = BOARD_SCALE_PX(64);
+    lv_obj_set_size(pager, LIST_ROW_WIDTH_WIDE, height);
+    lv_obj_set_style_bg_opa(pager, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(pager, 0, 0);
+    lv_obj_set_style_pad_all(pager, 0, 0);
+    lv_obj_set_style_pad_gap(pager, 0, 0);
+    lv_obj_set_flex_flow(pager, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(pager, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(pager, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_user_data(pager, fb);
+
+    bool has_previous = fb->page_start > 0;
+    bool has_next = fb->page_start + FILE_BROWSER_PAGE_SIZE < fb->entry_count;
+    page_pager_button(pager, TR("Previous"), page_pager_previous_cb, has_previous, height);
+
+    lv_obj_t * page_label = lv_label_create(pager);
+    lv_label_set_text_fmt(page_label, "%d / %d", fb->page_start / FILE_BROWSER_PAGE_SIZE + 1,
+                          browser_page_count(fb));
+    lv_obj_add_style(page_label, &style_theme_text_primary, 0);
+    lv_obj_set_style_text_font(page_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_obj_set_width(page_label, lv_pct(40));
+    lv_obj_set_style_text_align(page_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_remove_flag(page_label, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    page_pager_button(pager, TR("Next"), page_pager_next_cb, has_next, height);
+    enable_gesture_bubble_recursive(pager);
 }
 
 /* Entries in the folder's index; entry_count is -1 after a read error. */
@@ -928,7 +1216,7 @@ static void entry_click_cb(lv_event_t * e) {
     }
 
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/%s", fb->current_dir, clicked.name);
+    if (!join_child_path(path, sizeof(path), fb->current_dir, clicked.name)) return;
     if (clicked.is_dir) {
         snprintf(fb->current_dir, sizeof(fb->current_dir), "%s", path);
         if (fb->position_depth < FILE_BROWSER_POSITION_STACK) {
@@ -942,6 +1230,8 @@ static void entry_click_cb(lv_event_t * e) {
         fb->page_start = 0;
         scan_current_dir(fb);
         rebuild_list(fb);
+    } else if (fb->callbacks.on_pick_file) {
+        fb->callbacks.on_pick_file(path);
     } else if (clicked.is_playlist) {
         char ** playlist;
         int count;
@@ -963,17 +1253,32 @@ static void entry_click_cb(lv_event_t * e) {
     }
 }
 
-/* A long press starts selection mode with the pressed row selected. */
+/* A long press either starts selection mode or opens the caller's playback
+ * actions. Selection mode retains precedence for More > File Manager. */
 static void entry_long_press_cb(lv_event_t * e) {
     file_browser_t * fb = browser_of(e);
-    if (fb->selecting || !fb->selected) return;
-    set_selected(fb, (unsigned) (intptr_t) lv_event_get_user_data(e), true);
-    fb->selecting = true;
-    /* The rebuild deletes the pressed row; its release must not click
-     * whatever row takes its place. */
+    if (fb->selecting) return;
+    unsigned ordinal = (unsigned) (intptr_t) lv_event_get_user_data(e);
+    if (fb->callbacks.on_selection) {
+        if (!fb->selected) return;
+        set_selected(fb, ordinal, true);
+        fb->selecting = true;
+        /* The rebuild deletes the pressed row; its release must not click
+         * whatever row takes its place. */
+        lv_indev_wait_release(lv_indev_active());
+        rebuild_list_in_place(fb);
+        notify_selection(fb);
+        return;
+    }
+    if (!fb->callbacks.on_long_press) return;
+    dir_entry_t entry;
+    if (!index_entry_at(fb->current_index, ordinal, &entry) ||
+        (!entry.is_dir && !index_row_playable(&entry))) return;
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", fb->current_dir, entry.name);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return;
     lv_indev_wait_release(lv_indev_active());
-    rebuild_list_in_place(fb);
-    notify_selection(fb);
+    fb->callbacks.on_long_press(path, entry.is_dir);
 }
 
 /* A single touch-list row, shared geometry/style with every other row list
@@ -1020,7 +1325,7 @@ static lv_obj_t * add_file_row(file_browser_t * fb, const char * label_text, con
 
 static void rebuild_list(file_browser_t * fb) {
     lv_obj_clean(fb->list);
-    lv_label_set_text(fb->path_label, fb->current_dir);
+    set_path_label(fb);
     if (fb->entry_count < 0) {
         add_file_row(fb, atomic_load(&fb->index_worker_oversized)
                      ? TR("Folder too large to index (tap Back)")
@@ -1028,13 +1333,8 @@ static void rebuild_list(file_browser_t * fb) {
         return;
     }
 
-    if (!at_root(fb)) {
-        add_file_row(fb, TR("Back"), "sub_back/btn_back.png", up_click_cb, NULL, false, false);
-    }
-
-    if (fb->page_start > 0) {
-        add_file_row(fb, TR("Previous"), "sub_back/btn_back.png", page_click_cb,
-                     (void *) (intptr_t) -FILE_BROWSER_PAGE_SIZE, false, false);
+    if (file_browser_can_jump_pages(fb)) {
+        add_page_pager(fb);
     }
 
     if (fb->entry_count == 0) {
@@ -1062,14 +1362,10 @@ static void rebuild_list(file_browser_t * fb) {
         else if (entry->is_cue) icon_asset = "sub_back/btn_playlist.png";
         lv_obj_t * row = add_file_row(fb, entry->name, icon_asset, entry_click_cb, (void *) (intptr_t) i,
                                       fb->selecting, is_selected(fb, (unsigned) i));
-        if (fb->callbacks.on_selection)
+        if (fb->callbacks.on_selection || fb->callbacks.on_long_press)
             lv_obj_add_event_cb(row, entry_long_press_cb, LV_EVENT_LONG_PRESSED, (void *) (intptr_t) i);
     }
 
-    if (page_end < fb->entry_count) {
-        add_file_row(fb, TR("Next"), "playing_plane/btn_next.png", page_click_cb,
-                     (void *) (intptr_t) FILE_BROWSER_PAGE_SIZE, false, false);
-    }
 }
 
 /* Maximum directory recursion depth when walking song directories. */
@@ -1178,12 +1474,14 @@ file_browser_t * file_browser_create(lv_obj_t * parent, const char * root,
     if (!fb) return NULL;
     fb->screen = parent;
     fb->callbacks = *options;
-    fb->list_flags = (options->on_cue_select ? LIST_CUE : 0u) | (options->on_open_other ? LIST_ALL_FILES : 0u);
+    fb->list_flags = ((options->on_cue_select || options->on_pick_file) ? LIST_CUE : 0u) |
+                     ((options->on_open_other || options->on_pick_file) ? LIST_ALL_FILES : 0u);
     snprintf(fb->root_dir, sizeof(fb->root_dir), "%s", root);
     snprintf(fb->current_dir, sizeof(fb->current_dir), "%s", root);
     fb->next = browsers;
     browsers = fb;
     lv_obj_add_event_cb(parent, browser_delete_cb, LV_EVENT_DELETE, fb);
+    lv_obj_add_event_cb(parent, browser_screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, fb);
 
     fb->path_label = lv_label_create(parent);
     lv_obj_set_style_text_color(fb->path_label, lv_color_make(180, 180, 180), 0);
@@ -1191,8 +1489,9 @@ file_browser_t * file_browser_create(lv_obj_t * parent, const char * root,
                                      BOARD_SCALE_PX(20));
     lv_label_set_long_mode(fb->path_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(fb->path_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_obj_set_height(fb->path_label, lv_font_get_line_height(gui_theme_font(GUI_FONT_ROLE_SUBTEXT)));
     lv_obj_align(fb->path_label, LV_ALIGN_TOP_LEFT, 10, STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT + 4);
-    lv_label_set_text(fb->path_label, fb->current_dir);
+    set_path_label(fb);
 
     /* Plain flex-column container, not lv_list -- rows are hand-built pill
      * shapes (add_file_row), not lv_list's own button/text item API. */
@@ -1358,7 +1657,7 @@ bool file_browser_build_playlist_for_path(const char * path, char *** out_playli
 
     char dir_path[PATH_MAX];
     size_t dir_len = (size_t) (slash - path);
-    if (dir_len >= sizeof(dir_path)) dir_len = sizeof(dir_path) - 1;
+    if (dir_len >= sizeof(dir_path)) return false;
     memcpy(dir_path, path, dir_len);
     dir_path[dir_len] = '\0';
 
@@ -1378,7 +1677,7 @@ bool file_browser_build_playlist_for_path(const char * path, char *** out_playli
         if (scanned[i].is_dir || scanned[i].is_playlist || scanned[i].is_cue) continue;
 
         char full_path[PATH_MAX];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, scanned[i].name);
+        if (!join_child_path(full_path, sizeof(full_path), dir_path, scanned[i].name)) continue;
         if (strcmp(full_path, path) == 0) selected = count;
 
         playlist[count] = strdup(full_path);

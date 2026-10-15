@@ -1,0 +1,11 @@
+Unscii 2.0
+
+Unscii is a set of bitmap fonts created by Viznut. The source file used for
+unscii_16.bin is unscii-8.ttf from LVGL's bundled built-in font sources; that
+variant is 8x8 pixels per glyph and is stated to be in the public domain by
+the Unscii project. Unscii-16-full, which incorporates GNU Unifont glyphs,
+is GPL-licensed, but it is not the source used here.
+
+Source and license information:
+https://github.com/viznut/unscii
+LVGL copy of the source information: lvgl/scripts/built_in_font/font_license/unscii/unscii.html

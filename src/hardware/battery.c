@@ -154,6 +154,16 @@ static clockid_t battery_clock_id(void) {
     return cached;
 }
 
+/* Sysfs node name used to build a path. Reject a name that does not fit
+ * instead of opening a truncated, different node. */
+static bool copy_sysfs_name(char * out, size_t out_size, const char * name) {
+    if (!out || out_size == 0 || !name) return false;
+    size_t len = strlen(name);
+    if (len >= out_size) return false;
+    memcpy(out, name, len + 1);
+    return true;
+}
+
 static bool discover_battery_device(char * out, size_t out_size) {
     DIR * dir = opendir(POWER_SUPPLY_DIR);
     if (!dir) return false;
@@ -166,16 +176,15 @@ static bool discover_battery_device(char * out, size_t out_size) {
         if (!read_sysfs_attr(entry->d_name, "type", type, sizeof(type))) continue;
         if (strcmp(type, "Battery") != 0) continue;
         if (strcmp(entry->d_name, "battery") == 0) {
-            snprintf(out, out_size, "%s", entry->d_name);
+            bool copied = copy_sysfs_name(out, out_size, entry->d_name);
             closedir(dir);
-            return true;
+            return copied;
         }
-        if (!fallback[0]) snprintf(fallback, sizeof(fallback), "%s", entry->d_name);
+        if (!fallback[0]) (void) copy_sysfs_name(fallback, sizeof(fallback), entry->d_name);
     }
     closedir(dir);
     if (!fallback[0]) return false;
-    snprintf(out, out_size, "%s", fallback);
-    return true;
+    return copy_sysfs_name(out, out_size, fallback);
 }
 
 battery_external_power_state_t battery_get_external_power_state(void) {

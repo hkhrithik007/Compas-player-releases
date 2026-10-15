@@ -519,11 +519,7 @@ static void add_plugin_row(int index) {
         lv_obj_set_style_text_font(label, subtext_font, 0);
         lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     }
-    lv_obj_t * chevron = lv_label_create(pill);
-    lv_label_set_text(chevron, ">");
-    lv_obj_add_style(chevron, &style_theme_text_muted, 0);
-    lv_obj_set_style_text_font(chevron, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
-    lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(20), 0);
+    build_navigation_chevron(pill, BOARD_SCALE_PX(20), false, 0);
     lv_obj_add_flag(pill, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(pill, store_row_clicked_cb, LV_EVENT_CLICKED, (void *) (intptr_t) index);
 }

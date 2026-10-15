@@ -1388,6 +1388,10 @@ static void bt_control_recover_wedged_daemon(void) {
     char * bluetoothd_argv[] = { (char *) "/usr/libexec/bluetooth/bluetoothd", (char *) "-E", (char *) "-C", NULL };
     bool spawn_ok = subprocess_spawn_daemon(bluetoothd_argv);
     usleep(500000); /* give it a moment to register the adapter before the next step touches it */
+    /* DBG_LOG() compiles out of production builds, which would otherwise
+     * leave these results unused. Recovery still continues either way. */
+    (void) reset_ok;
+    (void) spawn_ok;
 
     /* A freshly-restarted bluetoothd comes up with the adapter powered off
      * by default; this recovery only ever runs because Bluetooth was

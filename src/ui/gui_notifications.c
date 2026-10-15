@@ -1,4 +1,5 @@
 #include "gui_notifications.h"
+#include "gui_navigation.h"
 #include "gui_theme.h"
 #include "gui.h"
 #include "screen_builders.h"
@@ -21,9 +22,6 @@ static lv_obj_t * gui_busy_screen = NULL;
 static lv_obj_t * gui_busy_label = NULL;
 static lv_obj_t * gui_busy_progress_bar = NULL;
 static lv_obj_t * gui_busy_detail_label = NULL;
-
-extern void nav_push(lv_obj_t * screen);
-extern void nav_pop(void);
 
 static void error_toast_hide_timer_cb(lv_timer_t * timer) {
     (void) timer;
@@ -177,12 +175,28 @@ void gui_busy_set_detail(gui_busy_handle_t handle, const char * text) {
     lv_obj_remove_flag(gui_busy_detail_label, LV_OBJ_FLAG_HIDDEN);
 }
 
-void gui_busy_hide(gui_busy_handle_t handle) {
+static void gui_busy_hide_internal(gui_busy_handle_t handle, bool immediate) {
     if (handle != gui_busy_current_token || !gui_busy_screen) return;
     if (lv_screen_active() == gui_busy_screen) {
-        nav_pop();
+        if (immediate) nav_pop_immediate();
+        else nav_pop();
+    } else if (!gui_navigation_transition_in_progress()) {
+        /* A lock screen or another destination can cover the interstitial.
+         * Drop its stack entry without disturbing the current screen or a
+         * transition's captured destination. Folder jobs defer dismissal
+         * until any transition has settled. */
+        lv_obj_t * screens[] = { gui_busy_screen };
+        gui_navigation_remove_screen_instances(screens, 1);
     }
     gui_busy_current_token++; /* invalidate token */
+}
+
+void gui_busy_hide(gui_busy_handle_t handle) {
+    gui_busy_hide_internal(handle, false);
+}
+
+void gui_busy_hide_immediate(gui_busy_handle_t handle) {
+    gui_busy_hide_internal(handle, true);
 }
 
 void gui_notifications_init(void) {
@@ -202,7 +216,7 @@ lv_obj_t * build_menu_popup(const menu_popup_row_t * rows, int row_count, lv_eve
         lv_obj_t * row = lv_obj_create(popup);
         style_popup_action_row(row);
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(row, rows[i].cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(row, rows[i].cb, LV_EVENT_CLICKED, rows[i].user_data);
 
         lv_obj_t * label = lv_label_create(row);
         lv_obj_set_width(label, lv_pct(100));

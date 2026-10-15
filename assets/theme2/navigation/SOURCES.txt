@@ -1,0 +1,19 @@
+Navigation icons (2026-10-14)
+Runtime path: /usr/resource/litegui/theme2/navigation/
+Icons: 44x44 RGBA PNGs, rendered from @phosphor-icons/core@2.1.1 regular SVG
+glyphs with Compas gradients or white monochrome fills.
+chevron-right.png is 24x24.
+
+search.png uses assets/regular/magnifying-glass.svg with cyan gradient
+(#a0e6f4 to #51bad7).
+more.png uses assets/regular/list.svg with violet gradient
+(#d7a9fa to #a36be4).
+back.png uses assets/regular/caret-left.svg with white monochrome fill.
+chevron-right.png uses assets/regular/caret-right.svg with white monochrome fill.
+
+Pinned source URLs:
+https://unpkg.com/@phosphor-icons/core@2.1.1/assets/regular/magnifying-glass.svg
+https://unpkg.com/@phosphor-icons/core@2.1.1/assets/regular/list.svg
+https://unpkg.com/@phosphor-icons/core@2.1.1/assets/regular/caret-left.svg
+https://unpkg.com/@phosphor-icons/core@2.1.1/assets/regular/caret-right.svg
+MIT terms: assets/theme2/submenu/LICENSE (Phosphor Icons, 2023).

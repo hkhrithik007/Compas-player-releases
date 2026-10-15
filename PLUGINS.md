@@ -8,7 +8,8 @@ Ready-made plugins live in the
 [compas-plugins repository](https://github.com/Starnished66/compas-plugins).
 The in-app **Plugin Store** (Settings > System > Plugin Manager > Plugin
 Store) installs from it. Browse it for real examples, or contribute your own.
-More examples are in `plugins_examples/` in this repository.
+Browse [published plugins](https://github.com/Starnished66/compas-plugins/tree/main/plugins)
+and [standalone examples](https://github.com/Starnished66/compas-plugins/tree/main/examples).
 
 This guide describes the API in `src/plugins/plugin_manager.c`. If the two
 ever disagree, the code is right.
@@ -117,6 +118,7 @@ loop is stopped. File reads through Lua's own file handles do count.
 | Entry point | Function | Limit |
 | --- | --- | --- |
 | A row in a native list | `register_list_item` | 16 in Playback & Controls or Sound; 8 in other lists, all plugins together |
+| An action in the now-playing menu | `register_list_item` | 8 actions, all plugins together; requires `ui.player_menu` |
 | A tile in Stream Media | `register_stream_media_tile` | 5 tiles |
 | A tile on Home | `register_home_tile` | 6 tiles, shown only when a Home layout lists them |
 | An on/off tile in the quick drawer | `register_quick_toggle` | 4 tiles |
@@ -125,6 +127,7 @@ The lists that accept rows:
 
 | `list_id` | Where the row appears | Good for |
 | --- | --- | --- |
+| `"player"` | Now Playing > three-dot menu, after Information | Track tools and playback actions |
 | `"books"` | Books | Readers, audiobooks, reference tools |
 | `"settings"` | Settings > System > Additional Tools | General plugin settings |
 | `"display"` | Settings > Display | Themes and visual tools |
@@ -139,6 +142,12 @@ The lists that accept rows:
 Rows from different plugins share a list, up to 16 in `playback` or
 `music_audio` and 8 in other lists, and the list
 scrolls. Any other `list_id` is an error.
+
+Use `plugin.has_capability("ui.player_menu")` before registering a `"player"`
+row. Its callback runs when the action is tapped and may open a plugin screen
+or perform an action. The player menu scrolls when its built-in and plugin
+actions exceed the available height. This is additive and does not require a
+newer API version.
 
 ## Identity and compatibility
 
@@ -169,8 +178,8 @@ plugin.define({
 
   | Area | Tokens |
   | --- | --- |
-  | UI | `ui.list`, `ui.settings`, `ui.row_width`, `ui.text_input`, `ui.toast`, `ui.progress`, `ui.screenshot`, `ui.theme`, `ui.theme_refresh`, `ui.reload`, `ui.home_layout`, `ui.home_tiles`, `ui.launcher_layout`, `ui.home_background`, `ui.lock_screen`, `ui.quick_toggle`, `ui.text_view`, `ui.text_view_images`, `ui.list_grid`, `ui.list_showing`, `ui.list_update`, `ui.list_wrap`, `ui.settings_list_wrap`, `ui.player_layout_xml`, `ui.file_manager` |
-  | Playback and audio | `playback.control`, `playback.state`, `playback.events`, `playback.progress`, `playback.remote`, `playback.transport_skip`, `playback.speed`, `playback.format`, `playback.output_info`, `playback.silent_volume`, `playback.transient_volume`, `playback.output_events`, `playback.settings`, `playback.ab_loop`, `playback.ab_switch`, `playback.http_seek`, `audio.peq`, `audio.peq.transient`, `audio.peq.state`, `audio.stereo_width`, `audio.crossfeed`, `audio.hw_volume_curve` |
+  | UI | `ui.list`, `ui.settings`, `ui.row_width`, `ui.text_input`, `ui.toast`, `ui.progress`, `ui.screenshot`, `ui.theme`, `ui.theme_refresh`, `ui.reload`, `ui.home_layout`, `ui.home_tiles`, `ui.launcher_layout`, `ui.home_background`, `ui.lock_screen`, `ui.quick_toggle`, `ui.text_view`, `ui.text_view_images`, `ui.list_grid`, `ui.list_showing`, `ui.list_update`, `ui.list_wrap`, `ui.settings_list_wrap`, `ui.player_layout_xml`, `ui.file_manager`, `ui.file_picker` |
+  | Playback and audio | `playback.control`, `playback.state`, `playback.events`, `playback.progress`, `playback.remote`, `playback.transport_skip`, `playback.speed`, `playback.format`, `playback.output_info`, `playback.silent_volume`, `playback.transient_volume`, `playback.output_events`, `playback.settings`, `playback.ab_loop`, `playback.ab_switch`, `playback.http_seek`, `audio.peq`, `audio.peq.transient`, `audio.peq.state`, `audio.stereo_width`, `audio.crossfeed`, `audio.crossfeed.angle`, `audio.hw_volume_curve` |
   | Files | `filesystem.sd`, `filesystem.mkdir`, `filesystem.playlists`, `filesystem.file_ops` |
   | Storage | `storage.namespaced`, `storage.secrets`, `storage.secrets_get` |
   | Network | `network.http.sync`, `network.http.async`, `network.http.download`, `network.http.download_progress` |
@@ -197,11 +206,11 @@ plugin.define({
 | 13 | LED control, `get_volume`, `get_battery`, and the `volume_changed`, `battery_changed`, `suspending` and `system_resumed` events |
 | 14 | `zip_read`, `zip_list`, `zip_image_async`, `html_to_blocks`, `show_text_view` with pictures, grid lists, `is_list_showing`, and one long (4095-byte) HTTP header per request |
 | 15 | Full XML Player-layout support (`ui.player_layout_xml`), including plugin-bundle discovery, current named-widget features, companion PNG previews, and resolution-specific XML variants using `@WIDTHxHEIGHT` or `_WIDTHxHEIGHT` filenames |
-| 16 | Playback speed/stereo width/progress plus format/output snapshots, silent volume, transient EQ, output events, playback settings, native A–B loops/comparison, and finite HTTP seeking. Modeless progress bars and download byte snapshots are also available, as is the File Manager (`open_file_manager`, `file_copy`, `file_move`, `file_delete`). API 16 remains the unreleased v1.1 API. |
+| 16 | Playback speed/stereo width/progress plus format/output snapshots, silent volume, transient EQ, output events, playback settings, native A–B loops/comparison, and finite HTTP seeking. Modeless progress bars and download byte snapshots are also available, as are File Manager operations and the native file picker. API 16 is the standard for new plugins. |
 
 All of these are additions; older plugins keep working.
 
-Headphone crossfeed is the capability `audio.crossfeed` (`plugin.eq_get_crossfeed` / `plugin.eq_set_crossfeed`). It does not raise `PLUGIN_API_VERSION`. Check the capability; do not require a newer `api_min`.
+Headphone crossfeed is the capability `audio.crossfeed` (`plugin.eq_get_crossfeed` / `plugin.eq_set_crossfeed`). It does not raise `PLUGIN_API_VERSION`. Check the capability; do not require a newer `api_min`. The additive capability `audio.crossfeed.angle` indicates the optional angle field in `get_eq_state()` / `eq_apply_state()`; it does not raise the API version.
 
 ## Screens
 
@@ -494,8 +503,9 @@ player versions and store catalog classification. On current versions of the
 player, `Themes.lua` is recognized as a legacy theme loader and suppressed at
 load time, as native theme management handles `.theme` files directly.
 
-The script `plugins_examples/Themes.lua` remains available as a historical
-reference format for custom theme application and programmatic UI styling.
+The [Themes plugin source](https://github.com/Starnished66/compas-plugins/tree/main/plugins/Themes)
+shows the historical reference format for custom theme application and
+programmatic UI styling.
 
 | To apply... | Call |
 | --- | --- |
@@ -741,8 +751,9 @@ text_muted=0x9FB3C8
 icon_root=theme2
 ```
 
-The bundled themes in `plugins_examples/Themes/` (for example `White.theme`
-and `MountainSunset.theme`) are complete examples to copy from.
+The [published theme packages](https://github.com/Starnished66/compas-plugins/tree/main/plugins)
+include complete examples such as [White](https://github.com/Starnished66/compas-plugins/tree/main/plugins/ThemeWhite)
+and [Mountain Sunset](https://github.com/Starnished66/compas-plugins/tree/main/plugins/ThemeMountainSunset).
 
 ## Playback
 
@@ -845,8 +856,8 @@ These additions keep API version **16**. Check each capability with
 | `get_playback_format()` | `playback.format`: `nil` while idle, otherwise a snapshot with `path`, `codec`, source `sample_rate`/`bit_depth`, `output_sample_rate`/`output_bit_depth`, `channels`, `bitrate_kbps`, `duration_seconds`, `is_stream`, `seekable`, `is_dsd`, `dop`, `replaygain_applied`/`replaygain_applied_db`, `generation`, and live `software_volume_gain`, `playback_speed`, `crossfade_enabled`. Unknown source depth/bitrate is 0; MP3 has no encoded PCM bit depth. Software gain is a linear PCM multiplier, distinct from hardware/UI volume. Crossfade reports the setting, not whether two tracks are currently mixing. |
 | `get_output_info()` | `playback.output_info`: `route` (`wired`, `bluetooth`, or `usb_dac`), `active`, PCM `sample_rate`/`bit_depth`, `hardware_sample_rate`/`hardware_bit_depth` when known, cached `bluetooth_codec` when available, `resampling`, `resampling_known`, and `dop`. Bluetooth and USB conversion/final hardware formats are unknown; matching PCM fields alone cannot prove bit-perfect output. |
 | `eq_apply_profile(path, { persist = false })` | `audio.peq.transient`: applies an SD profile to runtime EQ without saving it. Default persistence remains enabled. Later explicit EQ save/edit operations may save the active profile. |
-| `get_eq_state()` | `audio.peq.state`: detached runtime snapshot with `bypass`, `preamp_db`, `stereo_width`, `crossfeed`, and ten ordered `bands` (`index`, `freq_hz`, `gain_db`, `q`, `type`, `enabled`). This observes active settings, including transient profiles, rather than reading a possibly stale saved profile. |
-| `eq_apply_state(state, { persist = false })` | `audio.peq.state`: validates the complete snapshot before applying it. Persistence defaults to true. Plugins can restore a saved runtime snapshot without writing flash; compare the current state with the last state they applied before restoring, to preserve subsequent user changes. Numerical limits: preamp/gain −300 to 300 dB, frequency 1–24000 Hz, Q 0.01–100, width 0–2, crossfeed 0–1; all must be finite. `crossfeed` may be omitted; a missing field applies as off so older snapshots still load. |
+| `get_eq_state()` | `audio.peq.state`: detached runtime snapshot with `bypass`, `preamp_db`, `stereo_width`, `crossfeed`, `crossfeed_angle`, and ten ordered `bands` (`index`, `freq_hz`, `gain_db`, `q`, `type`, `enabled`). This observes active settings, including transient profiles, rather than reading a possibly stale saved profile. |
+| `eq_apply_state(state, { persist = false })` | `audio.peq.state`: validates the complete snapshot before applying it. Persistence defaults to true. Plugins can restore a saved runtime snapshot without writing flash; compare the current state with the last state they applied before restoring, to preserve subsequent user changes. Numerical limits: preamp/gain −300 to 300 dB, frequency 1–24000 Hz, Q 0.01–100, width 0–2, crossfeed 0–1; all must be finite. `crossfeed` may be omitted; a missing field applies as off so older snapshots still load. Optional `crossfeed_angle` is 0 (no delay), 30, 45, 60, or 90 degrees; omission applies no delay. Check `audio.crossfeed.angle` before relying on that field. |
 | `get_track_metadata(path)` | `library.track_metadata`: exact local SD-path lookup in the scanned database, returning `id`, `path`, `title`, `artist`, `album`, `album_artist`, and `genre`. Returns `nil` for unindexed/remote/invalid paths; absent tags are empty strings. Does not parse files or iterate the library on each track. |
 | `get_crossfade()`, `set_crossfade(enabled)` | `playback.settings`: boolean; retains native coupling with gapless. |
 | `get_gapless()`, `set_gapless(enabled)` | `playback.settings`: boolean; disabling gapless also disables crossfade. |
@@ -951,6 +962,15 @@ operations, and `"ui.file_manager"` before `open_file_manager`.
   when given (an existing folder on the SD card; a path elsewhere raises a
   Lua error). Returns `true`, or `nil, error` when the folder does not exist
   or the File Manager is already open under another screen.
+- `plugin.pick_file(folder, callback)`: opens the native SD card browser at
+  `folder` (pass `nil` for the SD root) and calls `callback(path)` with the selected file,
+  or `callback(nil)` if the user backs out or returns Home. The callback runs
+  after the picker leaves the navigation stack. Directories can be browsed;
+  audio files, playlists, cue sheets, and other files are returned as one raw
+  path without playback. Only one picker may be pending; another request
+  returns `nil, error`; a successful open returns `true`. An invalid starting
+  folder raises a Lua error. Plugin unload or UI reload silently cancels a
+  pending callback. Check `plugin.has_capability("ui.file_picker")`.
 - `plugin.file_copy(paths, dest_dir [, callback])`,
   `plugin.file_move(paths, dest_dir [, callback])`,
   `plugin.file_delete(paths [, callback])`: copy, move or delete files and
@@ -1041,17 +1061,27 @@ Crossfeed is saved as `crossfeed` in the same `.peq` current file and named
 profiles, so `eq_save_profile` / `eq_load_profile` and `get_eq_state` /
 `eq_apply_state` round-trip it. Profiles and snapshots that omit the field load
 as off. `eq_reset()` and the EQ screen's Flat / Reset actions turn it off.
-New installs start off. The native control is one strength slider on the EQ
-band-options screen (0 is off). There is no separate enable switch.
+New installs start off. The EQ band-options screen has a strength slider (0 is off) and a global
+Crossfeed angle selector. There is no separate enable switch. Crossfeed runs
+only when EQ is On; bypass skips the entire stage.
 
 Crossfeed is a filtered-difference headphone blend. It is not a stereo-width
-matrix, a room model, or a head-related transfer function, and it has no
-interaural delay. A one-pole low-pass at 700 Hz tracks
+matrix, a room model, or a head-related transfer function. In No delay mode
+it retains the original response: a one-pole low-pass at 700 Hz tracks
 each channel. At strength `s` the cross coefficient is `k = 0.30 * s`:
 `yL = xL + k * (lpR - lpL)` and the mirror for the right channel. Once the
 low-pass has settled, that is direct `1 - k` and cross `k`. A centered steady
 signal stays at unity gain. A steady full-scale hard-panned tone stays inside
 full scale. High frequencies are left almost untouched.
+
+The optional `crossfeed_angle` is persisted with the profile. Values 30, 45,
+60, and 90 degrees select approximately 261, 381, 488, and 655 microseconds,
+rounded to the nearest sample at the PCM stage's rate. Only the opposite-channel
+low-pass contribution is delayed; the direct output is not buffered. No delay
+(0) is the default for new installs, resets, older profiles, and snapshots
+without this field. A fixed 512-frame stereo ring caps the tap at 511 frames.
+Unlike No delay mode, delayed identical-channel stereo can change phase and
+frequency response; steady DC remains at unity. Single-channel PCM is unchanged.
 
 A polarity reversal can still overshoot while the low-pass holds the previous
 sample, by about `1 + 2k` (1.6 at full strength). The PCM stage's 1 ms limiter
@@ -1063,7 +1093,9 @@ gain is not a constant attenuation: in-range audio, including steady mono and
 a steady hard-pan, is unchanged. Strength 0 does not apply it. Preamp boosts
 that already exceed the ceiling still go to the existing limiter.
 
-Strength changes ramp over 20 ms. The audio thread restarts the low-pass from
+Strength and delay-tap changes blend over 20 ms. Rapid angle changes coalesce
+to the latest selection after the current blend finishes. The audio thread
+restarts the low-pass and delay history from
 the next sample after a stop/restart, seek, A-B loop jump, A-B source switch,
 or a DoP stretch followed by PCM, including when the rate and PCM format are
 unchanged. Continuous gapless PCM and ordinary block boundaries keep the
@@ -1092,8 +1124,8 @@ recreate the stock firmware's Low and High Gain modes. `curve` is a table of
 exactly 101 integers (volume 0% to 100%), each a raw register value from 0
 (loudest) to 255 (quietest). `nil` restores the built-in curve. It applies
 immediately but isn't saved, so set it again on every load. It affects only
-the headphone and line output, not Bluetooth or USB. See
-`plugins_examples/GainMode.lua`.
+the headphone and line output, not Bluetooth or USB. See the
+[Gain Mode plugin](https://github.com/Starnished66/compas-plugins/tree/main/plugins/GainMode).
 
 ## Device
 
@@ -1361,35 +1393,36 @@ them quick.
 
 ## Examples
 
-Files in this table are in `plugins_examples/`, except ListenBrainz Scrobbler and Radio Browser, which are installed from the plugin store.
+Plugin links point to the canonical compas-plugins repository. The separate
+examples are in its [`examples/` directory](https://github.com/Starnished66/compas-plugins/tree/main/examples).
 
 | Example | Shows |
 | --- | --- |
-| `Audiobooks.lua` | Books row, folder scanning, resume, bookmarks, chapters, sleep timer |
-| `Podcasts.lua` | RSS and OPML, episode downloads, resume |
-| `NetRadio.lua` | Stream Media tile and radio streams from `Radio.txt` |
-| `HiByStockPlayer.lua` | A Player layout in the style of the stock HiBy OS player, with its own lyrics area, offered in Settings and applied from a row |
-| `Themes.lua` | Historical reference format: icons, colors, Home layout, saved choice, `refresh_theme` |
-| `SoundProfiles.lua` | Switching EQ profiles |
-| `MSEB.lua` | Chained settings screens, sliders sharing EQ bands, backup and restore |
-| `GainMode.lua` | Low/High Gain volume curves |
-| `PlaybackExtras.lua` | Toggles, sliders, nested settings, row icons |
-| `PlayThrough.lua` | Continuing into the next folder or album when a queue ends |
-| `ExtendedSleepTimer.lua` | A longer sleep timer with `stop()` |
-| `LastFmScrobbler.lua` | Events, timers, text input, MD5, async HTTP |
-| `AsyncHttp.lua` | `http_request` and `cancel` |
-| `PluginApiInfo.lua` | Version and capability checks |
-| `NestedLists.lua` | Stacked lists and busy text input |
-| `EpubReader.lua` | ZIP and HTML helpers, paged reading, saved position |
-| `LyricsFetcher.lua` | LRCLIB synced `.lrc` sidecar for the current local track |
-| `CoverArtFetcher.lua` | MusicBrainz + Cover Art Archive `cover.jpg` for the current album folder |
-| `AlbumShuffle.lua` | Random albums with in-album track order, continued on `queue_exhausted` |
-| `ListenBrainzScrobbler.lua` | ListenBrainz user-token scrobble and offline queue (plugin store) |
-| `RadioBrowser.lua` | Radio Browser search and `Radio.txt` favorites (plugin store) |
+| [Audiobooks](https://github.com/Starnished66/compas-plugins/tree/main/plugins/Audiobooks) | Books row, folder scanning, resume, bookmarks, chapters, sleep timer |
+| [Podcasts](https://github.com/Starnished66/compas-plugins/tree/main/plugins/Podcasts) | RSS and OPML, episode downloads, resume |
+| [NetRadio](https://github.com/Starnished66/compas-plugins/tree/main/plugins/NetRadio) | Stream Media tile and radio streams from `Radio.txt` |
+| [HiByStockPlayer](https://github.com/Starnished66/compas-plugins/tree/main/examples/HiByStockPlayer) | A Player layout in the style of the stock HiBy OS player, with its own lyrics area, offered in Settings and applied from a row |
+| [Themes](https://github.com/Starnished66/compas-plugins/tree/main/plugins/Themes) | Historical reference format: icons, colors, Home layout, saved choice, `refresh_theme` |
+| [SoundProfiles](https://github.com/Starnished66/compas-plugins/tree/main/plugins/SoundProfiles) | Switching EQ profiles |
+| [MSEB](https://github.com/Starnished66/compas-plugins/tree/main/plugins/MSEB) | Chained settings screens, sliders sharing EQ bands, backup and restore |
+| [GainMode](https://github.com/Starnished66/compas-plugins/tree/main/plugins/GainMode) | Low/High Gain volume curves |
+| [PlaybackExtras](https://github.com/Starnished66/compas-plugins/tree/main/plugins/PlaybackExtras) | Toggles, sliders, nested settings, row icons |
+| [PlayThrough](https://github.com/Starnished66/compas-plugins/tree/main/plugins/PlayThrough) | Continuing into the next folder or album when a queue ends |
+| [ExtendedSleepTimer](https://github.com/Starnished66/compas-plugins/tree/main/plugins/ExtendedSleepTimer) | A longer sleep timer with `stop()` |
+| [LastFmScrobbler](https://github.com/Starnished66/compas-plugins/tree/main/plugins/LastFmScrobbler) | Events, timers, text input, MD5, async HTTP |
+| [AsyncHttp](https://github.com/Starnished66/compas-plugins/tree/main/examples/AsyncHttp) | `http_request` and `cancel` |
+| [PluginApiInfo](https://github.com/Starnished66/compas-plugins/tree/main/examples/PluginApiInfo) | Version and capability checks |
+| [NestedLists](https://github.com/Starnished66/compas-plugins/tree/main/examples/NestedLists) | Stacked lists and busy text input |
+| [EpubReader](https://github.com/Starnished66/compas-plugins/tree/main/plugins/EpubReader) | ZIP and HTML helpers, paged reading, saved position |
+| [LyricsFetcher](https://github.com/Starnished66/compas-plugins/tree/main/plugins/LyricsFetcher) | LRCLIB synced `.lrc` sidecar for the current local track |
+| [CoverArtFetcher](https://github.com/Starnished66/compas-plugins/tree/main/plugins/CoverArtFetcher) | MusicBrainz + Cover Art Archive `cover.jpg` for the current album folder |
+| [AlbumShuffle](https://github.com/Starnished66/compas-plugins/tree/main/plugins/AlbumShuffle) | Random albums with in-album track order, continued on `queue_exhausted` |
+| [ListenBrainzScrobbler](https://github.com/Starnished66/compas-plugins/tree/main/plugins/ListenBrainzScrobbler) | ListenBrainz user-token scrobble and offline queue (plugin store) |
+| [RadioBrowser](https://github.com/Starnished66/compas-plugins/tree/main/plugins/RadioBrowser) | Radio Browser search and `Radio.txt` favorites (plugin store) |
 
 ## Example plugins: lyrics, covers, album shuffle
 
-Copy any of these from `plugins_examples/` to `<SD card>/.plugins/`, then **Refresh Plugins**.
+The plugin packages are in the [compas-plugins repository](https://github.com/Starnished66/compas-plugins/tree/main/plugins); standalone snippets are in its [examples](https://github.com/Starnished66/compas-plugins/tree/main/examples). After copying a plugin package's Lua file to `<SD card>/.plugins/`, tap **Refresh Plugins**.
 
 ### Lyrics Fetcher
 
@@ -1418,8 +1451,6 @@ Settings > Playback & Controls > **Album Shuffle**.
 - **Start album shuffle** picks a random album through paged `plugin.library_get_albums`, resolves identity with `plugin.library_get_song(first_song_id)` (preferring `album_artist` so compilations keep every track), loads `plugin.get_album_tracks(artist, album)` in album order, and plays them with `plugin.play_list(paths, 1)`. Requires plugin API 15.
 - When the queue is exhausted forward (`queue_exhausted` with `direction == 1`), or the last track ends naturally, another album is chosen. Immediate repeats are avoided when more than one album exists. An empty library is reported with a toast.
 - Native shuffle would reorder tracks inside the album, so start this while the player is already in **sequential** mode (or select it with `plugin.set_play_mode("sequential")` on builds advertising `playback.settings`). Explicit Stop, picking a different track/queue, or **Stop album shuffle** ends the session so the plugin does not take over playback.
-
-Host-side mocked tests for these three live in `plugins_examples/tests/` (`lua plugins_examples/tests/run.lua`).
 
 ## Testing and debugging
 

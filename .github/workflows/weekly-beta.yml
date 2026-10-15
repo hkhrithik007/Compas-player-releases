@@ -44,7 +44,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            file genisoimage lua5.4 p7zip-full squashfs-tools
+            file genisoimage p7zip-full squashfs-tools
 
       - name: Build and validate player
         env:
@@ -80,9 +80,6 @@ jobs:
               exit 1
             fi
           done
-          find plugins_examples -maxdepth 1 -type f -name '*.lua' -print0 \
-            | xargs -0 -r -n1 luac5.4 -p
-
       - name: Download verified Staging Image
         env:
           GH_TOKEN: ${{ github.token }}

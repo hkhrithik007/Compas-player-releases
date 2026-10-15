@@ -5,7 +5,6 @@
 #include "audio.h"
 #include "../core/storage_paths.h"
 
-#include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -29,10 +28,12 @@ extern void install_thread_crash_altstack(void) __attribute__((weak));
 
 #define WAVEFORM_PATH_MAX 2048
 #define WAVEFORM_CACHE_DIR SD_COMPAS_ROOT "/waveforms"
-#define WAVEFORM_CACHE_LIMIT 64
-#define WAVEFORM_CACHE_MAGIC "WFM1"
-#define WAVEFORM_CACHE_HEADER_SIZE 26U
-#define WAVEFORM_CACHE_RECORD_MAX (WAVEFORM_CACHE_HEADER_SIZE + WAVEFORM_PATH_MAX + WAVEFORM_BINS + 4U)
+#define WAVEFORM_CACHE_MAGIC_V1 "WFM1"
+#define WAVEFORM_CACHE_MAGIC_V2 "WFM2"
+#define WAVEFORM_CACHE_V1_HEADER_SIZE 26U
+#define WAVEFORM_CACHE_V2_HEADER_SIZE 34U
+#define WAVEFORM_CACHE_RECORD_MAX (WAVEFORM_CACHE_V2_HEADER_SIZE + WAVEFORM_PATH_MAX + WAVEFORM_BINS + 4U)
+#define WAVEFORM_CACHE_MAX_GENERATION_NS UINT64_C(86400000000000)
 #define WAVEFORM_FAILURE_CACHE_LIMIT 16U
 
 typedef struct {
@@ -57,6 +58,9 @@ static bool waveform_pending;
 static bool waveform_ready;
 static uint64_t waveform_generation;
 static char waveform_requested_path[WAVEFORM_PATH_MAX];
+static bool waveform_prefetch_pending;
+static uint64_t waveform_prefetch_revision;
+static char waveform_prefetch_path[WAVEFORM_PATH_MAX];
 static char waveform_result_path[WAVEFORM_PATH_MAX];
 static uint8_t waveform_result_bins[WAVEFORM_BINS];
 static failed_waveform_t waveform_failures[WAVEFORM_FAILURE_CACHE_LIMIT];
@@ -147,6 +151,45 @@ static bool generation_cancelled(void * opaque) {
     return cancelled;
 }
 
+typedef struct {
+    uint64_t generation;
+    uint64_t revision;
+    const char * path;
+} waveform_prefetch_context_t;
+
+static bool prefetch_cancelled(void * opaque) {
+    const waveform_prefetch_context_t * context = opaque;
+    if (!context) return true;
+    pthread_mutex_lock(&waveform_mutex);
+    bool cancelled = waveform_stopping ||
+                     waveform_generation != context->generation ||
+                     waveform_prefetch_revision != context->revision ||
+                     waveform_requested_path[0] == '\0' ||
+                     waveform_prefetch_path[0] == '\0' ||
+                     strcmp(waveform_prefetch_path, context->path) != 0;
+    pthread_mutex_unlock(&waveform_mutex);
+    return cancelled;
+}
+
+static bool prefetch_is_current_locked(uint64_t generation, uint64_t revision,
+                                       const char * path) {
+    return !waveform_stopping && waveform_generation == generation &&
+           waveform_prefetch_revision == revision && waveform_requested_path[0] != '\0' &&
+           waveform_prefetch_path[0] != '\0' && strcmp(waveform_prefetch_path, path) == 0;
+}
+
+/* A foreground transition invalidates speculative work without changing its
+ * generation token or touching the visible waveform result. Caller holds the
+ * mutex. */
+static void clear_prefetch_locked(void) {
+    if (waveform_prefetch_path[0] || waveform_prefetch_pending) {
+        waveform_prefetch_revision++;
+        if (waveform_prefetch_revision == 0) waveform_prefetch_revision++;
+    }
+    waveform_prefetch_pending = false;
+    waveform_prefetch_path[0] = '\0';
+}
+
 static uint32_t fnv1a_update(uint32_t hash, const uint8_t * data, size_t len) {
     for (size_t i = 0; i < len; i++) {
         hash ^= data[i];
@@ -188,6 +231,26 @@ static uint64_t get_u64(const uint8_t * in) {
     return value;
 }
 
+static uint64_t monotonic_now_ns(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0 || now.tv_nsec < 0)
+        return 0;
+    uint64_t seconds = (uint64_t) now.tv_sec;
+    if (seconds > (UINT64_MAX - (uint64_t) now.tv_nsec) / UINT64_C(1000000000)) return 0;
+    return seconds * UINT64_C(1000000000) + (uint64_t) now.tv_nsec;
+}
+
+static uint64_t elapsed_ns(uint64_t start_ns) {
+    uint64_t end_ns = monotonic_now_ns();
+    return start_ns != 0 && end_ns > start_ns ? end_ns - start_ns : 0;
+}
+
+typedef struct {
+    uint64_t generation_ns;
+    uint64_t lookup_ns;
+    bool valid_record;
+} cache_lookup_t;
+
 /* Cache identity includes the full local path and its current file facts.
  * Hash collisions are harmless: records also verify all three values. */
 static uint64_t cache_key(const char * path, const file_facts_t * facts) {
@@ -216,82 +279,104 @@ static bool cache_path(uint64_t key, char * out, size_t out_size) {
     return n > 0 && (size_t) n < out_size;
 }
 
-static bool cache_load(const char * path, const file_facts_t * facts, uint8_t * bins) {
-    if (!ensure_cache_dir()) return false;
+/* Remove only the entry for this exact identity, and only while the request
+ * that observed its lookup is still current. Filesystem work stays outside
+ * the mutex used by the UI-facing request state. */
+static void cache_remove_if_current(const char * path, const file_facts_t * facts,
+                                    uint64_t generation, uint64_t revision,
+                                    bool prefetch_job) {
+    file_facts_t current;
+    if (!get_file_facts(path, &current) || !facts_equal(facts, &current)) return;
+    pthread_mutex_lock(&waveform_mutex);
+    bool request_current = prefetch_job
+        ? prefetch_is_current_locked(generation, revision, path)
+        : !waveform_stopping && waveform_generation == generation &&
+          strcmp(waveform_requested_path, path) == 0;
+    pthread_mutex_unlock(&waveform_mutex);
+    if (!request_current) return;
+
+    char name[sizeof(WAVEFORM_CACHE_DIR) + 40U];
+    if (cache_path(cache_key(path, facts), name, sizeof(name))) (void) unlink(name);
+}
+
+static bool cache_store_worthwhile(const cache_lookup_t * lookup, uint64_t generation_ns) {
+    /* Unknown measurements retain the previous cache behavior. */
+    return !lookup || lookup->lookup_ns == 0 || generation_ns == 0 ||
+           lookup->lookup_ns <= generation_ns / 2U;
+}
+
+static bool cache_load(const char * path, const file_facts_t * facts, uint8_t * bins,
+                       cache_lookup_t * lookup) {
+    uint64_t started_ns = monotonic_now_ns();
+    if (lookup) memset(lookup, 0, sizeof(*lookup));
+    bool loaded = false;
+    if (!ensure_cache_dir()) goto done;
     char name[sizeof(WAVEFORM_CACHE_DIR) + 40U];
     uint64_t key = cache_key(path, facts);
-    if (!cache_path(key, name, sizeof(name))) return false;
+    if (!cache_path(key, name, sizeof(name))) goto done;
 
     FILE * file = fopen(name, "rb");
-    if (!file) return false;
+    if (!file) goto done;
     uint8_t record[WAVEFORM_CACHE_RECORD_MAX];
     size_t got = fread(record, 1, sizeof(record), file);
     bool extra = fgetc(file) != EOF;
     bool io_ok = !ferror(file);
     fclose(file);
-    if (!io_ok || extra || got < WAVEFORM_CACHE_HEADER_SIZE + WAVEFORM_BINS + 4U ||
-        memcmp(record, WAVEFORM_CACHE_MAGIC, 4) != 0) return false;
+    if (!io_ok || extra || got < WAVEFORM_CACHE_V1_HEADER_SIZE + WAVEFORM_BINS + 4U)
+        goto done;
+
+    size_t header_size;
+    uint64_t generation_ns = 0;
+    if (memcmp(record, WAVEFORM_CACHE_MAGIC_V1, 4) == 0)
+        header_size = WAVEFORM_CACHE_V1_HEADER_SIZE;
+    else if (memcmp(record, WAVEFORM_CACHE_MAGIC_V2, 4) == 0) {
+        header_size = WAVEFORM_CACHE_V2_HEADER_SIZE;
+        if (got < header_size + WAVEFORM_BINS + 4U) goto done;
+        generation_ns = get_u64(record + 26);
+        if (generation_ns > WAVEFORM_CACHE_MAX_GENERATION_NS) goto done;
+    }
+    else goto done;
 
     uint16_t path_len = get_u16(record + 4);
     uint64_t size = get_u64(record + 6);
     int64_t mtime_sec = (int64_t) get_u64(record + 14);
     uint32_t mtime_nsec = get_u32(record + 22);
-    size_t expected = WAVEFORM_CACHE_HEADER_SIZE + path_len + WAVEFORM_BINS + 4U;
+    size_t expected = header_size + path_len + WAVEFORM_BINS + 4U;
     if (path_len == 0 || path_len >= WAVEFORM_PATH_MAX || expected != got ||
         size != (uint64_t) facts->size || mtime_sec != facts->mtime_sec ||
         mtime_nsec != facts->mtime_nsec || strlen(path) != path_len ||
-        memcmp(record + WAVEFORM_CACHE_HEADER_SIZE, path, path_len) != 0)
-        return false;
+        memcmp(record + header_size, path, path_len) != 0)
+        goto done;
 
     uint32_t stored_checksum = get_u32(record + got - 4U);
-    if (stored_checksum != record_checksum(record, got - 4U)) return false;
-    memcpy(bins, record + WAVEFORM_CACHE_HEADER_SIZE + path_len, WAVEFORM_BINS);
-    return true;
-}
-
-static void cache_evict_oldest_until_room(const char * keep_path) {
-    for (;;) {
-        DIR * dir = opendir(WAVEFORM_CACHE_DIR);
-        if (!dir) return;
-        size_t count = 0;
-        char oldest[sizeof(WAVEFORM_CACHE_DIR) + 40U] = {0};
-        time_t oldest_time = 0;
-        struct dirent * entry;
-        while ((entry = readdir(dir)) != NULL) {
-            if (strncmp(entry->d_name, "wf_", 3) != 0) continue;
-            size_t len = strlen(entry->d_name);
-            if (len < 7 || strcmp(entry->d_name + len - 4, ".bin") != 0) continue;
-            char full[sizeof(WAVEFORM_CACHE_DIR) + 40U];
-            int n = snprintf(full, sizeof(full), WAVEFORM_CACHE_DIR "/%s", entry->d_name);
-            if (n <= 0 || (size_t) n >= sizeof(full)) continue;
-            struct stat st;
-            if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
-            count++;
-            if (keep_path && strcmp(full, keep_path) == 0) continue;
-            if (!oldest[0] || st.st_mtime < oldest_time) {
-                oldest_time = st.st_mtime;
-                snprintf(oldest, sizeof(oldest), "%s", full);
-            }
-        }
-        closedir(dir);
-        if (count <= WAVEFORM_CACHE_LIMIT || !oldest[0]) return;
-        if (unlink(oldest) != 0) return;
+    if (stored_checksum != record_checksum(record, got - 4U)) goto done;
+    memcpy(bins, record + header_size + path_len, WAVEFORM_BINS);
+    loaded = true;
+    if (lookup) {
+        lookup->generation_ns = generation_ns;
+        lookup->valid_record = true;
     }
+done:
+    if (lookup) lookup->lookup_ns = elapsed_ns(started_ns);
+    return loaded;
 }
 
-static void cache_store(const char * path, const file_facts_t * facts, const uint8_t * bins) {
+static void cache_store(const char * path, const file_facts_t * facts, const uint8_t * bins,
+                        uint64_t generation_ns, uint64_t prefetch_generation,
+                        uint64_t prefetch_revision) {
     if (!ensure_cache_dir()) return;
     size_t path_len = strlen(path);
     if (path_len == 0 || path_len >= WAVEFORM_PATH_MAX || path_len > UINT16_MAX) return;
-    size_t record_len = WAVEFORM_CACHE_HEADER_SIZE + path_len + WAVEFORM_BINS + 4U;
+    size_t record_len = WAVEFORM_CACHE_V2_HEADER_SIZE + path_len + WAVEFORM_BINS + 4U;
     uint8_t record[WAVEFORM_CACHE_RECORD_MAX];
-    memcpy(record, WAVEFORM_CACHE_MAGIC, 4);
+    memcpy(record, WAVEFORM_CACHE_MAGIC_V2, 4);
     put_u16(record + 4, (uint16_t) path_len);
     put_u64(record + 6, (uint64_t) facts->size);
     put_u64(record + 14, (uint64_t) facts->mtime_sec);
     put_u32(record + 22, facts->mtime_nsec);
-    memcpy(record + WAVEFORM_CACHE_HEADER_SIZE, path, path_len);
-    memcpy(record + WAVEFORM_CACHE_HEADER_SIZE + path_len, bins, WAVEFORM_BINS);
+    put_u64(record + 26, generation_ns);
+    memcpy(record + WAVEFORM_CACHE_V2_HEADER_SIZE, path, path_len);
+    memcpy(record + WAVEFORM_CACHE_V2_HEADER_SIZE + path_len, bins, WAVEFORM_BINS);
     put_u32(record + record_len - 4U, record_checksum(record, record_len - 4U));
 
     char destination[sizeof(WAVEFORM_CACHE_DIR) + 40U];
@@ -304,8 +389,22 @@ static void cache_store(const char * path, const file_facts_t * facts, const uin
     bool ok = fwrite(record, 1, record_len, file) == record_len && fflush(file) == 0;
     if (fclose(file) != 0) ok = false;
     if (ok) {
-        if (rename(temporary, destination) != 0) unlink(temporary);
-        else cache_evict_oldest_until_room(destination);
+        bool renamed = false;
+        if (prefetch_generation != 0) {
+            file_facts_t current;
+            bool identity_current = get_file_facts(path, &current) && facts_equal(facts, &current);
+            pthread_mutex_lock(&waveform_mutex);
+            bool requested = prefetch_is_current_locked(prefetch_generation,
+                                                          prefetch_revision, path);
+            pthread_mutex_unlock(&waveform_mutex);
+            /* Do not hold the GUI-facing mutex across SD I/O. A transition
+             * after this check may leave a complete, valid cache record, but
+             * it can never publish speculative bins as the current track. */
+            if (identity_current && requested && rename(temporary, destination) == 0)
+                renamed = true;
+        }
+        else if (rename(temporary, destination) == 0) renamed = true;
+        if (!renamed) unlink(temporary);
     }
     else unlink(temporary);
 }
@@ -321,13 +420,87 @@ static void publish_result(uint64_t generation, const char * path, const uint8_t
     pthread_mutex_unlock(&waveform_mutex);
 }
 
+/* Match the visible seekbar resolution while retaining the 256-byte on-disk
+ * format. Each sampled bin spans four published bins. */
+#define WAVEFORM_SAMPLE_BINS 64U
+_Static_assert(WAVEFORM_BINS % WAVEFORM_SAMPLE_BINS == 0, "waveform sample expansion");
+
+typedef struct {
+    uint64_t generation;
+    const char * path;
+    file_facts_t facts;
+} waveform_progress_context_t;
+
+static void clear_result_if_current(uint64_t generation) {
+    pthread_mutex_lock(&waveform_mutex);
+    if (waveform_generation == generation) {
+        waveform_ready = false;
+        waveform_result_path[0] = '\0';
+    }
+    pthread_mutex_unlock(&waveform_mutex);
+}
+
+static void expand_samples(const uint8_t * samples, uint8_t * bins) {
+    for (size_t i = 0; i < WAVEFORM_BINS; ++i)
+        bins[i] = samples[i * WAVEFORM_SAMPLE_BINS / WAVEFORM_BINS];
+}
+
+static void publish_progress(const uint8_t * samples, size_t count,
+                             size_t completed, void * user) {
+    waveform_progress_context_t * context = user;
+    if (count != WAVEFORM_SAMPLE_BINS || completed == 0 ||
+        generation_cancelled(&context->generation)) return;
+    file_facts_t current;
+    if (!get_file_facts(context->path, &current) ||
+        !facts_equal(&current, &context->facts)) {
+        clear_result_if_current(context->generation);
+        return;
+    }
+    uint8_t bins[WAVEFORM_BINS];
+    expand_samples(samples, bins);
+    publish_result(context->generation, context->path, bins);
+}
+
 static void set_worker_background_priority(void) {
     (void) setpriority(PRIO_PROCESS, 0, 10);
-#ifdef SCHED_IDLE
-    struct sched_param param;
-    memset(&param, 0, sizeof(param));
-    (void) pthread_setschedparam(pthread_self(), SCHED_IDLE, &param);
-#endif
+    /* Remain below playback/UI, but eligible to use spare CPU during normal
+     * scheduling. SCHED_IDLE starves previews during unrelated background work. */
+}
+
+static void process_prefetch(const char * path, uint64_t generation, uint64_t revision) {
+    waveform_prefetch_context_t context = {
+        .generation = generation, .revision = revision, .path = path
+    };
+    if (prefetch_cancelled(&context)) return;
+    file_facts_t facts;
+    if (!get_file_facts(path, &facts)) return;
+    if (failure_cache_contains(path, &facts)) return;
+
+    uint8_t bins[WAVEFORM_BINS];
+    cache_lookup_t lookup;
+    if (cache_load(path, &facts, bins, &lookup)) {
+        if (lookup.generation_ns != 0 && lookup.lookup_ns != 0 &&
+            lookup.lookup_ns > lookup.generation_ns / 2U)
+            cache_remove_if_current(path, &facts, generation, revision, true);
+        return;
+    }
+    if (prefetch_cancelled(&context)) return;
+
+    uint8_t samples[WAVEFORM_SAMPLE_BINS];
+    uint64_t generation_started_ns = monotonic_now_ns();
+    if (!audio_extract_waveform_progress(path, samples, WAVEFORM_SAMPLE_BINS,
+                                         prefetch_cancelled, &context, NULL, NULL))
+        return;
+    uint64_t generation_ns = elapsed_ns(generation_started_ns);
+    if (prefetch_cancelled(&context)) return;
+    file_facts_t after;
+    if (!get_file_facts(path, &after) || !facts_equal(&facts, &after) ||
+        prefetch_cancelled(&context)) return;
+    expand_samples(samples, bins);
+    /* Prefetch never publishes a result. The cache rename is fenced by both
+     * request tokens so a superseded scan cannot leave a stale cache entry. */
+    if (cache_store_worthwhile(&lookup, generation_ns))
+        cache_store(path, &facts, bins, generation_ns, generation, revision);
 }
 
 static void * waveform_worker(void * unused) {
@@ -340,17 +513,33 @@ static void * waveform_worker(void * unused) {
     for (;;) {
         char path[WAVEFORM_PATH_MAX];
         uint64_t generation;
+        uint64_t prefetch_revision = 0;
+        bool prefetch_job = false;
         pthread_mutex_lock(&waveform_mutex);
-        while (!waveform_stopping && !waveform_pending)
+        while (!waveform_stopping && !waveform_pending && !waveform_prefetch_pending)
             pthread_cond_wait(&waveform_cond, &waveform_mutex);
         if (waveform_stopping) {
             pthread_mutex_unlock(&waveform_mutex);
             return NULL;
         }
-        snprintf(path, sizeof(path), "%s", waveform_requested_path);
-        generation = waveform_generation;
-        waveform_pending = false;
+        if (waveform_pending) {
+            snprintf(path, sizeof(path), "%s", waveform_requested_path);
+            generation = waveform_generation;
+            waveform_pending = false;
+        }
+        else {
+            snprintf(path, sizeof(path), "%s", waveform_prefetch_path);
+            generation = waveform_generation;
+            prefetch_revision = waveform_prefetch_revision;
+            waveform_prefetch_pending = false;
+            prefetch_job = true;
+        }
         pthread_mutex_unlock(&waveform_mutex);
+
+        if (prefetch_job) {
+            process_prefetch(path, generation, prefetch_revision);
+            continue;
+        }
 
         if (generation_cancelled(&generation)) continue;
         file_facts_t facts;
@@ -358,30 +547,51 @@ static void * waveform_worker(void * unused) {
         bool previously_failed = failure_cache_contains(path, &facts);
 
         uint8_t bins[WAVEFORM_BINS];
-        if (cache_load(path, &facts, bins)) {
+        cache_lookup_t lookup;
+        if (cache_load(path, &facts, bins, &lookup)) {
             file_facts_t confirmed;
             if (!generation_cancelled(&generation) && get_file_facts(path, &confirmed) &&
-                facts_equal(&facts, &confirmed) && !generation_cancelled(&generation))
+                facts_equal(&facts, &confirmed) && !generation_cancelled(&generation)) {
+                /* Serve the validated hit before any cache-removal I/O. */
                 publish_result(generation, path, bins);
+                if (lookup.generation_ns != 0 && lookup.lookup_ns != 0 &&
+                    lookup.lookup_ns > lookup.generation_ns / 2U)
+                    cache_remove_if_current(path, &facts, generation, 0, false);
+            }
             continue;
         }
         if (previously_failed) continue;
         if (generation_cancelled(&generation)) continue;
-        if (!audio_extract_waveform(path, bins, WAVEFORM_BINS, generation_cancelled,
-                                    &generation)) {
+        uint8_t samples[WAVEFORM_SAMPLE_BINS];
+        waveform_progress_context_t progress = {
+            .generation = generation, .path = path, .facts = facts
+        };
+        uint64_t generation_started_ns = monotonic_now_ns();
+        if (!audio_extract_waveform_progress(path, samples, WAVEFORM_SAMPLE_BINS,
+                                            generation_cancelled, &generation,
+                                            publish_progress, &progress)) {
+            clear_result_if_current(generation);
             file_facts_t after_failure;
             if (get_file_facts(path, &after_failure) && facts_equal(&facts, &after_failure))
                 failure_cache_store_if_current(generation, path, &facts);
             continue;
         }
+        uint64_t generation_ns = elapsed_ns(generation_started_ns);
         if (generation_cancelled(&generation)) continue;
         file_facts_t after;
-        if (!get_file_facts(path, &after) || !facts_equal(&facts, &after)) continue;
-        cache_store(path, &facts, bins);
+        if (!get_file_facts(path, &after) || !facts_equal(&facts, &after)) {
+            clear_result_if_current(generation);
+            continue;
+        }
+        expand_samples(samples, bins);
+        /* Display the complete result before the SD cache write. Only a
+         * successful, identity-checked extraction is cached. */
+        publish_result(generation, path, bins);
+        if (!generation_cancelled(&generation) && cache_store_worthwhile(&lookup, generation_ns))
+            cache_store(path, &facts, bins, generation_ns, 0, 0);
         file_facts_t confirmed;
-        if (!generation_cancelled(&generation) && get_file_facts(path, &confirmed) &&
-            facts_equal(&facts, &confirmed) && !generation_cancelled(&generation))
-            publish_result(generation, path, bins);
+        if (!get_file_facts(path, &confirmed) || !facts_equal(&facts, &confirmed))
+            clear_result_if_current(generation);
     }
 }
 
@@ -411,6 +621,7 @@ void waveform_request(const char * path) {
     }
     pthread_mutex_lock(&waveform_mutex);
     if (!path_is_local(path)) {
+        clear_prefetch_locked();
         if (waveform_requested_path[0] || waveform_pending || waveform_ready) {
             waveform_generation++;
             if (waveform_generation == 0) waveform_generation++;
@@ -427,6 +638,7 @@ void waveform_request(const char * path) {
         pthread_mutex_unlock(&waveform_mutex);
         return;
     }
+    clear_prefetch_locked();
     waveform_generation++;
     if (waveform_generation == 0) waveform_generation++;
     snprintf(waveform_requested_path, sizeof(waveform_requested_path), "%s", path);
@@ -437,6 +649,38 @@ void waveform_request(const char * path) {
         waveform_pending = false;
         waveform_requested_path[0] = '\0';
     }
+    else pthread_cond_signal(&waveform_cond);
+    pthread_mutex_unlock(&waveform_mutex);
+}
+
+void waveform_prefetch(const char * path) {
+    pthread_mutex_lock(&waveform_mutex);
+    if (!path) {
+        clear_prefetch_locked();
+        pthread_cond_signal(&waveform_cond);
+        pthread_mutex_unlock(&waveform_mutex);
+        return;
+    }
+    if (waveform_stopping) {
+        pthread_mutex_unlock(&waveform_mutex);
+        return;
+    }
+    if (!waveform_requested_path[0] || !path_is_local(path) ||
+        strcmp(waveform_requested_path, path) == 0) {
+        clear_prefetch_locked();
+        pthread_cond_signal(&waveform_cond);
+        pthread_mutex_unlock(&waveform_mutex);
+        return;
+    }
+    if (strcmp(waveform_prefetch_path, path) == 0) {
+        pthread_mutex_unlock(&waveform_mutex);
+        return;
+    }
+    waveform_prefetch_revision++;
+    if (waveform_prefetch_revision == 0) waveform_prefetch_revision++;
+    snprintf(waveform_prefetch_path, sizeof(waveform_prefetch_path), "%s", path);
+    waveform_prefetch_pending = true;
+    if (!start_worker_locked()) waveform_prefetch_pending = false;
     else pthread_cond_signal(&waveform_cond);
     pthread_mutex_unlock(&waveform_mutex);
 }
@@ -457,6 +701,7 @@ bool waveform_copy(const char * path, waveform_data_t * out) {
 
 void waveform_cancel(void) {
     pthread_mutex_lock(&waveform_mutex);
+    clear_prefetch_locked();
     if (waveform_requested_path[0] || waveform_pending || waveform_ready) {
         waveform_generation++;
         if (waveform_generation == 0) waveform_generation++;
@@ -473,6 +718,7 @@ void waveform_shutdown(void) {
     pthread_mutex_lock(&waveform_mutex);
     if (!waveform_thread_started) {
         waveform_stopping = true;
+        clear_prefetch_locked();
         waveform_pending = false;
         waveform_ready = false;
         waveform_requested_path[0] = '\0';
@@ -481,6 +727,7 @@ void waveform_shutdown(void) {
         return;
     }
     waveform_stopping = true;
+    clear_prefetch_locked();
     waveform_generation++;
     waveform_pending = false;
     waveform_ready = false;

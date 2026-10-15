@@ -44,6 +44,10 @@ void get_device_name(char * out, size_t out_size);
 void populate_bt_dac_screen(void);
 void poll_import_web_stop(void);
 void poll_usb_mode_switch(void);
+/* Request a live USB DAC charger policy change from Settings. This starts the
+ * existing background worker; completion updates persistent settings only on
+ * success and synchronizes the charging switch either way. */
+void gui_network_set_usb_dac_charging_disabled(bool disabled);
 void poll_usb_storage_hotplug(void);
 /* UI-thread snapshot: a real Storage host was observed on this cable session. */
 bool gui_network_usb_storage_session_active(void);

@@ -7,6 +7,7 @@
 #include "settings.h"
 #include "audio.h"
 
+typedef struct file_browser_index file_browser_index_t;
 
 
 void gui_player_init(uint32_t screen_width, uint32_t screen_height);
@@ -27,6 +28,9 @@ void gui_player_refresh_static_assets(void);
 void gui_player_refresh_frosted_background(void);
 void sync_player_topbar_visibility(lv_obj_t * screen);
 void gui_player_poll_track_metadata(void);
+/* Run optional artwork-cache pressure checks and idle maintenance from the
+ * slower system housekeeping timer. */
+void gui_player_service_artwork_cache(void);
 void poll_cover_decode(void);
 void gui_player_update_progress(void);
 void gui_format_time(double seconds, char * buf, size_t buf_size);
@@ -67,12 +71,22 @@ int gui_player_get_queued_count(void);
 const char * gui_player_get_queued_path_at(int offset);
 void gui_player_queue_add(const char * path);
 void gui_player_queue_add_many(const char * const * paths, int count);
+/* Same atomic batch insertion, with success reported to bounded bulk-action
+ * callers. The existing void API keeps its behavior for current callers. */
+bool gui_player_queue_try_add_many(const char * const * paths, int count);
+/* Bounded variant. Includes caller-owned staging bytes and estimated peak
+ * queue storage in the admission check; failure leaves the queue unchanged. */
+bool gui_player_queue_try_add_many_bounded(const char * const * paths, int count,
+                                           size_t staging_bytes, size_t memory_limit);
 void gui_player_queue_remove_at(int offset);
 void gui_player_queue_clear(void);
 void gui_player_queue_play_next(const char * path);
 /* Indices in a snapshot identify occurrences, not paths. A revision makes
  * stale UI actions fail rather than acting on a different occurrence. */
 uint64_t gui_player_queue_revision(void);
+/* Explicit playback selection epoch; unlike audio generation/queue revision,
+ * natural gapless advancement does not change this value. */
+uint64_t gui_player_playback_intent_epoch(void);
 bool gui_player_queue_snapshot(int ** order, int * count, int * current, uint64_t * revision);
 void gui_player_sync_remote_queue(void);
 bool gui_player_remote_queue_remove(int offset, uint64_t revision);
@@ -83,6 +97,10 @@ bool gui_player_remote_queue_move(int from_offset, int to_offset, uint64_t revis
 bool gui_player_remote_queue_play(int offset, uint64_t revision);
 /* Plays a file with its folder as the queue, like a Files tap. */
 bool gui_player_play_folder_track(const char * track_path);
+/* Installs a retained Files directory index as the current playlist. Takes
+ * ownership of index on every return path. */
+bool gui_player_play_folder_index(file_browser_index_t * index, unsigned playable_count,
+                                  int play_mode);
 /* Reloads the now-playing heart after Remote Control changed a favorite. */
 void gui_player_refresh_favorite(void);
 bool gui_player_queue_edit(uint64_t revision, int from, int to);
@@ -197,6 +215,8 @@ void gui_player_handle_track_finished(void);
 void gui_player_handle_playback_error(audio_error_t err);
 void gui_player_handle_playback_error_ex(audio_error_t err, uint64_t err_generation);
 void gui_player_poll_confirmed_playback(void);
+/* Reconcile current/next waveform jobs independently of display refresh. */
+void gui_player_poll_waveform(void);
 
 void gui_player_sync_topbar_visibility(lv_obj_t * screen);
 void gui_player_refresh_font_geometry(void);

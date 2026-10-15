@@ -48,52 +48,44 @@ uint32_t gui_anim_ms(uint32_t base_ms); /* src/ui/gui_theme.c */
 #define LV_USE_STDLIB_STRING  LV_STDLIB_CLIB
 #define LV_USE_STDLIB_SPRINTF LV_STDLIB_CLIB
 
-/* Enable built-in fonts we want to use in our UI */
-#define LV_FONT_MONTSERRAT_12 1 /* quick drawer toggle name/state captions --
-                                  * fixed, non-scaling (like build_status_bar()'s
-                                  * own clock/volume/battery faces), so they
-                                  * still fit their 84px slot under the icon
-                                  * regardless of the Settings > Font Size tier */
-#define LV_FONT_MONTSERRAT_14 1 /* R3II 2025 scaled Small/Medium tiers */
-#define LV_FONT_MONTSERRAT_16 1
-#define LV_FONT_MONTSERRAT_18 1 /* R3II 2025 scaled Medium tier */
-#define LV_FONT_MONTSERRAT_20 1 /* status bar text, 16*1.25 -- see build_status_bar() */
-#define LV_FONT_MONTSERRAT_22 1 /* touch_list rows (Artists/Albums/Songs/...) -- see LIST_ROW_FONT */
-#define LV_FONT_MONTSERRAT_28 1
+/* UI bitmap fonts are loaded from assets at startup by src/ui/ui_fonts.c.
+ * Keep the LVGL-generated bitmap tables out of the executable while
+ * preserving their public symbol names through mutable descriptors declared
+ * below. */
+#define LV_FONT_MONTSERRAT_12 0
+#define LV_FONT_MONTSERRAT_14 0
+#define LV_FONT_MONTSERRAT_16 0
+#define LV_FONT_MONTSERRAT_18 0
+#define LV_FONT_MONTSERRAT_20 0
+#define LV_FONT_MONTSERRAT_22 0
+#define LV_FONT_MONTSERRAT_24 0
+#define LV_FONT_MONTSERRAT_26 0
+#define LV_FONT_MONTSERRAT_28 0
+#define LV_FONT_MONTSERRAT_30 0
+#define LV_FONT_MONTSERRAT_32 0
+#define LV_FONT_MONTSERRAT_34 0
+#define LV_FONT_MONTSERRAT_40 0
+#define LV_FONT_UNSCII_16 0
 
-/* Medium/BlindMF steps for Settings -> Font Size (see gui.c's
- * apply_font_size_tier()) -- each font_montserrat_NN.c file's actual glyph
- * data is compiled out entirely unless its own LV_FONT_MONTSERRAT_NN is
- * defined (the .o still gets built either way, an empty translation unit,
- * since the Makefile's own file list isn't conditional -- only the content
- * inside each file is), so these have to be enabled here or referencing
- * them would be a linker error, not just unused. Regenerated with the same
- * expanded Latin-1/Latin Extended-A range as 16/20/22/28 (see the
- * Makefile's own LVGL_GENERATED_FONTS comment) -- these six were pristine
- * upstream (bare ASCII + degree sign only) until a real-device bug report
- * found Spanish accents and other Latin Extended-A characters missing
- * specifically on the Medium/BlindMF tiers these sizes back. */
-#define LV_FONT_MONTSERRAT_24 1
-#define LV_FONT_MONTSERRAT_26 1
-#define LV_FONT_MONTSERRAT_30 1
-#define LV_FONT_MONTSERRAT_32 1
-#define LV_FONT_MONTSERRAT_34 1
-#define LV_FONT_MONTSERRAT_40 1
+/* LV_FONT_DECLARE uses const, while these runtime-loaded descriptor slots
+ * must be writable. */
+#define LV_FONT_CUSTOM_DECLARE \
+    extern lv_font_t lv_font_montserrat_12; \
+    extern lv_font_t lv_font_montserrat_14; \
+    extern lv_font_t lv_font_montserrat_16; \
+    extern lv_font_t lv_font_montserrat_18; \
+    extern lv_font_t lv_font_montserrat_20; \
+    extern lv_font_t lv_font_montserrat_22; \
+    extern lv_font_t lv_font_montserrat_24; \
+    extern lv_font_t lv_font_montserrat_26; \
+    extern lv_font_t lv_font_montserrat_28; \
+    extern lv_font_t lv_font_montserrat_30; \
+    extern lv_font_t lv_font_montserrat_32; \
+    extern lv_font_t lv_font_montserrat_34; \
+    extern lv_font_t lv_font_montserrat_40; \
+    extern lv_font_t lv_font_unscii_16;
 
-/* Built-in 8x16 monospace bitmap font (lv_font_unscii_16), for plugin rows
- * that opt into a pixel/mono look (plugin.set_home_layout()'s per-tile
- * text_size = "mono" -- see pill_row_resolve_text_size() in
- * screen_builders.c). Already vendored under lvgl/src/font/ and already
- * compiled unconditionally either way (same "the .o always builds, only the
- * glyph data inside is conditional" story as every LV_FONT_MONTSERRAT_*
- * above) -- this just flips it on. Unlike this app's own regenerated
- * Montserrat tiers, LVGL's stock unscii_16 is plain ASCII-only (no Latin-1
- * Supplement), so a "mono" label with accented/non-Latin characters will
- * show blank glyphs for those characters. */
-#define LV_FONT_UNSCII_16 1
-
-/* LVGL's own unconfigured default is lv_font_montserrat_14 (see
- * lv_conf_internal.h) -- every label in this codebase that never sets an
+/* Every label in this codebase that never sets an
  * explicit text_font style (roughly half of them: dialogs, toasts, misc
  * settings/about text, ...) silently inherited that undersized 14px font
  * (real-device feedback: "system wide font is too small"). Point it at 16,
@@ -101,7 +93,7 @@ uint32_t gui_anim_ms(uint32_t base_ms); /* src/ui/gui_theme.c */
  * text is at least as big as our own smallest intentional choice rather
  * than smaller than all of them.
  *
- * All 4 enabled sizes above were also regenerated (see
+ * All UI Montserrat sizes are generated (see
  * lvgl/scripts/built_in_font/built_in_font_gen.py and the vendored
  * Montserrat-Medium.ttf/FontAwesome woff it uses) with the Latin-1
  * Supplement range (0xA0-0xFF) added on top of LVGL's stock 0x20-0x7F

@@ -1518,12 +1518,141 @@ int metadata_db_get_albums_for_group(metadata_db_group_kind_t kind, const char *
     return copy.written;
 }
 
+typedef struct {
+    int32_t sorted_rank;
+    int32_t canonical_rank;
+} sorted_group_album_t;
+
+typedef struct {
+    sorted_group_album_t *rows;
+    int written;
+    int capacity;
+    int sort;
+    bool failed;
+} sorted_group_album_copy_t;
+
+static void copy_sorted_group_album(int32_t rank, const tagcache_group_t *group,
+                                    void *user_data) {
+    (void) group;
+    sorted_group_album_copy_t *copy = user_data;
+    int sorted_rank;
+    if (!tagcache_album_group_sorted_rank(copy->sort, rank, &sorted_rank) ||
+        copy->written >= copy->capacity) {
+        copy->failed = true;
+        return;
+    }
+    sorted_group_album_t *dst = &copy->rows[copy->written++];
+    dst->sorted_rank = sorted_rank;
+    dst->canonical_rank = rank;
+}
+
+static int compare_sorted_group_albums(const void *a, const void *b) {
+    const sorted_group_album_t *left = a;
+    const sorted_group_album_t *right = b;
+    if (left->sorted_rank == right->sorted_rank) return 0;
+    return left->sorted_rank < right->sorted_rank ? -1 : 1;
+}
+
+typedef struct {
+    int sort;
+    int target_rank;
+    int before;
+    bool failed;
+} sorted_group_album_offset_t;
+
+static void count_sorted_group_albums_before(int32_t rank, const tagcache_group_t *group,
+                                            void *user_data) {
+    (void) group;
+    sorted_group_album_offset_t *state = user_data;
+    int sorted_rank;
+    if (!tagcache_album_group_sorted_rank(state->sort, rank, &sorted_rank)) state->failed = true;
+    else if (sorted_rank < state->target_rank) state->before++;
+}
+
+/* The saved sort indexes order every distinct (album, album_artist) pair.
+ * Group postings provide the exact Artist or Album Artist membership; sort
+ * their compact global-rank pairs here, then read only the requested rows. */
+int metadata_db_get_albums_for_group_sorted(metadata_db_group_kind_t kind, const char *name,
+                                            metadata_db_album_sort_t sort, int offset, int max_rows,
+                                            group_row_t *out_rows) {
+    METADATA_DB_GUARD;
+    if (!db_ready || !name || !out_rows || max_rows <= 0 ||
+        (kind != METADATA_DB_GROUP_ARTIST && kind != METADATA_DB_GROUP_ALBUM_ARTIST) ||
+        sort < METADATA_DB_ALBUM_SORT_NAME || sort > METADATA_DB_ALBUM_SORT_YEAR) return 0;
+    if (offset < 0) offset = 0;
+    if (sort == METADATA_DB_ALBUM_SORT_NAME || !tagcache_album_sort_available((int)sort))
+        return metadata_db_get_albums_for_group(kind, name, offset, max_rows, out_rows);
+
+    int64_t count64 = metadata_db_count_albums_for_group(kind, name);
+    if (count64 <= 0 || count64 > INT_MAX || (uint64_t)count64 > SIZE_MAX / sizeof(sorted_group_album_t))
+        return 0;
+    int count = (int)count64;
+    sorted_group_album_t *albums = malloc(sizeof(*albums) * (size_t)count);
+    if (!albums) return 0;
+
+    int tc_kind = kind == METADATA_DB_GROUP_ARTIST ? TAGCACHE_GROUP_ARTIST : TAGCACHE_GROUP_ALBUM_ARTIST;
+    sorted_group_album_copy_t copy = { .rows = albums, .written = 0,
+                                       .capacity = count, .sort = (int)sort };
+    int visited = tagcache_group_album_page(tc_kind, name, 0, count,
+                                            copy_sorted_group_album, &copy);
+    if (visited != count || copy.failed || copy.written != count) {
+        free(albums);
+        return 0;
+    }
+    if (copy.written > 1)
+        qsort(albums, (size_t)copy.written, sizeof(*albums), compare_sorted_group_albums);
+
+    int written = 0;
+    if (offset < copy.written) {
+        int available = copy.written - offset;
+        written = available < max_rows ? available : max_rows;
+        for (int i = 0; i < written; i++) {
+            tagcache_group_t group;
+            if (!tagcache_group_at(TAGCACHE_GROUP_ALBUM, albums[offset + i].canonical_rank, &group)) {
+                written = 0;
+                break;
+            }
+            copy_group(&group, &out_rows[i]);
+        }
+    }
+    free(albums);
+    return written;
+}
+
 int64_t metadata_db_get_album_for_group_offset(metadata_db_group_kind_t kind, const char *name,
                                                const char *album, const char *album_artist) {
     METADATA_DB_GUARD;
     if (!db_ready || !name || (kind != METADATA_DB_GROUP_ARTIST && kind != METADATA_DB_GROUP_ALBUM_ARTIST)) return -1;
     return tagcache_group_album_offset(kind == METADATA_DB_GROUP_ARTIST ? TAGCACHE_GROUP_ARTIST : TAGCACHE_GROUP_ALBUM_ARTIST,
                                       name, album, album_artist);
+}
+
+int64_t metadata_db_get_album_for_group_sorted_offset(metadata_db_group_kind_t kind, const char *name,
+                                                      metadata_db_album_sort_t sort,
+                                                      const char *album, const char *album_artist) {
+    METADATA_DB_GUARD;
+    if (!db_ready || !name || !album || !album_artist ||
+        (kind != METADATA_DB_GROUP_ARTIST && kind != METADATA_DB_GROUP_ALBUM_ARTIST) ||
+        sort < METADATA_DB_ALBUM_SORT_NAME || sort > METADATA_DB_ALBUM_SORT_YEAR) return -1;
+    int tc_kind = kind == METADATA_DB_GROUP_ARTIST ? TAGCACHE_GROUP_ARTIST : TAGCACHE_GROUP_ALBUM_ARTIST;
+    int group_offset = tagcache_group_album_offset(tc_kind, name, album, album_artist);
+    if (group_offset < 0) return -1;
+    if (sort == METADATA_DB_ALBUM_SORT_NAME || !tagcache_album_sort_available((int)sort))
+        return group_offset;
+
+    /* Return a position within this exact group's sorted album list, not the
+     * album's global sorted rank. That keeps the synthetic All Songs prefix
+     * and now-playing row aligned with the filtered page provider. */
+    int canonical_rank = tagcache_group_index(TAGCACHE_GROUP_ALBUM, album, album_artist);
+    int target_rank;
+    int64_t count64 = metadata_db_count_albums_for_group(kind, name);
+    if (canonical_rank < 0 || count64 <= 0 || count64 > INT_MAX ||
+        !tagcache_album_group_sorted_rank((int)sort, canonical_rank, &target_rank)) return -1;
+    sorted_group_album_offset_t ctx = { .sort = (int)sort, .target_rank = target_rank };
+    int visited = tagcache_group_album_page(tc_kind, name, 0, (int)count64,
+                                            count_sorted_group_albums_before, &ctx);
+    if (visited != count64 || ctx.failed) return -1;
+    return ctx.before;
 }
 
 bool metadata_db_song_favorite_is_set(const char * path) {

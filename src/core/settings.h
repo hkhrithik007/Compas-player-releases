@@ -37,8 +37,35 @@ extern const int SLEEP_TIMER_STEPS[];
 
 #define BT_DEVICE_RATE_MAX 8
 
+typedef enum {
+    TOPBAR_HIDE_VOLUME = 1u << 0,
+    TOPBAR_HIDE_WIFI = 1u << 1,
+    TOPBAR_HIDE_BLUETOOTH = 1u << 2,
+    TOPBAR_HIDE_CLOCK = 1u << 3,
+    TOPBAR_HIDE_HEADPHONES = 1u << 4,
+    TOPBAR_HIDE_A2DP = 1u << 5,
+    TOPBAR_HIDE_USB_AUDIO = 1u << 6,
+    TOPBAR_HIDE_PLAYBACK = 1u << 7,
+    TOPBAR_HIDE_CODEC = 1u << 8,
+    TOPBAR_HIDE_BATTERY = 1u << 9
+} topbar_hidden_element_t;
+#define TOPBAR_HIDE_ALL 0x3ffu
+
+typedef enum {
+    TOPBAR_CLOCK_CENTER = 0,
+    TOPBAR_CLOCK_LEFT = 1,
+    TOPBAR_CLOCK_RIGHT = 2
+} topbar_clock_position_t;
+
 #define KEYBOARD_LAYOUT_T9 0
 #define KEYBOARD_LAYOUT_QWERTY 1
+#define KEYBOARD_LAYOUT_AZERTY 2
+#define KEYBOARD_LAYOUT_QWERTZ 3
+#define KEYBOARD_LAYOUT_LEGACY_4 4
+#define KEYBOARD_LAYOUT_LEGACY_5 5
+#define KEYBOARD_LAYOUT_LEGACY_6 6
+#define KEYBOARD_LAYOUT_RUSSIAN 7
+#define KEYBOARD_LAYOUT_UKRAINIAN 8
 
 typedef struct {
     float volume;              /* 0.0 - 1.0 */
@@ -228,6 +255,11 @@ typedef struct {
      * view is active. Other screens retain their status information. */
     bool hide_player_topbar;
 
+    /* Status-bar visibility and clock placement. Battery percentage remains
+     * independently controlled by show_battery_percent below. */
+    uint32_t topbar_hidden_elements;
+    int topbar_clock_position;
+
     /* Settings -> Display -> Upside Down Screen. Rotates the screen 180
      * degrees so the device can be used with the headphone jack on top. */
     bool screen_upside_down;
@@ -249,11 +281,6 @@ typedef struct {
      * in a pocket, and nobody who does not know it exists should find the
      * card filling with images. */
     bool screenshot_combo_enabled;
-    /* Developer Options: dev_covers_during_playback lets the cover warmer
-     * keep reading already generated thumbnails while audio plays; extracting
-     * new covers still waits for playback to stop. */
-    bool dev_covers_during_playback;
-
     /* Caps the PMIC's charge-termination voltage to 4.2V to extend battery
      * longevity, rather than a literal state-of-charge cutoff -- see
      * charge_limiter.h for how this is actually enforced. */
@@ -263,9 +290,9 @@ typedef struct {
      * this off deliberately leaves the PMIC's current setting unchanged. */
     bool safe_charging_enabled;
 
-    /* Topbar battery percentage digits next to the battery icon -- the icon
-     * itself (charge outline + fill gauge) is always shown regardless of
-     * this, only the "NN%" readout is optional. When off, gui.c's
+    /* Topbar battery percentage digits next to the battery icon -- only the
+     * "NN%" readout is controlled here. The icon can independently be hidden
+     * through topbar_hidden_elements. When percentage is off, gui.c's
      * sync_topbar_status_icon_positions() lets the Wi-Fi/Bluetooth status
      * icons slide into the space the percentage would otherwise occupy,
      * right next to the battery icon, instead of leaving it empty. On by
@@ -321,6 +348,10 @@ typedef struct {
      * on boot to prevent unexpected USB configurations or blocking local
      * playback. */
     int usb_mode;
+
+    /* USB DAC overlay: leave device charging disabled while connected as a
+     * USB audio accessory. Enabled by default for iPhone compatibility. */
+    bool usb_dac_disable_charging;
 
     /* Player queue play mode -- Sequential/Repeat All/Repeat One/Shuffle.
      * Plain int (values matching gui.c's own play_mode_t), same reasoning as
@@ -386,9 +417,9 @@ typedef struct {
      * via fallback_font_apply_size_tier(). Defaults to 1 (Medium). */
     int font_size_tier;
 
-    /* Settings -> Display -> Appearance -> Keyboard. Layout used by every text
-     * field and inline search: 0 = T9 keypad, 1 = QWERTY (default). Numeric
-     * fields always use the T9 numeric keypad. */
+    /* Settings -> Display -> Appearance -> Keyboard. Persistent layout enum;
+     * 0 = T9 and 1 = Latin QWERTY retain their original on-disk values.
+     * Numeric fields always use the T9 numeric keypad. */
     int keyboard_layout;
 
     /* Settings -> Lyrics Text Size: independent text size control for the
