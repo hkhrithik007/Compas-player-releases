@@ -19,6 +19,14 @@ bool usb_mode_control_apply(usb_mode_t mode);
 /* Reports lease rejection separately so automatic Storage binding can retry. */
 bool usb_mode_control_apply_with_status(usb_mode_t mode, bool * storage_busy);
 
+/* Reconcile a durable R1 DAC Type-C/charger lease after process restart.
+ * Call once during startup before the first charge_limiter_poll(). */
+bool usb_mode_control_reconcile_dac_session(void);
+/* Set the DAC charging preference before startup reconciliation, or apply it
+ * immediately to an owned R1 DAC session. Returns false without changing the
+ * requested preference if the charger transition cannot be verified. */
+bool usb_mode_control_set_dac_charging_disabled(bool disabled);
+
 /* Excludes USB mode changes while a worker owns SD write access. On target,
  * an idle bound Storage gadget is temporarily unbound and restored by the
  * final matching end call. Begin/end may block and must run off the UI thread.

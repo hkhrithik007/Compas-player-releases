@@ -116,6 +116,10 @@
 # backgrounds.
 !/assets/theme2/submenu/
 
+# Navigation icons are project artwork in a separate namespace, with pinned
+# Phosphor source attribution in navigation/SOURCES.txt.
+!/assets/theme2/navigation/
+
 # Home launcher tiles. Mixed directory: the six tile glyphs and their _s
 # duplicates are Phosphor/Material redraws swapped in place (SOURCES.txt),
 # each byte-different from the stock file of the same name. The rest of the
@@ -191,6 +195,7 @@
 /assets/fonts/korean.ttf
 
 # Build outputs
+/build/
 /build_host/
 /build_ui_test*/
 /build_layouts_test*/
@@ -244,8 +249,6 @@
 !/generate_compile_commands.py
 !/scripts/offline_library_scan.py
 !/scripts/install_startup_trace.py
-!/scripts/generate_car_mode_toggle.py
-!/scripts/generate_stream_media_icons.py
 !/scripts/kernel/*.py
 
 # Standalone development self-tests are local-only and are not shipped in
@@ -269,11 +272,8 @@
 !/scripts/assets/
 !/scripts/assets/settings_category_icons/
 !/scripts/assets/settings_category_icons/*.svg
-!/scripts/generate_settings_category_icons.py
-!/scripts/generate_more_menu_icons.py
 !/scripts/assets/submenu_icons/
 !/scripts/assets/submenu_icons/*.svg
-!/scripts/generate_submenu_genres_icon.py
 
 # Local-only known-issues tracker (not part of the public docs)
 /ISSUES.md
@@ -347,7 +347,6 @@ repomix-output.xml
 src/library/cover_decode_scale_test.c
 inline remote follow-up fixes.diff
 src/ui/screen_builders_test.c
-!scripts/generate_power_action_icons.py
 !/assets/theme1/power_action/
 print_heights.c
 final_diff.patch
@@ -413,7 +412,6 @@ __pycache__/
 /assets/theme2/player_layouts/paper*.xml
 
 # Regenerate the compiled setup geographic data when needed.
-!/scripts/generate_setup_world_map.py
 !/scripts/generate_timezone_locations.py
 /scripts/base_image/alsa-null.conf
 
@@ -474,3 +472,6 @@ __pycache__/
 !/scripts/test_settings_defaults.sh
 !/scripts/test_compas_zram.sh
 !/src/core/settings_defaults_test.c
+
+# Plugin payloads belong in the compas-plugins repository.
+/plugins_examples/

@@ -349,9 +349,15 @@ bool metadata_db_album_sort_available(metadata_db_album_sort_t sort);
  * helper above, these filter only the requested tag column. */
 int64_t metadata_db_get_album_for_group_offset(metadata_db_group_kind_t kind, const char *name,
                                                const char *album, const char *album_artist);
+int64_t metadata_db_get_album_for_group_sorted_offset(metadata_db_group_kind_t kind, const char *name,
+                                                      metadata_db_album_sort_t sort,
+                                                      const char *album, const char *album_artist);
 int64_t metadata_db_count_albums_for_group(metadata_db_group_kind_t kind, const char * name);
 int metadata_db_get_albums_for_group(metadata_db_group_kind_t kind, const char * name, int offset, int max_rows,
                                       group_row_t * out_rows);
+int metadata_db_get_albums_for_group_sorted(metadata_db_group_kind_t kind, const char * name,
+                                            metadata_db_album_sort_t sort, int offset, int max_rows,
+                                            group_row_t * out_rows);
 
 /* Per-song favorite flag, keyed by path. Local scan rows store this as the
  * Rockbox rating tag. Paths that are not tagcache rows (remote:// plugin

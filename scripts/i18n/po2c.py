@@ -211,10 +211,22 @@ def main(argv):
         a = args.pop(0)
         if a == "--check":
             check = True
+        elif a in ("-h", "--help"):
+            print("Usage: po2c.py [--check] [-o OUTPUT] [PO_DIR]")
+            return 0
         elif a == "-o":
+            if not args:
+                sys.stderr.write("-o requires an output path\n")
+                return 2
             output = args.pop(0)
+        elif a.startswith("-"):
+            sys.stderr.write("Unknown option: %s\n" % a)
+            return 2
         else:
             po_dir = a
+    if not os.path.isdir(po_dir):
+        sys.stderr.write("PO directory does not exist: %s\n" % po_dir)
+        return 2
     langs, errors = build(po_dir)
     if errors:
         sys.stderr.write("\n".join(errors) + "\n")

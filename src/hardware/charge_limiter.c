@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <linux/i2c-dev.h>
 #include <linux/i2c.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,6 +72,14 @@ typedef struct {
 
 static baseline_t baseline;
 static bool voltage_limited;
+/* REG18H is shared by the periodic charge limiter and the USB DAC session.
+ * Keep the inhibit state and every REG18 read/modify/write under this lock so
+ * a poll cannot undo the DAC's temporary charger disable. */
+static pthread_mutex_t axp_charger_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool dac_charger_inhibited;
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+static bool dac_saved_charger_enabled;
+#endif
 
 static bool before(const struct timespec *a, const struct timespec *b) {
     return a->tv_sec < b->tv_sec || (a->tv_sec == b->tv_sec && a->tv_nsec < b->tv_nsec);
@@ -260,11 +269,183 @@ static bool set_axp_current_exact(uint8_t target) {
     return (v & AXP_CURRENT_MASK) == target;
 }
 static bool enable_axp_charger(void) {
-    uint8_t v; if (!axp_read(AXP_REG_MODULE_EN, &v)) return false;
-    if (v & AXP_CHG_EN) return true;
+    pthread_mutex_lock(&axp_charger_mutex);
+    if (dac_charger_inhibited) {
+        pthread_mutex_unlock(&axp_charger_mutex);
+        return true;
+    }
+    uint8_t v;
+    if (!axp_read(AXP_REG_MODULE_EN, &v)) {
+        pthread_mutex_unlock(&axp_charger_mutex);
+        return false;
+    }
+    if (v & AXP_CHG_EN) { pthread_mutex_unlock(&axp_charger_mutex); return true; }
     v |= AXP_CHG_EN;
-    if (!axp_write(AXP_REG_MODULE_EN, v) || !axp_read(AXP_REG_MODULE_EN, &v)) return false;
-    return (v & AXP_CHG_EN) != 0;
+    bool ok = axp_write(AXP_REG_MODULE_EN, v) && axp_read(AXP_REG_MODULE_EN, &v) &&
+              (v & AXP_CHG_EN) != 0;
+    pthread_mutex_unlock(&axp_charger_mutex);
+    return ok;
+}
+
+bool charge_limiter_dac_session_begin(bool *originally_enabled) {
+#if CHARGE_LIMITER_ACTIVE && !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    if (!originally_enabled) return false;
+    pthread_mutex_lock(&axp_charger_mutex);
+    if (dac_charger_inhibited) {
+        *originally_enabled = dac_saved_charger_enabled;
+        uint8_t current;
+        bool ok = axp_read(AXP_REG_MODULE_EN, &current);
+        if (ok && (current & AXP_CHG_EN)) {
+            current &= (uint8_t) ~AXP_CHG_EN;
+            ok = axp_write(AXP_REG_MODULE_EN, current) &&
+                 axp_read(AXP_REG_MODULE_EN, &current) && !(current & AXP_CHG_EN);
+        }
+        pthread_mutex_unlock(&axp_charger_mutex);
+        return ok;
+    }
+
+    uint8_t current;
+    if (!axp_read(AXP_REG_MODULE_EN, &current)) {
+        pthread_mutex_unlock(&axp_charger_mutex);
+        return false;
+    }
+    dac_saved_charger_enabled = (current & AXP_CHG_EN) != 0;
+    *originally_enabled = dac_saved_charger_enabled;
+    /* Claim the inhibit before changing hardware. If the write or readback
+     * fails, the caller's rollback can still retry restoration, and periodic
+     * polling can never race in and re-enable the charger behind our back. */
+    dac_charger_inhibited = true;
+    bool ok = true;
+    if (current & AXP_CHG_EN) {
+        current &= (uint8_t) ~AXP_CHG_EN;
+        ok = axp_write(AXP_REG_MODULE_EN, current) &&
+             axp_read(AXP_REG_MODULE_EN, &current) && !(current & AXP_CHG_EN);
+    }
+    pthread_mutex_unlock(&axp_charger_mutex);
+    return ok;
+#else
+    if (originally_enabled) *originally_enabled = false;
+    return true;
+#endif
+}
+
+bool charge_limiter_dac_session_capture_original_enabled(bool *originally_enabled) {
+#if CHARGE_LIMITER_ACTIVE && !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    if (!originally_enabled) return false;
+    pthread_mutex_lock(&axp_charger_mutex);
+    if (dac_charger_inhibited) {
+        *originally_enabled = dac_saved_charger_enabled;
+        pthread_mutex_unlock(&axp_charger_mutex);
+        return true;
+    }
+    uint8_t current;
+    bool ok = axp_read(AXP_REG_MODULE_EN, &current);
+    if (ok) {
+        dac_saved_charger_enabled = (current & AXP_CHG_EN) != 0;
+        *originally_enabled = dac_saved_charger_enabled;
+    }
+    pthread_mutex_unlock(&axp_charger_mutex);
+    return ok;
+#else
+    if (originally_enabled) *originally_enabled = false;
+    return true;
+#endif
+}
+
+bool charge_limiter_dac_session_get_original_enabled(bool *originally_enabled) {
+#if CHARGE_LIMITER_ACTIVE && !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    if (!originally_enabled) return false;
+    pthread_mutex_lock(&axp_charger_mutex);
+    bool active = dac_charger_inhibited;
+    if (active) *originally_enabled = dac_saved_charger_enabled;
+    pthread_mutex_unlock(&axp_charger_mutex);
+    return active;
+#else
+    if (originally_enabled) *originally_enabled = false;
+    return true;
+#endif
+}
+
+bool charge_limiter_dac_session_resume(bool originally_enabled) {
+#if CHARGE_LIMITER_ACTIVE && !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    pthread_mutex_lock(&axp_charger_mutex);
+    dac_saved_charger_enabled = originally_enabled;
+    dac_charger_inhibited = true;
+    uint8_t current;
+    bool ok = axp_read(AXP_REG_MODULE_EN, &current);
+    if (ok && (current & AXP_CHG_EN)) {
+        current &= (uint8_t) ~AXP_CHG_EN;
+        ok = axp_write(AXP_REG_MODULE_EN, current) &&
+             axp_read(AXP_REG_MODULE_EN, &current) && !(current & AXP_CHG_EN);
+    }
+    pthread_mutex_unlock(&axp_charger_mutex);
+    return ok;
+#else
+    (void) originally_enabled;
+    return true;
+#endif
+}
+
+bool charge_limiter_dac_session_release(bool originally_enabled) {
+#if CHARGE_LIMITER_ACTIVE && !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    pthread_mutex_lock(&axp_charger_mutex);
+    dac_saved_charger_enabled = originally_enabled;
+    uint8_t current;
+    bool ok = axp_read(AXP_REG_MODULE_EN, &current);
+    if (ok) {
+        uint8_t desired = originally_enabled
+            ? (uint8_t) (current | AXP_CHG_EN)
+            : (uint8_t) (current & (uint8_t) ~AXP_CHG_EN);
+        ok = desired == current || axp_write(AXP_REG_MODULE_EN, desired);
+        if (ok) ok = axp_read(AXP_REG_MODULE_EN, &current) &&
+                     (((current & AXP_CHG_EN) != 0) == originally_enabled);
+    }
+    if (ok) {
+        dac_charger_inhibited = false;
+    } else {
+        /* A failed write/readback may have enabled charging before its
+         * verification failed. Keep polling blocked and best-effort restore
+         * the safe off bit regardless of whether this call began inhibited. */
+        dac_charger_inhibited = true;
+        uint8_t safe;
+        if (axp_read(AXP_REG_MODULE_EN, &safe) && (safe & AXP_CHG_EN)) {
+            safe &= (uint8_t) ~AXP_CHG_EN;
+            if (axp_write(AXP_REG_MODULE_EN, safe))
+                (void) (axp_read(AXP_REG_MODULE_EN, &safe) && !(safe & AXP_CHG_EN));
+        }
+    }
+    pthread_mutex_unlock(&axp_charger_mutex);
+    return ok;
+#else
+    (void) originally_enabled;
+    return true;
+#endif
+}
+
+bool charge_limiter_dac_session_end(void) {
+#if CHARGE_LIMITER_ACTIVE && !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    pthread_mutex_lock(&axp_charger_mutex);
+    if (!dac_charger_inhibited) {
+        pthread_mutex_unlock(&axp_charger_mutex);
+        return true;
+    }
+
+    uint8_t current;
+    bool ok = axp_read(AXP_REG_MODULE_EN, &current);
+    if (ok) {
+        uint8_t desired = dac_saved_charger_enabled
+            ? (uint8_t) (current | AXP_CHG_EN)
+            : (uint8_t) (current & (uint8_t) ~AXP_CHG_EN);
+        ok = desired == current || axp_write(AXP_REG_MODULE_EN, desired);
+        if (ok) ok = axp_read(AXP_REG_MODULE_EN, &current) &&
+                     (((current & AXP_CHG_EN) != 0) == dac_saved_charger_enabled);
+    }
+    if (ok) dac_charger_inhibited = false;
+    pthread_mutex_unlock(&axp_charger_mutex);
+    return ok;
+#else
+    return true;
+#endif
 }
 #if HAS_MP2731
 static bool set_mp_voltage(uint8_t target) {

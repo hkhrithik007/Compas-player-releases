@@ -1,0 +1,69 @@
+--- a/src/repacketizer.c
++++ b/src/repacketizer.c
+@@ -303,6 +303,9 @@
+    }
+    if (ext_len > 0) {
+       int ret = opus_packet_extensions_generate(&data[ext_begin], ext_len, all_extensions, ext_count, 0);
++      /* celt_assert() is empty unless ENABLE_ASSERTIONS, but the generate
++       * call still has to run. Keep ret referenced in both builds. */
++      (void)ret;
+       celt_assert(ret == ext_len);
+    }
+    for (i=ones_begin;i<ones_end;i++)
+--- a/silk/enc_API.c
++++ b/silk/enc_API.c
+@@ -395,7 +395,7 @@
+                 curr_nBitsUsedLBRR = ec_tell( psRangeEnc ) - curr_nBitsUsedLBRR;
+             }
+ 
+-            silk_HP_variable_cutoff( psEnc->state_Fxx );
++            silk_HP_variable_cutoff( &psEnc->state_Fxx[ 0 ].sCmn );
+ 
+             /* Total target bits for packet */
+             nBits = silk_DIV32_16( silk_MUL( encControl->bitRate, encControl->payloadSize_ms ), 1000 );
+--- a/silk/HP_variable_cutoff.c
++++ b/silk/HP_variable_cutoff.c
+@@ -37,12 +37,11 @@
+ 
+ /* High-pass filter with cutoff frequency adaptation based on pitch lag statistics */
+ void silk_HP_variable_cutoff(
+-    silk_encoder_state_Fxx          state_Fxx[]                         /* I/O  Encoder states                              */
++    silk_encoder_state              *psEncC1                            /* I/O  Common encoder state, channel 0             */
+ )
+ {
+    opus_int   quality_Q15;
+    opus_int32 pitch_freq_Hz_Q16, pitch_freq_log_Q7, delta_freq_Q7;
+-   silk_encoder_state *psEncC1 = &state_Fxx[ 0 ].sCmn;
+ 
+    /* Adaptive cutoff frequency: estimate low end of pitch frequency range */
+    if( psEncC1->prevSignalType == TYPE_VOICED ) {
+--- a/silk/fixed/main_FIX.h
++++ b/silk/fixed/main_FIX.h
+@@ -59,9 +59,10 @@
+ /* Encoder Functions */
+ /*********************/
+ 
+-/* High-pass filter with cutoff frequency adaptation based on pitch lag statistics */
++/* High-pass filter with cutoff frequency adaptation based on pitch lag statistics.
++   Only the common state of channel 0 is read or written. */
+ void silk_HP_variable_cutoff(
+-    silk_encoder_state_Fxx          state_Fxx[]                             /* I/O  Encoder states                                                              */
++    silk_encoder_state              *psEncC1                                /* I/O  Common encoder state, channel 0                                             */
+ );
+ 
+ /* Encoder main function */
+--- a/silk/float/main_FLP.h
++++ b/silk/float/main_FLP.h
+@@ -49,9 +49,10 @@
+ /* Encoder Functions */
+ /*********************/
+ 
+-/* High-pass filter with cutoff frequency adaptation based on pitch lag statistics */
++/* High-pass filter with cutoff frequency adaptation based on pitch lag statistics.
++   Only the common state of channel 0 is read or written. */
+ void silk_HP_variable_cutoff(
+-    silk_encoder_state_Fxx          state_Fxx[]                         /* I/O  Encoder states                              */
++    silk_encoder_state              *psEncC1                            /* I/O  Common encoder state, channel 0             */
+ );
+ 
+ /* Encoder main function */

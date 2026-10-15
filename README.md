@@ -85,7 +85,9 @@ Start with **AutoEQ** for downloadable headphone EQ profiles, **Gain Mode** for 
 
 For manual installation, follow the [plugins repository's installation instructions](https://github.com/Starnished66/compas-plugins#installing-by-hand): copy the `.lua` file to `SD/.plugins/` and any companion files to the destinations listed in its `store.json`. Then choose **Refresh Plugins** in **Settings → System → Plugin Manager** or restart the player. Plugins can be enabled or disabled without removing their files. No C toolchain, player rebuild or firmware reflash is needed.
 
-Developers can start with the [plugin API guide](PLUGINS.md) and examples in [`plugins_examples/`](plugins_examples/). The guide documents the versioned `plugin.*` API for UI extensions, playback, library access, HTTP, themes and PEQ. For Now Playing layout customization, see [Player layouts](docs/PLAYER_LAYOUTS.md).
+Developers can start with the [plugin API guide](PLUGINS.md), browse [published plugins](https://github.com/Starnished66/compas-plugins/tree/main/plugins), and browse [standalone examples](https://github.com/Starnished66/compas-plugins/tree/main/examples). The guide documents the versioned `plugin.*` API for UI extensions, playback, library access, HTTP, themes and PEQ. For Now Playing layout customization, see [Player layouts](docs/PLAYER_LAYOUTS.md).
+
+Plugin implementations, plugin examples and their assets belong in `compas-plugins`; this repository keeps the player and its plugin API.
 
 ## Device support
 

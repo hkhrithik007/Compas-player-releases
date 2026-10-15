@@ -15,7 +15,7 @@ void show_text_entry(const char * title, const char * initial_text, bool is_pass
                      text_entry_done_cb_t done_cb, void * user_data);
 
 void t9_keypad_attach(lv_obj_t * target_screen, lv_obj_t * textarea_parent, int32_t textarea_x, int32_t textarea_y,
-                      int32_t textarea_width);
+                      int32_t textarea_width, bool clear_text);
 void t9_keypad_release(void);
 void t9_keypad_dismiss_only(void);
 bool t9_keypad_is_inline_active(void);

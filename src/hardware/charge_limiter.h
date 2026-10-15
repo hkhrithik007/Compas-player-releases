@@ -9,9 +9,11 @@
  * health" features typically do -- rather than literally disabling the
  * charger once a percentage threshold is crossed, letting CC/CV charging
  * taper off and complete naturally at the lower ceiling. The charger
- * itself (module_en/REG18H bit 1, "chg_en") is always kept enabled; this
- * module only ever moves the voltage target, never the charger on/off
- * state, so a charge can never get stuck disabled across a restart.
+ * itself (module_en/REG18H bit 1, "chg_en") is normally kept enabled. An R1
+ * USB DAC session defaults to inhibiting charging, with a user preference to
+ * allow ordinary charging while the gadget remains in Sink role. The USB
+ * controller journals the original role and charger bit and reconciles that
+ * lease at startup before periodic charging polls begin.
  *
  * On the R3 Pro II (BOARD_R3PROII), the AXP2101's cap has no effect on the
  * physical charge path -- the dedicated MP2731 charger IC (I2C address
@@ -28,6 +30,19 @@
  *
  * Pass force=true to bypass the interval and apply state immediately. */
 void charge_limiter_poll(bool enabled, bool force);
+
+/* R1 DAC session charger helpers serialize REG18 read/modify/write with
+ * periodic limiter polling. Capture reads the baseline without disabling;
+ * begin captures and inhibits; resume reclaims an inhibit after restart;
+ * release restores the saved bit and permits polling; end restores a begun
+ * session. Failed transitions retain inhibition when possible for retry.
+ * These are no-ops on boards without the R1 AXP2101 charge path. */
+bool charge_limiter_dac_session_begin(bool *originally_enabled);
+bool charge_limiter_dac_session_capture_original_enabled(bool *originally_enabled);
+bool charge_limiter_dac_session_get_original_enabled(bool *originally_enabled);
+bool charge_limiter_dac_session_resume(bool originally_enabled);
+bool charge_limiter_dac_session_release(bool originally_enabled);
+bool charge_limiter_dac_session_end(void);
 
 /* True while the limiter intends the 4.2V voltage cap to be in effect,
  * regardless of whether the last register write actually succeeded.

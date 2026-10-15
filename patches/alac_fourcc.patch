@@ -1,0 +1,36 @@
+--- a/codec/ALACAudioTypes.h
++++ b/codec/ALACAudioTypes.h
+@@ -59,10 +59,13 @@
+     kALAC_MemFullError         = -108
+ };
+ 
++/* FourCC integers, packed the way a multi-character constant is packed
++ * ('alac' == 0x616C6163). Written out so the value does not depend on
++ * that implementation-defined constant and does not warn under -Wmultichar. */
+ enum
+ {
+-    kALACFormatAppleLossless = 'alac',
+-    kALACFormatLinearPCM = 'lpcm'
++    kALACFormatAppleLossless = 0x616C6163,
++    kALACFormatLinearPCM = 0x6C70636D
+ };
+ 
+ enum
+@@ -151,7 +154,7 @@
+ 
+ enum
+ {
+-	kALACCodecFormat		= 'alac',
++	kALACCodecFormat		= 0x616C6163, /* 'alac' */
+ 	kALACVersion			= 0,
+ 	kALACCompatibleVersion	= kALACVersion,
+ 	kALACDefaultFrameSize	= 4096
+@@ -179,7 +182,7 @@
+ // The AudioChannelLayout atom type is not exposed yet so define it here
+ enum
+ {
+-	AudioChannelLayoutAID = 'chan'
++	AudioChannelLayoutAID = 0x6368616E /* 'chan' */
+ };
+ 
+ #if PRAGMA_STRUCT_ALIGN

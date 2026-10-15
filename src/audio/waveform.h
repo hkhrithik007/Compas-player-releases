@@ -15,7 +15,13 @@ typedef struct {
  * active request; passing NULL cancels work and clears the published result. */
 void waveform_request(const char * path);
 
-/* Copies the completed result for exactly path. Returns false and clears out
+/* Speculatively calculate bins for the next local file. This shares the
+ * waveform worker and runs only when no foreground request is pending.
+ * Passing NULL cancels speculative work without changing the visible result. */
+void waveform_prefetch(const char * path);
+
+/* Copies the latest partial or completed result for exactly path. Unprocessed
+ * bins are zero until the next chunk arrives. Returns false and clears out
  * when no matching result is ready. */
 bool waveform_copy(const char * path, waveform_data_t * out);
 

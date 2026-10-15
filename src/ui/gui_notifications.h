@@ -17,5 +17,8 @@ void gui_busy_set_progress(gui_busy_handle_t handle, int percent);
 /* Status line under the progress bar; empty or NULL hides it. */
 void gui_busy_set_detail(gui_busy_handle_t handle, const char * text);
 void gui_busy_hide(gui_busy_handle_t handle);
+/* Dismiss an interstitial with an immediate stack pop/load so the caller can
+ * push its final destination without a pending transition overriding it. */
+void gui_busy_hide_immediate(gui_busy_handle_t handle);
 static inline void gui_busy_dismiss(gui_busy_handle_t handle) { gui_busy_hide(handle); }
 lv_obj_t * gui_busy_get_screen(void);

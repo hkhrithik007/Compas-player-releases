@@ -63,6 +63,25 @@ static bool status_paused = false;
  * Cleared once real playback starts or stop is requested. */
 static bool cast_intent_playing = false;
 
+/* Metadata is display-only: keep a terminated prefix when the controller
+ * sends more than the field holds. A URI is fetched, so an overflowing one
+ * is rejected instead of downloaded as a different resource. */
+static void copy_display_text(char * out, size_t out_size, const char * src) {
+    if (!out || out_size == 0) return;
+    size_t len = src ? strlen(src) : 0;
+    if (len >= out_size) len = out_size - 1;
+    if (len) memcpy(out, src, len);
+    out[len] = '\0';
+}
+
+static bool copy_exact_text(char * out, size_t out_size, const char * src) {
+    if (!out || out_size == 0 || !src) return false;
+    size_t len = strlen(src);
+    if (len >= out_size) return false;
+    memcpy(out, src, len + 1);
+    return true;
+}
+
 typedef struct {
     uint64_t generation;
     char uri[2048];
@@ -207,19 +226,20 @@ static void handle_connection(int cfd) {
         write(cfd, reply, strlen(reply));
     } else if ((size_t) n > 8 && memcmp(buf, "set_uri:", 8) == 0) {
         pthread_mutex_lock(&dlna_mutex);
-        snprintf(pending_uri, sizeof(pending_uri), "%s", buf + 8);
+        if (!copy_exact_text(pending_uri, sizeof(pending_uri), (const char *) buf + 8))
+            pending_uri[0] = '\0';
         pthread_mutex_unlock(&dlna_mutex);
     } else if ((size_t) n > 16 && memcmp(buf, "set_meta:title:", 15) == 0) {
         pthread_mutex_lock(&dlna_mutex);
-        snprintf(pending_title, sizeof(pending_title), "%s", buf + 15);
+        copy_display_text(pending_title, sizeof(pending_title), (const char *) buf + 15);
         pthread_mutex_unlock(&dlna_mutex);
     } else if ((size_t) n > 17 && memcmp(buf, "set_meta:artist:", 16) == 0) {
         pthread_mutex_lock(&dlna_mutex);
-        snprintf(pending_artist, sizeof(pending_artist), "%s", buf + 16);
+        copy_display_text(pending_artist, sizeof(pending_artist), (const char *) buf + 16);
         pthread_mutex_unlock(&dlna_mutex);
     } else if ((size_t) n > 16 && memcmp(buf, "set_meta:album:", 15) == 0) {
         pthread_mutex_lock(&dlna_mutex);
-        snprintf(pending_album, sizeof(pending_album), "%s", buf + 15);
+        copy_display_text(pending_album, sizeof(pending_album), (const char *) buf + 15);
         pthread_mutex_unlock(&dlna_mutex);
     } else if ((size_t) n >= 5 && memcmp(buf, "play@", 5) == 0) {
         handle_play();

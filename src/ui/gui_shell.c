@@ -64,6 +64,7 @@ static lv_obj_t * clock_topbar_group = NULL;
 static lv_obj_t * clock_topbar_digit[5] = { NULL };
 static lv_obj_t * clock_topbar_ampm = NULL;
 static lv_obj_t * volume_topbar_group = NULL;
+static lv_obj_t * volume_topbar_icon = NULL;
 static lv_obj_t * volume_topbar_digit[3] = { NULL };
 static lv_obj_t * volume_topbar_headphone = NULL;
 static int volume_topbar_last_len = -1;
@@ -763,6 +764,9 @@ static lv_obj_t * battery_icon_frame;
 /* Width last used to anchor the percentage group.  LVGL's align_to stores
  * coordinates; it does not follow later content/font/theme size changes. */
 static int32_t battery_topbar_anchored_width = -1;
+static uint32_t last_topbar_hidden_elements = UINT32_MAX;
+static int last_topbar_clock_position = -1;
+static bool last_topbar_show_battery_percent;
 
 static lv_obj_t * wifi_icon;
 static lv_obj_t * bt_status_icon;
@@ -770,6 +774,11 @@ static lv_obj_t * a2dp_status_icon;
 static lv_obj_t * usb_audio_status_icon;
 static lv_obj_t * play_pause_status_icon;
 static lv_obj_t * bt_codec_status_icon;
+
+static void reflow_topbar_layout(void);
+static void apply_topbar_visibility_preferences(void);
+static void sync_bt_codec_status_icon(void);
+static void invalidate_bt_codec_status_cache(void);
 
 typedef enum {
     BT_CODEC_TYPE_NONE = 0,
@@ -902,14 +911,14 @@ static void style_topbar_text(lv_obj_t * label, const lv_font_t * font) {
     lv_obj_set_style_pad_all(label, 0, 0);
 }
 
-/* Keep the tiny persistent status strip readable on the 320px panel while
- * preserving its existing 24/16px treatment on the 480px boards. These
+/* Keep the persistent status strip readable on the 320px panel while
+ * using a 28/18px treatment on the 480px boards. These
  * faces deliberately ignore the accessibility font tier. */
 static const lv_font_t * topbar_digit_font(void) {
 #if defined(BOARD_R3II_2025)
     return &lv_font_montserrat_16;
 #else
-    return &lv_font_montserrat_24;
+    return &lv_font_montserrat_28;
 #endif
 }
 
@@ -917,47 +926,44 @@ static const lv_font_t * topbar_ampm_font(void) {
 #if defined(BOARD_R3II_2025)
     return &lv_font_montserrat_12;
 #else
-    return &lv_font_montserrat_16;
+    return &lv_font_montserrat_18;
 #endif
 }
 
-/* Lucide status assets share a real 24x24 canvas. Render their visible glyph
- * at 28px while retaining the existing 32px layout slot: this gives the
- * status bar more visual weight without consuming any additional horizontal
- * space in the crowded 480px layout. Keep this geometry independent of the
- * accessibility font tier. */
-static void layout_lucide_topbar_image(lv_obj_t * image) {
-    lv_image_set_inner_align(image, LV_IMAGE_ALIGN_CENTER);
-    lv_image_set_scale(image, (BOARD_SCALE_PX(28) * LV_SCALE_NONE + 12) / 24);
-    lv_obj_set_size(image, BOARD_SCALE_PX(32), STATUS_BAR_CLEARANCE);
+/* Normalize Lucide art by its visible source bounds so icon ink shares the
+ * text's centerline and target height. Two pixels of padding around the
+ * visible bounds keeps neighboring status items legible without crowding. */
+static void layout_lucide_topbar_image(lv_obj_t * image, int left, int top,
+                                       int width, int height) {
+    int target = BOARD_SCALE_PX(20);
+    int padding = BOARD_SCALE_PX(2);
+    int scale = (target * LV_SCALE_NONE + height / 2) / height;
+    int visible_width = (width * scale + LV_SCALE_NONE / 2) / LV_SCALE_NONE;
+    lv_image_set_inner_align(image, LV_IMAGE_ALIGN_TOP_LEFT);
+    lv_image_set_pivot(image, 0, 0);
+    lv_image_set_scale(image, scale);
+    lv_obj_set_size(image, visible_width + 2 * padding, STATUS_BAR_CLEARANCE);
     lv_obj_set_style_translate_y(image, 0, 0);
-    lv_image_set_offset_x(image, 0);
-    lv_image_set_offset_y(image, 0);
+    lv_image_set_offset_x(image, (int16_t)(padding - (left * scale + LV_SCALE_NONE / 2) / LV_SCALE_NONE));
+    lv_image_set_offset_y(image, (int16_t)((STATUS_BAR_CLEARANCE - target) / 2
+                                           - (top * scale + LV_SCALE_NONE / 2) / LV_SCALE_NONE));
 }
 
-/* Battery specifically renders larger than every other Lucide status icon --
- * real-device feedback found the shared 28px size too small to read charge
- * level at a glance. Widens the slot by the same amount the glyph grows
- * (38px glyph in a 42px slot, same ~4px padding the shared 28-in-32 sizing
- * already used) rather than just overscaling within the old 32px slot, so
- * the glyph doesn't visually crowd its own slot edges. battery_icon_frame
- * stays anchored via LV_ALIGN_RIGHT_MID (unaffected by width), so this
- * only grows the icon leftward, away from the screen edge -- and since
- * battery_topbar_group's own position is align_to()'d against this object
- * AFTER this runs (build_status_bar()) and this function always produces
- * the same fixed size on every later refresh_battery_topbar() call too,
- * that one-time anchor never goes stale. */
+/* All battery states use the same measured family envelope. The resulting
+ * fixed-width slot keeps the percentage group anchored through state swaps. */
 static void layout_battery_topbar_image(lv_obj_t * image) {
-    layout_lucide_topbar_image(image);
-    lv_image_set_scale(image, (BOARD_SCALE_PX(38) * LV_SCALE_NONE + 12) / 24);
-    lv_obj_set_size(image, BOARD_SCALE_PX(42), STATUS_BAR_CLEARANCE);
+    layout_lucide_topbar_image(image, 1, 5, 22, 14);
 }
 
-/* Theme2 status sprites share a 30 px canvas, but their visible alpha bounds
+static void layout_radio_topbar_image(lv_obj_t * image) {
+    /* All Wi-Fi strengths/off and Bluetooth states share the same family
+     * canvas bounds. Keeping them identical preserves partial-state art. */
+    layout_lucide_topbar_image(image, 1, 1, 22, 22);
+}
+
+/* Theme2 codec sprites share a 30 px canvas, but their visible alpha bounds
  * vary substantially. Measure the solid glyph (alpha >= 128), not faint
- * antialiasing fringes: these made Wi-Fi/Bluetooth appear undersized.
- * Scale the measured glyph to 22px while keeping its slot on the common
- * status-band centerline, independent of transparent canvas padding. */
+ * antialiasing fringes, and keep it on the common status-band centerline. */
 static void normalize_topbar_image(lv_obj_t * image, int left, int top,
                                    int width, int height) {
     topbar_icon_layout(image, left, top, width, height, STATUS_BAR_CLEARANCE);
@@ -1002,12 +1008,12 @@ static void build_status_bar(void) {
     lv_obj_set_pos(band, 0, 0);
     lv_obj_remove_flag(band, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Centered clock -- use a fixed 24px face so the clock,
+    /* Centered clock -- use fixed board-specific faces so the clock,
      * volume and battery readouts share one natural, accessibility-independent
      * text size. */
     clock_topbar_group = lv_obj_create(band);
     lv_obj_remove_style_all(clock_topbar_group);
-    lv_obj_set_size(clock_topbar_group, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_size(clock_topbar_group, LV_SIZE_CONTENT, STATUS_BAR_CLEARANCE);
     lv_obj_set_flex_flow(clock_topbar_group, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(clock_topbar_group, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(clock_topbar_group, 0, 0);
@@ -1017,13 +1023,10 @@ static void build_status_bar(void) {
         clock_topbar_digit[i] = lv_label_create(clock_topbar_group);
         lv_label_set_text(clock_topbar_digit[i], i == 2 ? ":" : "0");
         style_topbar_text(clock_topbar_digit[i], topbar_digit_font());
-        /* Optical correction for the digits, without moving the volume anchor. */
-        lv_obj_set_style_translate_y(clock_topbar_digit[i], BOARD_SCALE_PX(2), 0);
     }
     clock_topbar_ampm = lv_label_create(clock_topbar_group);
     lv_label_set_text(clock_topbar_ampm, TR("AM"));
     style_topbar_text(clock_topbar_ampm, topbar_ampm_font());
-    lv_obj_set_style_translate_y(clock_topbar_ampm, BOARD_SCALE_PX(2), 0);
     lv_obj_add_flag(clock_topbar_ampm, LV_OBJ_FLAG_HIDDEN); /* refresh_clock_label() unhides this if clock_24h is off */
 
     /* LAST, after every child exists -- see the matching comment on
@@ -1056,9 +1059,9 @@ static void build_status_bar(void) {
     lv_obj_remove_flag(volume_topbar_group, LV_OBJ_FLAG_SCROLLABLE);
 
     /* Normalize against the sprite's measured visible glyph bounds. */
-    lv_obj_t * volume_topbar_icon = lv_image_create(volume_topbar_group);
+    volume_topbar_icon = lv_image_create(volume_topbar_group);
     lv_image_set_src(volume_topbar_icon, asset_path("topbar/lucide_volume_2.png"));
-    layout_lucide_topbar_image(volume_topbar_icon);
+    layout_lucide_topbar_image(volume_topbar_icon, 1, 3, 22, 18);
 
     /* White by default (the sprite's own native color, no recolor style
      * applied at creation); refresh_volume_topbar() below switches each
@@ -1077,7 +1080,7 @@ static void build_status_bar(void) {
      * (see headphone_status.h). */
     volume_topbar_headphone = lv_image_create(volume_topbar_group);
     lv_image_set_src(volume_topbar_headphone, asset_path("topbar/lucide_headphones.png"));
-    layout_lucide_topbar_image(volume_topbar_headphone);
+    layout_lucide_topbar_image(volume_topbar_headphone, 2, 2, 20, 20);
     lv_obj_add_flag(volume_topbar_headphone, LV_OBJ_FLAG_HIDDEN);
 
     /* Same flex row as the headphone-jack glyph above, not a separate fixed
@@ -1090,7 +1093,7 @@ static void build_status_bar(void) {
      * "replace" logic needed). */
     a2dp_status_icon = lv_image_create(volume_topbar_group);
     lv_image_set_src(a2dp_status_icon, asset_path("topbar/lucide_audio_lines.png"));
-    layout_lucide_topbar_image(a2dp_status_icon);
+    layout_lucide_topbar_image(a2dp_status_icon, 1, 2, 22, 20);
     lv_obj_add_flag(a2dp_status_icon, LV_OBJ_FLAG_HIDDEN); /* shown by poll_refresh_bt_icon() once an A2DP source PCM exists */
 
     /* Same flex-collapse shape as the headphone/A2DP glyphs above -- shown/
@@ -1103,7 +1106,7 @@ static void build_status_bar(void) {
     /* Uses topbar/usb.png for the topbar status row (distinct from
      * usb/usb.png used by the full-screen USB DAC mode overlay). */
     lv_image_set_src(usb_audio_status_icon, asset_path("topbar/lucide_usb.png"));
-    layout_lucide_topbar_image(usb_audio_status_icon);
+    layout_lucide_topbar_image(usb_audio_status_icon, 2, 2, 20, 20);
     lv_obj_add_flag(usb_audio_status_icon, LV_OBJ_FLAG_HIDDEN);
 
     /* Rightmost in this row -- always after whichever headphone-output
@@ -1113,7 +1116,7 @@ static void build_status_bar(void) {
      * refresh_play_pause_topbar(). */
     play_pause_status_icon = lv_image_create(volume_topbar_group);
     lv_image_set_src(play_pause_status_icon, asset_path("topbar/lucide_play.png"));
-    layout_lucide_topbar_image(play_pause_status_icon);
+    layout_lucide_topbar_image(play_pause_status_icon, 2, 2, 20, 20);
     lv_obj_add_flag(play_pause_status_icon, LV_OBJ_FLAG_HIDDEN);
 
     /* Negotiated Bluetooth codec indicator (e.g. sbc.png, aac.png, aptx.png,
@@ -1126,14 +1129,14 @@ static void build_status_bar(void) {
     normalize_topbar_image(bt_codec_status_icon, 0, 0, 48, 30);
     lv_obj_add_flag(bt_codec_status_icon, LV_OBJ_FLAG_HIDDEN);
 
-    lv_obj_align(volume_topbar_group, LV_ALIGN_LEFT_MID, BOARD_SCALE_PX(16), 0);
+    lv_obj_align(volume_topbar_group, LV_ALIGN_LEFT_MID, BOARD_SCALE_PX(4), 0);
 
     /* One Lucide image owns the complete battery silhouette. Swapping whole
      * states avoids the old independently-rounded frame/fill/terminal seams. */
     battery_icon_frame = lv_image_create(band);
     lv_image_set_src(battery_icon_frame, asset_path("topbar/lucide_battery.png"));
     layout_battery_topbar_image(battery_icon_frame);
-    lv_obj_align(battery_icon_frame, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(15), 0);
+    lv_obj_align(battery_icon_frame, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(4), 0);
 
     /* Sprite digits (topbar/N.png + percent.png), same treatment as the
      * clock/volume readouts above -- up to 3 digit slots (0-100, same
@@ -1144,7 +1147,7 @@ static void build_status_bar(void) {
      * the old blank-text label had. */
     battery_topbar_group = lv_obj_create(band);
     lv_obj_remove_style_all(battery_topbar_group);
-    lv_obj_set_size(battery_topbar_group, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_size(battery_topbar_group, LV_SIZE_CONTENT, STATUS_BAR_CLEARANCE);
     lv_obj_set_flex_flow(battery_topbar_group, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(battery_topbar_group, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(battery_topbar_group, 0, 0);
@@ -1163,17 +1166,17 @@ static void build_status_bar(void) {
      * fixed band offset, since the group's own width varies with the
      * digit count (1-3) -- LAST, after every child exists, same reasoning
      * as volume_topbar_group's align() below. */
-    lv_obj_align_to(battery_topbar_group, battery_icon_frame, LV_ALIGN_OUT_LEFT_MID, -BOARD_SCALE_PX(5), 0);
+    lv_obj_align_to(battery_topbar_group, battery_icon_frame, LV_ALIGN_OUT_LEFT_MID, -BOARD_SCALE_PX(2), 0);
 
     wifi_icon = lv_image_create(band);
     lv_image_set_src(wifi_icon, asset_path("topbar/lucide_wifi_off.png"));
-    layout_lucide_topbar_image(wifi_icon);
+    layout_radio_topbar_image(wifi_icon);
     lv_obj_align(wifi_icon, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(105), 0);
     lv_obj_add_flag(wifi_icon, LV_OBJ_FLAG_HIDDEN); /* shown by refresh_wifi_icon() once wifi_control_is_enabled() */
 
     bt_status_icon = lv_image_create(band);
     lv_image_set_src(bt_status_icon, asset_path("topbar/lucide_bluetooth.png"));
-    layout_lucide_topbar_image(bt_status_icon);
+    layout_radio_topbar_image(bt_status_icon);
     lv_obj_align(bt_status_icon, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(145), 0);
     lv_obj_add_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN); /* shown by refresh_bt_icon() once bt_control_is_powered() */
 }
@@ -1200,7 +1203,7 @@ static void refresh_play_pause_topbar(void) {
                                                 : "topbar/lucide_pause.png");
         if (!image_file_source_matches(lv_image_get_src(play_pause_status_icon), source)) {
             lv_image_set_src(play_pause_status_icon, source);
-            layout_lucide_topbar_image(play_pause_status_icon);
+            layout_lucide_topbar_image(play_pause_status_icon, 2, 2, 20, 20);
         }
         if (was_hidden) lv_obj_remove_flag(play_pause_status_icon, LV_OBJ_FLAG_HIDDEN);
     } else if (!was_hidden) {
@@ -1228,19 +1231,18 @@ static void refresh_battery_topbar_anchor(bool force) {
     lv_obj_update_layout(battery_topbar_group);
     int32_t width = lv_obj_get_width(battery_topbar_group);
     if (force || width != battery_topbar_anchored_width) {
-        lv_obj_align_to(battery_topbar_group, battery_icon_frame, LV_ALIGN_OUT_LEFT_MID, -BOARD_SCALE_PX(5), 0);
         battery_topbar_anchored_width = width;
-        sync_topbar_status_icon_positions();
+        reflow_topbar_layout();
     }
 }
 
 void refresh_battery_topbar(void) {
     int percent = battery_get_display_percent();
 
-    /* battery_icon_frame (the outline + fill gauge) is always shown --
+    /* The battery icon has its own topbar visibility preference;
      * current_settings.show_battery_percent (Settings > Power > "Battery
-     * Percentage") only ever hides the "NN%" digit readout below, never the
-     * icon itself. Edge-triggered (compares against the group's own current
+     * Percentage") controls only the "NN%" digit readout below. Edge-triggered
+     * (compares against the group's own current
      * hidden-flag rather than setting it unconditionally every call) since
      * this whole function runs every tick the screen is on -- re-syncing
      * the wifi/bt icon positions that often, on every tick, for a flag that
@@ -1353,8 +1355,9 @@ void refresh_volume_topbar(int32_t percent) {
         snprintf(volume_topbar_last_digits, sizeof(volume_topbar_last_digits), "%s", digits);
     if (volume_topbar_last_len != len) {
         volume_topbar_last_len = len;
-        sync_bt_codec_status_icon();
     }
+    reflow_topbar_layout();
+    sync_bt_codec_status_icon();
 }
 
 /* Polled every timer tick alongside refresh_battery_topbar() -- like
@@ -1369,6 +1372,7 @@ void refresh_headphone_icon(void) {
         lv_obj_add_flag(volume_topbar_headphone, LV_OBJ_FLAG_HIDDEN);
     }
     if (was_hidden == connected) {
+        reflow_topbar_layout();
         sync_bt_codec_status_icon();
     }
 }
@@ -1394,9 +1398,107 @@ typedef enum {
 
 static topbar_status_icon_t topbar_status_icon_order[2] = { TOPBAR_STATUS_ICON_NONE, TOPBAR_STATUS_ICON_NONE };
 
+static bool topbar_element_hidden(uint32_t bit) {
+    return (current_settings.topbar_hidden_elements & bit) != 0;
+}
+
+static void apply_topbar_element_visibility(lv_obj_t * obj, uint32_t bit, bool flex_child) {
+    if (!obj) return;
+    bool hidden = topbar_element_hidden(bit);
+    lv_obj_set_style_opa(obj, hidden ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    if (flex_child) {
+        if (hidden) lv_obj_add_flag(obj, LV_OBJ_FLAG_IGNORE_LAYOUT);
+        else lv_obj_remove_flag(obj, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    }
+}
+
+static void apply_topbar_visibility_preferences(void) {
+    apply_topbar_element_visibility(volume_topbar_icon, TOPBAR_HIDE_VOLUME, true);
+    for (int i = 0; i < 3; i++)
+        apply_topbar_element_visibility(volume_topbar_digit[i], TOPBAR_HIDE_VOLUME, true);
+    apply_topbar_element_visibility(volume_topbar_headphone, TOPBAR_HIDE_HEADPHONES, true);
+    apply_topbar_element_visibility(a2dp_status_icon, TOPBAR_HIDE_A2DP, true);
+    apply_topbar_element_visibility(usb_audio_status_icon, TOPBAR_HIDE_USB_AUDIO, true);
+    apply_topbar_element_visibility(play_pause_status_icon, TOPBAR_HIDE_PLAYBACK, true);
+    apply_topbar_element_visibility(bt_codec_status_icon, TOPBAR_HIDE_CODEC, true);
+    apply_topbar_element_visibility(clock_topbar_group, TOPBAR_HIDE_CLOCK, false);
+    for (int i = 0; i < 5; i++)
+        apply_topbar_element_visibility(clock_topbar_digit[i], TOPBAR_HIDE_CLOCK, false);
+    apply_topbar_element_visibility(clock_topbar_ampm, TOPBAR_HIDE_CLOCK, false);
+    apply_topbar_element_visibility(battery_icon_frame, TOPBAR_HIDE_BATTERY, false);
+    apply_topbar_element_visibility(wifi_icon, TOPBAR_HIDE_WIFI, false);
+    apply_topbar_element_visibility(bt_status_icon, TOPBAR_HIDE_BLUETOOTH, false);
+}
+
+static bool topbar_object_naturally_visible(lv_obj_t * obj, uint32_t bit) {
+    return obj && !topbar_element_hidden(bit) && !lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void topbar_align_left_of(lv_obj_t * obj, lv_obj_t * anchor, int gap_px) {
+    if (!obj || !anchor) return;
+    lv_obj_align_to(obj, anchor, LV_ALIGN_OUT_LEFT_MID, -BOARD_SCALE_PX(gap_px), 0);
+}
+
+static void reflow_topbar_layout(void) {
+    if (!status_bar_band || !clock_topbar_group || !volume_topbar_group || !battery_icon_frame ||
+        !battery_topbar_group || !wifi_icon || !bt_status_icon) return;
+
+    apply_topbar_visibility_preferences();
+    lv_obj_update_layout(status_bar_band);
+    lv_obj_update_layout(clock_topbar_group);
+    lv_obj_update_layout(volume_topbar_group);
+    lv_obj_update_layout(battery_topbar_group);
+
+    bool clock_visible = !topbar_element_hidden(TOPBAR_HIDE_CLOCK);
+    int clock_position = current_settings.topbar_clock_position;
+    if (clock_position < TOPBAR_CLOCK_CENTER || clock_position > TOPBAR_CLOCK_RIGHT)
+        clock_position = TOPBAR_CLOCK_CENTER;
+    if (clock_visible) {
+        lv_obj_align(clock_topbar_group,
+                     clock_position == TOPBAR_CLOCK_LEFT ? LV_ALIGN_LEFT_MID :
+                     clock_position == TOPBAR_CLOCK_RIGHT ? LV_ALIGN_RIGHT_MID : LV_ALIGN_CENTER,
+                     clock_position == TOPBAR_CLOCK_LEFT ? BOARD_SCALE_PX(4) :
+                     clock_position == TOPBAR_CLOCK_RIGHT ? -BOARD_SCALE_PX(4) : 0, 0);
+    }
+
+    if (clock_visible && clock_position == TOPBAR_CLOCK_LEFT)
+        lv_obj_align_to(volume_topbar_group, clock_topbar_group, LV_ALIGN_OUT_RIGHT_MID, BOARD_SCALE_PX(2), 0);
+    else
+        lv_obj_align(volume_topbar_group, LV_ALIGN_LEFT_MID, BOARD_SCALE_PX(4), 0);
+
+    lv_obj_t * right_anchor = clock_visible && clock_position == TOPBAR_CLOCK_RIGHT
+                                  ? clock_topbar_group : NULL;
+    bool battery_visible = !topbar_element_hidden(TOPBAR_HIDE_BATTERY);
+    if (battery_visible) {
+        if (right_anchor) topbar_align_left_of(battery_icon_frame, right_anchor, 2);
+        else lv_obj_align(battery_icon_frame, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(4), 0);
+        right_anchor = battery_icon_frame;
+    }
+
+    bool percent_visible = current_settings.show_battery_percent &&
+                           !lv_obj_has_flag(battery_topbar_group, LV_OBJ_FLAG_HIDDEN);
+    if (percent_visible) {
+        if (right_anchor) topbar_align_left_of(battery_topbar_group, right_anchor, 2);
+        else lv_obj_align(battery_topbar_group, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(4), 0);
+        right_anchor = battery_topbar_group;
+    }
+
+    bool wifi_visible = topbar_object_naturally_visible(wifi_icon, TOPBAR_HIDE_WIFI);
+    bool bt_visible = topbar_object_naturally_visible(bt_status_icon, TOPBAR_HIDE_BLUETOOTH);
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t * widget = topbar_status_icon_order[i] == TOPBAR_STATUS_ICON_WIFI ? wifi_icon :
+                            topbar_status_icon_order[i] == TOPBAR_STATUS_ICON_BT ? bt_status_icon : NULL;
+        bool visible = widget == wifi_icon ? wifi_visible : widget == bt_status_icon ? bt_visible : false;
+        if (!widget || !visible) continue;
+        if (right_anchor) topbar_align_left_of(widget, right_anchor, 2);
+        else lv_obj_align(widget, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(4), 0);
+        right_anchor = widget;
+    }
+}
+
 static void sync_topbar_status_icon_positions(void) {
-    bool wifi_visible = !lv_obj_has_flag(wifi_icon, LV_OBJ_FLAG_HIDDEN);
-    bool bt_visible = !lv_obj_has_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN);
+    bool wifi_visible = topbar_object_naturally_visible(wifi_icon, TOPBAR_HIDE_WIFI);
+    bool bt_visible = topbar_object_naturally_visible(bt_status_icon, TOPBAR_HIDE_BLUETOOTH);
 
     topbar_status_icon_t new_order[2] = { TOPBAR_STATUS_ICON_NONE, TOPBAR_STATUS_ICON_NONE };
     int slot = 0;
@@ -1421,27 +1523,31 @@ static void sync_topbar_status_icon_positions(void) {
     topbar_status_icon_order[0] = new_order[0];
     topbar_status_icon_order[1] = new_order[1];
 
-    /* Chained anchoring, not fixed offsets -- Settings > Power > "Battery
-     * Percentage" (current_settings.show_battery_percent) lets the "NN%"
-     * readout be turned off entirely (battery_topbar_group hidden by
-     * refresh_battery_topbar() in that case, battery_icon_frame itself
-     * always stays visible -- see its own comment). When the percentage is
-     * showing, the inner slot sits left of battery_topbar_group, same gap
-     * that group's own anchor to battery_icon_frame already uses; when it's
-     * off, the inner slot moves in to sit left of battery_icon_frame
-     * directly, closing the gap the percentage would otherwise have left. */
-    lv_obj_t * anchor = (current_settings.show_battery_percent && !lv_obj_has_flag(battery_topbar_group, LV_OBJ_FLAG_HIDDEN))
-                             ? battery_topbar_group
-                             : battery_icon_frame;
-    for (int i = 0; i < 2; i++) {
-        lv_obj_t * widget = topbar_status_icon_order[i] == TOPBAR_STATUS_ICON_WIFI  ? wifi_icon
-                            : topbar_status_icon_order[i] == TOPBAR_STATUS_ICON_BT ? bt_status_icon
-                                                                                    : NULL;
-        if (!widget) continue;
-        /* Slots already include 4px on each side of the visible glyph. */
-        lv_obj_align_to(widget, anchor, LV_ALIGN_OUT_LEFT_MID, i == 0 ? -BOARD_SCALE_PX(4) : 0, 0);
-        anchor = widget;
-    }
+    reflow_topbar_layout();
+    sync_bt_codec_status_icon();
+}
+
+void gui_shell_apply_topbar_settings(void) {
+    if (!status_bar_band) return;
+    uint32_t hidden = current_settings.topbar_hidden_elements & TOPBAR_HIDE_ALL;
+    int position = current_settings.topbar_clock_position;
+    if (position < TOPBAR_CLOCK_CENTER || position > TOPBAR_CLOCK_RIGHT)
+        position = TOPBAR_CLOCK_CENTER;
+    bool show_percent = current_settings.show_battery_percent;
+    if (hidden == last_topbar_hidden_elements && position == last_topbar_clock_position &&
+        show_percent == last_topbar_show_battery_percent) return;
+
+    last_topbar_hidden_elements = hidden;
+    last_topbar_clock_position = position;
+    last_topbar_show_battery_percent = show_percent;
+    battery_topbar_anchored_width = -1;
+    invalidate_bt_codec_status_cache();
+    apply_topbar_visibility_preferences();
+    if (battery_topbar_group) refresh_battery_topbar();
+    sync_topbar_status_icon_positions();
+    quick_drawer_mark_snapshot_dirty();
+    player_transition_mark_dirty();
+    gui_navigation_invalidate_theme_snapshots();
 }
 
 /* The drawer's wifi icon reflects radio on/off (highlighted when enabled),
@@ -1794,7 +1900,7 @@ static void render_wifi_icon(void) {
     } else {
         lv_image_set_src(wifi_icon, asset_path("topbar/lucide_wifi_off.png"));
     }
-    layout_lucide_topbar_image(wifi_icon);
+    layout_radio_topbar_image(wifi_icon);
 }
 
 static void poll_wifi_status(void) {
@@ -2073,19 +2179,52 @@ static void start_refresh_bt_icon(void) {
  * Fully edge-triggered: caches eligibility, codec type, and neighboring
  * layout visibility to avoid redundant lv_image_set_src() or layout recomputations
  * during periodic polling when state is unchanged. */
+static uint32_t topbar_codec_geometry_signature(uint32_t signature) {
+    if (!status_bar_band || !volume_topbar_group || !clock_topbar_group || !battery_topbar_group)
+        return signature;
+    lv_obj_update_layout(volume_topbar_group);
+    lv_obj_update_layout(clock_topbar_group);
+    lv_obj_update_layout(battery_topbar_group);
+    signature = signature * 33u + (uint32_t)lv_obj_get_width(status_bar_band);
+    signature = signature * 33u + (uint32_t)lv_obj_get_width(clock_topbar_group);
+    signature = signature * 33u + (uint32_t)lv_obj_get_x(clock_topbar_group);
+    signature = signature * 33u + (uint32_t)lv_obj_get_width(battery_topbar_group);
+    signature = signature * 33u + (uint32_t)lv_obj_get_x(battery_topbar_group);
+    int32_t left_width = lv_obj_get_width(volume_topbar_group);
+    if (bt_codec_status_icon && !lv_obj_has_flag(bt_codec_status_icon, LV_OBJ_FLAG_HIDDEN))
+        left_width -= lv_obj_get_width(bt_codec_status_icon);
+    signature = signature * 33u + (uint32_t)left_width;
+    signature = signature * 33u + (uint32_t)lv_obj_get_x(volume_topbar_group);
+    signature = signature * 33u + (uint32_t)current_settings.topbar_hidden_elements;
+    signature = signature * 33u + (uint32_t)current_settings.topbar_clock_position;
+    signature = signature * 33u + (current_settings.show_battery_percent ? 1u : 0u);
+    signature = signature * 33u +
+        ((topbar_object_naturally_visible(wifi_icon, TOPBAR_HIDE_WIFI) ? 1u : 0u) |
+         (topbar_object_naturally_visible(bt_status_icon, TOPBAR_HIDE_BLUETOOTH) ? 2u : 0u));
+    return signature;
+}
+
 static void sync_bt_codec_status_icon(void) {
     if (!bt_codec_status_icon) return;
+
+    apply_topbar_visibility_preferences();
+    if (topbar_element_hidden(TOPBAR_HIDE_CODEC)) {
+        reflow_topbar_layout();
+        return;
+    }
 
     bt_codec_type_t codec_type = bt_codec_identify(bt_connected_codec_cached);
     bool eligible = bt_is_powered_cached && bt_is_a2dp_connected_ui &&
                     (codec_type != BT_CODEC_TYPE_NONE);
 
     bool currently_hidden = lv_obj_has_flag(bt_codec_status_icon, LV_OBJ_FLAG_HIDDEN);
+    reflow_topbar_layout();
 
     if (!eligible) {
         if (last_codec_eligible || !currently_hidden || hidden_due_to_overlap) {
             lv_obj_add_flag(bt_codec_status_icon, LV_OBJ_FLAG_HIDDEN);
             invalidate_bt_codec_status_cache();
+            reflow_topbar_layout();
         }
         return;
     }
@@ -2103,12 +2242,13 @@ static void sync_bt_codec_status_icon(void) {
         }
     }
 
-    uint32_t layout_sig = (hp_vis ? 1 : 0) |
+    uint32_t layout_base_sig = (hp_vis ? 1 : 0) |
                           (a2dp_vis ? 2 : 0) |
                           (usb_vis ? 4 : 0) |
                           (pp_vis ? 8 : 0) |
                           (ampm_vis ? 16 : 0) |
                           ((uint32_t)(vol_digits_vis & 0x7) << 5);
+    uint32_t layout_sig = topbar_codec_geometry_signature(layout_base_sig);
 
     /* If eligibility, codec type, and layout factors haven't changed, and the badge is in its steady state
      * (either visible or already known to be hidden due to right-side overlap), do nothing */
@@ -2119,7 +2259,6 @@ static void sync_bt_codec_status_icon(void) {
     }
 
     last_codec_eligible = true;
-    last_codec_layout_sig = layout_sig;
 
     if (last_codec_type != codec_type) {
         last_codec_type = codec_type;
@@ -2130,6 +2269,8 @@ static void sync_bt_codec_status_icon(void) {
     }
 
     lv_obj_remove_flag(bt_codec_status_icon, LV_OBJ_FLAG_HIDDEN);
+    apply_topbar_visibility_preferences();
+    reflow_topbar_layout();
 
     /* Hide the optional codec badge when the left row would reach the
      * centered clock or the right-side indicators. */
@@ -2138,29 +2279,36 @@ static void sync_bt_codec_status_icon(void) {
         lv_obj_update_layout(volume_topbar_group);
         int32_t left_right = lv_obj_get_x(volume_topbar_group) + lv_obj_get_width(volume_topbar_group);
         int32_t right_boundary = LV_COORD_MAX;
-        if (clock_topbar_group) {
+        if (clock_topbar_group && !topbar_element_hidden(TOPBAR_HIDE_CLOCK) &&
+            current_settings.topbar_clock_position != TOPBAR_CLOCK_LEFT) {
             lv_obj_update_layout(clock_topbar_group);
             right_boundary = lv_obj_get_x(clock_topbar_group);
         }
-        if (bt_status_icon && !lv_obj_has_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN)) {
+        if (bt_status_icon && topbar_object_naturally_visible(bt_status_icon, TOPBAR_HIDE_BLUETOOTH)) {
             int32_t x = lv_obj_get_x(bt_status_icon);
             if (x < right_boundary) right_boundary = x;
         }
-        if (wifi_icon && !lv_obj_has_flag(wifi_icon, LV_OBJ_FLAG_HIDDEN)) {
+        if (wifi_icon && topbar_object_naturally_visible(wifi_icon, TOPBAR_HIDE_WIFI)) {
             int32_t x = lv_obj_get_x(wifi_icon);
             if (x < right_boundary) right_boundary = x;
         }
-        if (battery_topbar_group) {
+        if (current_settings.show_battery_percent &&
+            battery_topbar_group && !lv_obj_has_flag(battery_topbar_group, LV_OBJ_FLAG_HIDDEN)) {
             lv_obj_update_layout(battery_topbar_group);
             int32_t x = lv_obj_get_x(battery_topbar_group);
             if (x < right_boundary) right_boundary = x;
         }
-        if (right_boundary != LV_COORD_MAX && left_right + 6 > right_boundary) {
+        if (topbar_object_naturally_visible(battery_icon_frame, TOPBAR_HIDE_BATTERY)) {
+            int32_t x = lv_obj_get_x(battery_icon_frame);
+            if (x < right_boundary) right_boundary = x;
+        }
+        if (right_boundary != LV_COORD_MAX && left_right + BOARD_SCALE_PX(2) > right_boundary) {
             lv_obj_add_flag(bt_codec_status_icon, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_update_layout(volume_topbar_group);
+            reflow_topbar_layout();
             hidden_due_to_overlap = true;
         }
     }
+    last_codec_layout_sig = topbar_codec_geometry_signature(layout_base_sig);
 }
 
 /* Only this lifecycle worker starts/stops the monitors. A rapid reconnect
@@ -2300,7 +2448,7 @@ static void poll_refresh_bt_icon(void) {
     lv_obj_remove_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN);
     lv_image_set_src(bt_status_icon, asset_path(refresh_bt_icon_result_connected ?
                      "topbar/lucide_bluetooth.png" : "topbar/lucide_bluetooth_off.png"));
-    layout_lucide_topbar_image(bt_status_icon);
+    layout_radio_topbar_image(bt_status_icon);
     sync_topbar_status_icon_positions();
     if (a2dp_connected) {
         lv_obj_remove_flag(a2dp_status_icon, LV_OBJ_FLAG_HIDDEN);
@@ -3919,7 +4067,7 @@ static void wifi_toggle_apply_optimistic_ui(bool will_be_enabled) {
     if (will_be_enabled) {
         lv_obj_remove_flag(wifi_icon, LV_OBJ_FLAG_HIDDEN);
         lv_image_set_src(wifi_icon, asset_path("topbar/lucide_wifi_off.png"));
-        layout_lucide_topbar_image(wifi_icon);
+        layout_radio_topbar_image(wifi_icon);
     } else {
         lv_obj_add_flag(wifi_icon, LV_OBJ_FLAG_HIDDEN);
     }
@@ -4177,7 +4325,7 @@ static void show_optimistic_bt_state(bool powered) {
     if (powered) {
         lv_obj_remove_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN);
         lv_image_set_src(bt_status_icon, asset_path("topbar/lucide_bluetooth_off.png"));
-        layout_lucide_topbar_image(bt_status_icon);
+        layout_radio_topbar_image(bt_status_icon);
     } else {
         lv_obj_add_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN);
     }
@@ -5079,18 +5227,15 @@ void refresh_clock_label(void) {
         lv_label_set_text(clock_topbar_digit[i], glyph);
     }
 
-    bool ampm_was_hidden = lv_obj_has_flag(clock_topbar_ampm, LV_OBJ_FLAG_HIDDEN);
     if (current_settings.clock_24h) {
         lv_obj_add_flag(clock_topbar_ampm, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_label_set_text(clock_topbar_ampm, tm_info.tm_hour < 12 ? TR("AM") : TR("PM"));
         lv_obj_remove_flag(clock_topbar_ampm, LV_OBJ_FLAG_HIDDEN);
     }
-    /* Center alignment follows the clock's width automatically. Recheck
-     * room for the optional codec badge when AM/PM changes that width. */
-    if (ampm_was_hidden != lv_obj_has_flag(clock_topbar_ampm, LV_OBJ_FLAG_HIDDEN)) {
-        sync_bt_codec_status_icon();
-    }
+    /* Widths can change with AM/PM and localized glyph metrics. */
+    reflow_topbar_layout();
+    sync_bt_codec_status_icon();
 }
 
 /* Split out of gui_shell_init() so gui_reload.c's in-process UI reload can
@@ -5125,6 +5270,7 @@ void gui_shell_build_screens(uint32_t screen_width, uint32_t screen_height) {
         volume_warn_threshold_percent = -1;
     }
     refresh_volume_topbar((int32_t) (audio_get_volume() * 100.0f));
+    gui_shell_apply_topbar_settings();
 
     gui_shell_reset_drag_state();
     if (!quick_drawer_drag_timer) {
@@ -5236,7 +5382,29 @@ void gui_shell_teardown(void) {
         lv_obj_delete(status_bar_band);
         status_bar_band = NULL;
     }
+    clock_topbar_group = NULL;
+    clock_topbar_ampm = NULL;
+    for (int i = 0; i < 5; i++) clock_topbar_digit[i] = NULL;
+    volume_topbar_group = NULL;
+    volume_topbar_icon = NULL;
     for (int i = 0; i < 3; i++) volume_topbar_digit[i] = NULL;
+    volume_topbar_headphone = NULL;
+    battery_topbar_group = NULL;
+    battery_topbar_percent = NULL;
+    battery_icon_frame = NULL;
+    for (int i = 0; i < 3; i++) battery_topbar_digit[i] = NULL;
+    wifi_icon = NULL;
+    bt_status_icon = NULL;
+    a2dp_status_icon = NULL;
+    usb_audio_status_icon = NULL;
+    play_pause_status_icon = NULL;
+    bt_codec_status_icon = NULL;
+    topbar_status_icon_order[0] = TOPBAR_STATUS_ICON_NONE;
+    topbar_status_icon_order[1] = TOPBAR_STATUS_ICON_NONE;
+    battery_topbar_anchored_width = -1;
+    last_topbar_hidden_elements = UINT32_MAX;
+    last_topbar_clock_position = -1;
+    last_topbar_show_battery_percent = false;
     if (home_indicator_band) {
         lv_obj_delete(home_indicator_band);
         home_indicator_band = NULL;
@@ -5403,6 +5571,8 @@ void gui_shell_update_topbar(bool screen_just_woke) {
         start_bt_dac_startup_reapply_if_needed();
         start_refresh_bt_icon();
     }
+    reflow_topbar_layout();
+    sync_bt_codec_status_icon();
 }
 
 void gui_shell_resume_fast_timers(void) {

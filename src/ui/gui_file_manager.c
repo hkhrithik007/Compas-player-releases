@@ -329,7 +329,7 @@ static void new_folder_done_cb(const char * text, void * user_data) {
 
 enum menu_action {
     MENU_PASTE, MENU_SELECT, MENU_NEW_FOLDER, MENU_TOGGLE_HIDDEN,
-    MENU_COPY, MENU_MOVE, MENU_RENAME, MENU_DELETE, MENU_SELECT_ALL, MENU_CANCEL,
+    MENU_COPY, MENU_MOVE, MENU_RENAME, MENU_DELETE, MENU_SELECT_ALL, MENU_PAGE_JUMP, MENU_CANCEL,
 };
 
 static void run_menu_action(enum menu_action action) {
@@ -349,6 +349,7 @@ static void run_menu_action(enum menu_action action) {
         case MENU_RENAME: ask_rename(); break;
         case MENU_DELETE: ask_confirm(false, selection_has_player_folder()); break;
         case MENU_SELECT_ALL: file_browser_select_all(browser); break;
+        case MENU_PAGE_JUMP: file_browser_show_page_jump(browser); break;
         case MENU_CANCEL: break;
     }
 }
@@ -402,6 +403,8 @@ static void menu_button_cb(lv_event_t * e) {
                                                                      : TR("Show hidden files"),
                      MENU_TOGGLE_HIDDEN);
     }
+    if (file_browser_can_jump_pages(browser))
+        add_menu_row(rows, &count, TR("Go to page"), MENU_PAGE_JUMP);
     add_menu_row(rows, &count, TR("Cancel"), MENU_CANCEL);
     gui_popup_teardown(&menu_popup);
     menu_popup.popup = build_menu_popup(rows, count, menu_backdrop_cb, &menu_popup.backdrop);
@@ -410,12 +413,11 @@ static void menu_button_cb(lv_event_t * e) {
 
 /* ---- Screen ---- */
 
-/* The header back ends selection mode first; the back swipe does the same
- * through file_browser_go_up_for_screen(). */
+/* Share back-swipe behavior: dismiss the page picker or selection mode,
+ * then step up a folder, and leave File Manager at its root. */
 static void back_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    if (file_browser_is_selecting(browser)) file_browser_set_selecting(browser, false);
-    else nav_pop();
+    if (!file_browser_go_up_for_screen(screen)) nav_pop();
 }
 
 static void screen_delete_cb(lv_event_t * e) {
@@ -429,7 +431,7 @@ static void build_screen(void) {
     screen = lv_obj_create(NULL);
     lv_obj_add_style(screen, &style_theme_screen_bg, 0);
     lv_obj_add_event_cb(screen, screen_delete_cb, LV_EVENT_DELETE, NULL);
-    title_label = build_screen_header(screen, TR("File Manager"), back_cb, asset_path("playing_plane/ic_more.png"),
+    title_label = build_screen_header(screen, TR("File Manager"), back_cb, asset_path("navigation/more.png"),
                                       menu_button_cb);
     const file_browser_options_t options = {
         .on_select = on_file_browser_selected,

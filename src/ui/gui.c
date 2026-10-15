@@ -357,6 +357,8 @@ static bool force_screen_just_woke = false;
 /* A wake is prepared and painted with the backlight still off. */
 static bool screen_wake_pending = false;
 static lv_timer_t *power_input_timer, *media_input_timer;
+static lv_timer_t *player_ui_timer;
+static uint32_t player_ui_timer_period_ms;
 static bool screen_wake_frame_pending = false;
 static bool screen_wake_flush_seen;
 static bool screen_wake_reveal_pending;
@@ -499,6 +501,7 @@ static void finish_screen_wake_reveal(void) {
     screen_wake_power_menu = false;
     lv_indev_enable(NULL, true);
     gui_lock_screen_refresh(false);
+    if (player_ui_timer) lv_timer_ready(player_ui_timer);
     force_screen_just_woke = true;
 }
 
@@ -661,7 +664,12 @@ static void physical_button_action(button_mapping_action_t action,
         case BUTTON_MAPPING_ACTION_VOLUME_UP:
         case BUTTON_MAPPING_ACTION_VOLUME_DOWN: {
             int delta = (int)count * (action == BUTTON_MAPPING_ACTION_VOLUME_UP ? 1 : -1);
-            int new_percent = audio_clamp_volume_percent(gui_player_get_volume_percent() + delta);
+            /* Bluetooth accessories can change the effective audio volume
+             * before the next UI reconciliation tick. Step from the audio
+             * state so a physical button never starts from a stale slider. */
+            int current_percent = audio_clamp_volume_percent(
+                (int)(audio_get_volume() * 100.0f + 0.5f));
+            int new_percent = audio_clamp_volume_percent(current_percent + delta);
             gui_player_set_volume_percent(new_percent);
             audio_set_volume((float)new_percent / 100.0f);
             gui_player_remember_volume_percent(new_percent);
@@ -744,6 +752,60 @@ static void media_button_timer_cb(lv_timer_t *timer) {
 void gui_process_input_wake(void) {
     media_button_timer_cb(NULL);
     poll_cover_decode();
+    if (player_ui_timer) lv_timer_ready(player_ui_timer);
+}
+
+/* Run player completion at 50 ms while awake and 500 ms while off; the latter
+ * keeps correctness work running at the system housekeeping cadence. */
+static void player_ui_timer_cb(lv_timer_t * timer) {
+    (void) timer;
+    uint32_t period_ms = backlight_screen_is_on() ? 50 : 500;
+    if (player_ui_timer_period_ms != period_ms) {
+        player_ui_timer_period_ms = period_ms;
+        lv_timer_set_period(player_ui_timer, period_ms);
+    }
+
+    /* Accessory volume is applied by the BlueALSA monitor thread. Keep its
+     * UI/persisted mirror on this fast player cadence, including while the
+     * screen is off. Leave the pending signal queued during a slider drag;
+     * after the drag, mirror the current audio value so an older queued
+     * accessory percentage cannot roll back a newer local adjustment. */
+    if (!gui_player_volume_is_being_adjusted()) {
+        int ignored_bt_percent;
+        if (bt_control_source_volume_sync_consume_percent(&ignored_bt_percent)) {
+            int bt_volume_percent = audio_clamp_volume_percent(
+                (int)(audio_get_volume() * 100.0f + 0.5f));
+            gui_player_set_volume_percent(bt_volume_percent);
+            gui_player_remember_volume_percent(bt_volume_percent);
+            settings_save_async(&current_settings);
+            show_volume_popup(bt_volume_percent);
+            refresh_volume_topbar(bt_volume_percent);
+        }
+    }
+
+    uint64_t playback_err_gen = 0;
+    audio_error_t playback_err = audio_consume_error_ex(&playback_err_gen);
+    if (playback_err != AUDIO_ERROR_NONE) {
+        gui_player_handle_playback_error_ex(playback_err, playback_err_gen);
+    } else if (audio_consume_track_advanced()) {
+        gui_player_handle_auto_advance();
+    } else if (audio_consume_track_finished()) {
+        gui_player_handle_track_finished();
+    }
+
+    gui_player_poll_track_metadata();
+    poll_cover_decode();
+    gui_lyrics_poll_load();
+    gui_lyrics_poll_backdrop();
+    gui_player_poll_confirmed_playback();
+    gui_player_poll_waveform();
+
+    if (!backlight_screen_is_on()) return;
+    if (gui_navigation_transition_in_progress() || gui_player_lyrics_animation_in_progress()) return;
+    if (!gui_player_has_active_track() || gui_player_is_seeking()) return;
+
+    gui_player_update_progress();
+    refresh_format_badge();
 }
 
 static void update_timer_cb(lv_timer_t * timer) {
@@ -781,21 +843,6 @@ static void update_timer_cb(lv_timer_t * timer) {
                                  has_track ? gui_player_get_now_playing_track_number() : 0,
                                  audio_get_position_seconds(), audio_get_duration_seconds(), bt_art_url);
 #endif
-
-    /* Accessory-originated AVRCP volume changes arrive on bluealsa's
-     * monitor thread. Mirror the already-applied audio value into every UI
-     * and persisted representation here on the sole LVGL thread, so the
-     * next hardware-button step starts from what the user actually hears. */
-    int bt_synced_volume_percent;
-    if (bt_control_source_volume_sync_consume_percent(&bt_synced_volume_percent) &&
-        !gui_player_volume_is_being_adjusted()) {
-        bt_synced_volume_percent = audio_clamp_volume_percent(bt_synced_volume_percent);
-        gui_player_set_volume_percent(bt_synced_volume_percent);
-        gui_player_remember_volume_percent(bt_synced_volume_percent);
-        settings_save_async(&current_settings);
-        show_volume_popup(bt_synced_volume_percent);
-        refresh_volume_topbar(bt_synced_volume_percent);
-    }
 
     /* Phone remote-control (Phase 2, remote_control.h): same "background
      * thread sets a flag, this is the one thread allowed to touch LVGL/
@@ -1105,6 +1152,7 @@ static void update_timer_cb(lv_timer_t * timer) {
     bool screen_on_now = backlight_screen_is_on();
     bool screen_just_woke = screen_on_now && (!screen_was_on || force_screen_just_woke);
     if (screen_just_woke) force_screen_just_woke = false;
+    if (screen_just_woke && player_ui_timer) lv_timer_ready(player_ui_timer);
 
     /* Touch input and display refresh follow screen on/off state. Disabling indev
      * devices when screen is off prevents accidental touch events. Physical buttons
@@ -1337,24 +1385,10 @@ static void update_timer_cb(lv_timer_t * timer) {
 #ifdef UI_PERF_TRACE
     update_perf_mark("storage_jobs");
 #endif
-    poll_cover_decode();
-    gui_lyrics_poll_load();
-    gui_lyrics_poll_backdrop();
+    gui_player_service_artwork_cache();
     poll_search_job();
-
-    uint64_t playback_err_gen = 0;
-    audio_error_t playback_err = audio_consume_error_ex(&playback_err_gen);
-    if (playback_err != AUDIO_ERROR_NONE) {
-        gui_player_handle_playback_error_ex(playback_err, playback_err_gen);
-    } else if (audio_consume_track_advanced()) {
-        gui_player_handle_auto_advance();
-    } else if (audio_consume_track_finished()) {
-        gui_player_handle_track_finished();
-    }
     gui_navigation_poll_snapshot_rebuild();
-    gui_player_poll_track_metadata();
     gui_library_poll_now_playing_indicators();
-    gui_player_poll_confirmed_playback();
     static bool queue_checkpoint_failure_notified;
     if (gui_player_queue_checkpoint_failed()) {
         if (!queue_checkpoint_failure_notified) {
@@ -1377,22 +1411,6 @@ static void update_timer_cb(lv_timer_t * timer) {
     update_perf_mark("player_jobs");
 #endif
 
-    /* All correctness-critical work above (buttons, queue transitions and
-     * completion of requested background operations) still runs at 500 ms.
-     * Everything below only redraws the player screen, so skip it while the
-     * panel is physically off. This preserves hardware-button latency while
-     * eliminating invisible slider/label rendering and asset I/O. */
-    if (!backlight_screen_is_on()) return;
-
-    /* The slide displays frozen frames; defer purely visual refreshes until
-     * it settles, while keeping the playback/hardware polling above live. */
-    if (gui_navigation_transition_in_progress() || gui_player_lyrics_animation_in_progress()) return;
-
-    if (!gui_player_has_active_track() || gui_player_is_seeking()) return;
-
-    gui_player_update_progress();
-
-    refresh_format_badge();
 }
 
 
@@ -1745,7 +1763,6 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
     gui_display_apply_rotation(current_settings.screen_upside_down);
     bt_control_restore_codec_preference(current_settings.bt_codec);
     bt_control_set_speexrate_enabled(current_settings.bt_speexrate_enabled);
-    gui_library_set_covers_during_playback(current_settings.dev_covers_during_playback);
     bt_control_set_sample_rate(current_settings.bt_sample_rate);
     db_log_set_enabled(current_settings.db_logging_enabled);
     hw_buttons_set_screenshot_combo_enabled(current_settings.screenshot_combo_enabled);
@@ -1792,6 +1809,13 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
     boot_checkpoint("USB mode discovery done");
 #endif
     if (detected) current_settings.usb_mode = (int) detected_usb_mode;
+
+    /* A DAC gadget can survive a player restart. Recover its saved Type-C
+     * and charging policy before the first charging poll can enable power. */
+    if (!usb_mode_control_set_dac_charging_disabled(current_settings.usb_dac_disable_charging))
+        fprintf(stderr, "gui: could not apply the USB DAC charging preference\n");
+    if (!usb_mode_control_reconcile_dac_session())
+        fprintf(stderr, "gui: USB DAC session recovery incomplete; retaining conservative power policy\n");
 
     /* ADB is the one mode that survives a restart, because enabling it means
      * going into Developer Options and asking for it. Anything else starts as
@@ -2038,6 +2062,8 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
         lv_timer_pause(media_input_timer);
     }
     lv_timer_create(update_timer_cb, 500, NULL);
+    player_ui_timer_period_ms = backlight_screen_is_on() ? 50 : 500;
+    player_ui_timer = lv_timer_create(player_ui_timer_cb, player_ui_timer_period_ms, NULL);
     lv_indev_t * gesture_indev = find_pointer_indev();
     gui_shell_install_indev_hooks(gesture_indev);
 #ifndef HOST_BUILD
@@ -2097,6 +2123,11 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
 void gui_deinit(void) {
     lv_display_remove_event_cb_with_user_data(lv_display_get_default(), screen_wake_frame_ready_cb, NULL);
     screen_wake_pending = screen_wake_frame_pending = screen_wake_power_menu = screen_wake_flush_seen = screen_wake_reveal_pending = false;
+    if (player_ui_timer) {
+        lv_timer_delete(player_ui_timer);
+        player_ui_timer = NULL;
+        player_ui_timer_period_ms = 0;
+    }
     button_mapping_reset(&physical_button_mapping);
     gui_setup_teardown();
     gui_library_cancel_scan();

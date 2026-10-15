@@ -235,14 +235,33 @@ bool audio_get_current_format_info(audio_current_format_info_t * out);
  * then closes it without touching playback state or the output device. */
 bool audio_probe_file_format(const char * path, audio_current_format_info_t * out);
 
+/* Optional synchronous snapshot callback for audio_extract_waveform_progress.
+ * bins is borrowed for the duration of the call and contains `count` bytes;
+ * entries at and after `completed` are zero. */
+typedef void (*audio_waveform_progress_callback_t)(const uint8_t * bins,
+                                                    size_t count,
+                                                    size_t completed,
+                                                    void * user);
+
 /* Extract per-time-bin RMS levels from a local regular audio file, normalized
  * relative to the loudest bin (which is 255; silence stays 0).
+ * Long seekable tracks use centered 40 ms amplitude samples per bin; short
+ * tracks retain full-bin RMS. Isolated transients between windows may be missed.
  * Uses a private decoder instance and never changes playback state. `count`
  * must be in 1..256; `cancel`, when provided, is polled between decode reads.
  * Requires a known complete duration, sample rate <=192kHz, and duration <=2h;
  * DSD and APE are intentionally unsupported for this background preview. */
 bool audio_extract_waveform(const char * path, uint8_t * bins, size_t count,
                             bool (*cancel)(void *), void * user);
+/* Progress variant. Publishes normalized prefixes after each four completed
+ * bins and once at the terminal prefix when it is not a four-bin boundary.
+ * Any progress snapshot is provisional and must not be treated as final/cacheable.
+ * The callback runs synchronously on the extraction thread and must not retain
+ * its borrowed bins pointer. */
+bool audio_extract_waveform_progress(const char * path, uint8_t * bins, size_t count,
+                                     bool (*cancel)(void *), void * user,
+                                     audio_waveform_progress_callback_t progress,
+                                     void * progress_user);
 
 /* 0.0 (silent) - 1.0 (full volume). Applied as software gain on the decoded PCM. */
 void audio_set_volume(float volume);

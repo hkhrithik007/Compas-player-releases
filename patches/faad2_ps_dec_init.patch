@@ -1,0 +1,25 @@
+--- a/libfaad/ps_dec.c
++++ b/libfaad/ps_dec.c
+@@ -1050,6 +1050,11 @@
+     complex_t inputLeft;
+ 
+ 
++    /* A frame with no groups never reaches the per-band copy below.
++     * Seed the indices so the write-back stores the previous values. */
++    for (n = 0; n < NO_ALLPASS_LINKS; n++)
++        temp_delay_ser[n] = ps->delay_buf_index_ser[n];
++
+     /* chose hybrid filterbank: 20 or 34 band case */
+     if (ps->use34hybrid_bands)
+     {
+@@ -1464,7 +1469,9 @@
+     uint8_t nr_ipdopd_par;
+     complex_t h11, h12, h21, h22;  // COEF
+     complex_t H11, H12, H21, H22;  // COEF
+-    complex_t deltaH11, deltaH12, deltaH21, deltaH22;  // COEF
++    /* Imaginary deltas are filled only for IPD/OPD groups, which is also
++     * the only path that reads them. Zero keeps the other path defined. */
++    complex_t deltaH11 = { 0 }, deltaH12 = { 0 }, deltaH21 = { 0 }, deltaH22 = { 0 };
+     complex_t tempLeft, tempRight; // FRAC
+     complex_t phaseLeft, phaseRight; // FRAC
+     real_t L;

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gui_navigation.c"
+#include "ui_fonts.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -280,6 +281,7 @@ static void test_screen_off_resume_and_teardown(lv_obj_t **screens, lv_indev_t *
 
 int main(void) {
     lv_init();
+    if (!ui_fonts_init()) return 1;
     lv_tick_set_cb(NULL);
     lv_display_t *display = lv_display_create(100, 100);
     assert(display);

@@ -17,7 +17,7 @@ gradient, rendered at 176px and Lanczos-scaled to 44px.
 Saved backgrounds reuse the generated Settings and Wireless gradients.
 Rows retain decoded images for their lifetime. No runtime gradient generation.
 
-More-menu additions, rebuilt with python3 scripts/generate_more_menu_icons.py:
+More-menu additions:
 plugins.png uses @phosphor-icons/core@2.1.1 assets/regular/puzzle-piece.svg
 with the violet Settings gradient (#d7a9fa to #a36be4).
 themes.png uses assets/regular/palette.svg with a gold-to-coral gradient

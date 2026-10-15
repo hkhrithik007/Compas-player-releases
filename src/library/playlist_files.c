@@ -108,12 +108,16 @@ bool playlist_files_has_active_write(void) {
 /* Directory a file lives in, i.e. everything before its last '/' -- same
  * split every m3u_path-consuming function here needs, pulled out once
  * rather than reimplemented per call site. */
-static void dir_of(const char * path, char * out, size_t out_size) {
+static bool dir_of(const char * path, char * out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    if (!path) return false;
     const char * slash = strrchr(path, '/');
     size_t len = slash ? (size_t) (slash - path) : 0;
-    if (len >= out_size) len = out_size - 1;
-    memcpy(out, path, len);
+    if (len >= out_size) return false;
+    if (len) memcpy(out, path, len);
     out[len] = '\0';
+    return true;
 }
 
 #define NORMALIZE_MAX_COMPONENTS 64
@@ -310,8 +314,8 @@ bool playlist_files_append(const char * path, const char * song_path) {
     if (!song_path || !song_path[0] || strchr(song_path, '\n') || strchr(song_path, '\r')) return false;
     pthread_mutex_lock(&playlist_files_mutex);
     char dir[PATH_MAX], temp[PATH_MAX], rel[PATH_MAX];
-    dir_of(path, dir, sizeof(dir));
-    bool ok = snprintf(temp, sizeof(temp), "%s/.playlist-XXXXXX", dir) < (int) sizeof(temp);
+    bool ok = dir_of(path, dir, sizeof(dir)) &&
+              snprintf(temp, sizeof(temp), "%s/.playlist-XXXXXX", dir) < (int) sizeof(temp);
     FILE * input = fopen(path, "rb");
     if (!input && errno != ENOENT) ok = false;
     int fd = ok ? mkstemp(temp) : -1;
@@ -331,6 +335,50 @@ bool playlist_files_append(const char * path, const char * song_path) {
     const char * line = make_relative_path(dir, song_path, rel, sizeof(rel)) ? rel : song_path;
     if (ok) ok = fprintf(output, "%s\n", line) >= 0 && fflush(output) == 0 && fsync(fileno(output)) == 0;
     if (output && fclose(output) != 0) ok = false;
+    if (ok) ok = rename(temp, path) == 0;
+    if (!ok && fd >= 0) unlink(temp);
+    if (ok) fsync_dir(dir);
+    pthread_mutex_unlock(&playlist_files_mutex);
+    return ok;
+}
+
+bool playlist_files_append_stream(const char * path, int count,
+                                  playlist_files_path_provider provider, void * context) {
+    if (!path || count < 0 || !provider) return false;
+    pthread_mutex_lock(&playlist_files_mutex);
+    char dir[PATH_MAX], temp[PATH_MAX];
+    bool ok = dir_of(path, dir, sizeof(dir)) &&
+              snprintf(temp, sizeof(temp), "%s/.playlist-XXXXXX", dir) < (int) sizeof(temp);
+    FILE * input = ok ? fopen(path, "rb") : NULL;
+    /* This API appends to a picker-selected existing playlist. If it was
+     * removed while the worker was scanning, fail without recreating it. */
+    if (!input) ok = false;
+    int fd = ok ? mkstemp(temp) : -1;
+    FILE * output = fd >= 0 ? fdopen(fd, "wb") : NULL;
+    if (!output) { if (fd >= 0) close(fd); ok = false; }
+    if (input) {
+        char buffer[4096]; size_t n;
+        int last = '\n';
+        while (ok && (n = fread(buffer, 1, sizeof(buffer), input)) > 0) {
+            ok = fwrite(buffer, 1, n, output) == n;
+            last = (unsigned char)buffer[n - 1];
+        }
+        if (ferror(input)) ok = false;
+        fclose(input);
+        if (ok && last != '\n') ok = fputc('\n', output) != EOF;
+    }
+    for (int i = 0; ok && i < count; i++) {
+        const char * song_path = NULL;
+        if (!provider(context, i, &song_path) || !song_path || !song_path[0] ||
+            strchr(song_path, '\n') || strchr(song_path, '\r')) { ok = false; break; }
+        char rel[PATH_MAX];
+        const char * line = make_relative_path(dir, song_path, rel, sizeof(rel)) ? rel : song_path;
+        ok = fprintf(output, "%s\n", line) >= 0;
+    }
+    if (output) {
+        if (ok) ok = fflush(output) == 0 && fsync(fileno(output)) == 0;
+        if (fclose(output) != 0) ok = false;
+    }
     if (ok) ok = rename(temp, path) == 0;
     if (!ok && fd >= 0) unlink(temp);
     if (ok) fsync_dir(dir);
@@ -416,8 +464,7 @@ bool playlist_files_remove(const char * m3u_path, const char * song_path) {
     if (ok) ok = rename(tmp_path, m3u_path) == 0;
     if (ok) {
         char dir_path[PATH_MAX];
-        dir_of(m3u_path, dir_path, sizeof(dir_path));
-        fsync_dir(dir_path);
+        if (dir_of(m3u_path, dir_path, sizeof(dir_path))) fsync_dir(dir_path);
     } else {
         unlink(tmp_path);
     }
@@ -611,7 +658,7 @@ playlist_import_status_t playlist_files_import_stream(const char * dir, const ch
 bool playlist_files_rename(const char * path, const char * name, char * out, size_t size) {
     if (!playlist_files_name_is_valid(name)) return false;
     char dir[PATH_MAX], dest[PATH_MAX];
-    dir_of(path, dir, sizeof(dir));
+    if (!dir_of(path, dir, sizeof(dir))) return false;
     const char * ext = strrchr(path, '.');
     if (snprintf(dest, sizeof(dest), "%s/%s%s", dir, name, library_is_m3u_file(name) ? "" : (ext ? ext : ".m3u")) >= (int) sizeof(dest) ||
         (out && strlen(dest) >= size)) return false;
@@ -669,9 +716,10 @@ static bool edit_entry_locked(const char * path, int from, int to) {
             blocks[to] = entry;
         }
         char temp[PATH_MAX], dir[PATH_MAX];
-        dir_of(path, dir, sizeof(dir));
         int fd = -1;
-        if (snprintf(temp, sizeof(temp), "%s/.playlist-XXXXXX", dir) < (int) sizeof(temp)) fd = mkstemp(temp);
+        if (dir_of(path, dir, sizeof(dir)) &&
+            snprintf(temp, sizeof(temp), "%s/.playlist-XXXXXX", dir) < (int) sizeof(temp))
+            fd = mkstemp(temp);
         f = fd >= 0 ? fdopen(fd, "w") : NULL;
         if (!f) { if (fd >= 0) close(fd); ok = false; }
         if (f) {
@@ -728,15 +776,26 @@ bool playlist_files_delete(const char * m3u_path) {
 }
 
 void playlist_files_resolve_path(const char * m3u_path, const char * line, char * out_full_path, size_t out_size) {
+    if (!out_full_path || out_size == 0) return;
+    out_full_path[0] = '\0';
+    if (!line) return;
     if (line[0] == '/') {
-        snprintf(out_full_path, out_size, "%s", line);
+        int n = snprintf(out_full_path, out_size, "%s", line);
+        if (n < 0 || (size_t) n >= out_size) {
+            out_full_path[0] = '\0';
+            return;
+        }
         normalize_path(out_full_path, out_size);
         return;
     }
 
     char dir_path[PATH_MAX];
-    dir_of(m3u_path, dir_path, sizeof(dir_path));
-    snprintf(out_full_path, out_size, "%s/%s", dir_path, line);
+    if (!dir_of(m3u_path, dir_path, sizeof(dir_path))) return;
+    int n = snprintf(out_full_path, out_size, "%s/%s", dir_path, line);
+    if (n < 0 || (size_t) n >= out_size) {
+        out_full_path[0] = '\0';
+        return;
+    }
     normalize_path(out_full_path, out_size);
 }
 
@@ -758,11 +817,12 @@ playlist_read_status_t playlist_files_read_ex(const char * path, char *** out_pa
         library_trim_eol(entry);
         if (!entry[0] || entry[0] == '#') continue;
         char full[PATH_MAX], dir[PATH_MAX];
-        dir_of(path, dir, sizeof(dir));
+        if (!dir_of(path, dir, sizeof(dir))) { status = PLAYLIST_READ_INVALID; break; }
         if (strlen(entry) + (entry[0] == '/' ? 0 : strlen(dir) + 1) >= sizeof(full)) {
             status = PLAYLIST_READ_INVALID; break;
         }
         playlist_files_resolve_path(path, entry, full, sizeof(full));
+        if (!full[0]) { status = PLAYLIST_READ_INVALID; break; }
         if (count == capacity) {
             if (capacity > INT_MAX / 2) { status = PLAYLIST_READ_NO_MEMORY; break; }
             int next = capacity ? capacity * 2 : 16;
@@ -801,7 +861,10 @@ static bool migrate_one_file(const char * m3u_path) {
     if (!in) return false;
 
     char dir_path[PATH_MAX];
-    dir_of(m3u_path, dir_path, sizeof(dir_path));
+    if (!dir_of(m3u_path, dir_path, sizeof(dir_path))) {
+        fclose(in);
+        return false;
+    }
 
     char tmp_path[PATH_MAX + 8];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", m3u_path);
@@ -812,18 +875,20 @@ static bool migrate_one_file(const char * m3u_path) {
     }
 
     char line[PATH_MAX];
+    bool overflow = false;
     while (fgets(line, sizeof(line), in)) {
         library_trim_eol(line);
         if (line[0] == '\0' || line[0] == '#') continue;
 
         char full_path[PATH_MAX];
         playlist_files_resolve_path(m3u_path, line, full_path, sizeof(full_path));
+        if (!full_path[0]) { overflow = true; break; }
 
         char rel[PATH_MAX];
         const char * line_to_write = make_relative_path(dir_path, full_path, rel, sizeof(rel)) ? rel : full_path;
         fprintf(out, "%s\n", line_to_write);
     }
-    bool read_ok = !ferror(in);
+    bool read_ok = !ferror(in) && !overflow;
     fclose(in);
 
     fflush(out);

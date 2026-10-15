@@ -54,9 +54,11 @@ void peq_set_stereo_width(double width);
  * Filtered-difference headphone blend, not a stereo-width matrix and not a
  * room or HRTF model. Each channel keeps its
  * sample and adds k times the one-pole low-pass difference between the
- * channels (cutoff PEQ_CROSSFEED_FC_HZ): yL = xL + k * (lpR - lpL), and the
- * mirror for R. There is no interaural delay. A steady mono (L == R) signal
- * stays at unity gain because the same low-pass is removed and added back.
+ * channels (cutoff PEQ_CROSSFEED_FC_HZ): yL = xL + k * (delayedLP_R - lpL),
+ * and the mirror for R. Angle 0 uses no explicit delay and keeps steady mono
+ * (L == R) at unity. Nonzero angles delay only the opposite channel's
+ * filtered contribution, changing mono frequency phase as an inherent ITD
+ * tradeoff; DC remains at unity.
  *
  * At strength s the low-frequency cross coefficient is
  * k = s * PEQ_CROSSFEED_MAX_BLEND (direct 1 - k once the low-pass has
@@ -82,18 +84,28 @@ void peq_set_stereo_width(double width);
  * The stored default is 0 for new installs, reset, and profiles that omit
  * the key. PEQ_CROSSFEED_SUGGESTED is a conservative strength for a caller
  * that is explicitly turning the effect on. The audio thread ramps strength
- * over PEQ_CROSSFEED_RAMP_SEC. Going idle, bypass, or a non-stereo buffer
- * clears the low-pass memory. A sample-rate or PCM-format change, and a
- * PCM discontinuity noted by the audio thread, replace that memory with the
- * next input sample so the previous stream is not replayed and a steady
- * tone does not step. Continuous gapless PCM and ordinary block boundaries
- * do not. Toggling strength ramps. */
+ * and angle tap changes over PEQ_CROSSFEED_RAMP_SEC. Going idle, bypass, or
+ * a non-stereo buffer clears the low-pass and delay history. A sample-rate
+ * or PCM-format change, and a PCM discontinuity noted by the audio thread,
+ * prime both from the next input sample so the previous stream is not
+ * replayed and steady DC does not step. Continuous gapless PCM and ordinary
+ * block boundaries retain history. */
 #define PEQ_CROSSFEED_FC_HZ 700.0
 #define PEQ_CROSSFEED_MAX_BLEND 0.30
 #define PEQ_CROSSFEED_RAMP_SEC 0.020
 #define PEQ_CROSSFEED_SUGGESTED 0.65
 double peq_get_crossfeed(void);
 void peq_set_crossfeed(double strength);
+
+/* Explicit interaural delay angle. Supported values are 0, 30, 45, 60, and
+ * 90 degrees (approximately 0, 261, 381, 488, and 655 microseconds). Invalid
+ * values select 0. Persisted with PEQ profiles; omitted or invalid values
+ * and resets select 0. The PCM thread owns delay history and blends tap
+ * changes over PEQ_CROSSFEED_RAMP_SEC. A new angle requested during a blend
+ * is coalesced to the latest target and begins after the current blend ends.
+ * Angle 0 keeps legacy no-delay mixing. */
+int peq_get_crossfeed_angle(void);
+void peq_set_crossfeed_angle(int degrees);
 
 /* Audio thread only. Sets a flag; it does not write filter memory. The next
  * peq_process / peq_process_s32 on that thread drops the crossfeed low-pass

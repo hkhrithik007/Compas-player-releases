@@ -23,6 +23,7 @@
 #include "db_log.h"
 #include "storage_migration.h"
 #include "ui_wake.h"
+#include "ui_fonts.h"
 #include <fcntl.h>
 
 #ifdef HOST_BUILD
@@ -628,6 +629,21 @@ int main(int argc, char ** argv) {
     lv_tick_set_cb(custom_tick_get);
 #ifndef HOST_BUILD
     boot_checkpoint("lv_init done");
+#endif
+
+    /* All app styles and default-font users assume these descriptors are
+     * ready. Load them before display creation, theme setup, or splash UI. */
+#ifndef HOST_BUILD
+    boot_checkpoint("ui_fonts_init begin");
+#endif
+    if (!ui_fonts_init()) {
+#ifndef HOST_BUILD
+        boot_checkpoint("ui_fonts_init FAILED, returning 1");
+#endif
+        return 1;
+    }
+#ifndef HOST_BUILD
+    boot_checkpoint("ui_fonts_init done");
 #endif
 
 #ifdef HOST_BUILD

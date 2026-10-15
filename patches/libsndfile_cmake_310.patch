@@ -1,0 +1,32 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,17 +1,22 @@
+-cmake_minimum_required (VERSION 3.1..3.18)
++cmake_minimum_required (VERSION 3.10..3.18)
+ 
+-# MSVC runtime library flags are selected by an abstraction, CMake >= 3.15
+-# This policy still need to be set even with cmake_minimum_required() command above.
++# MSVC runtime library flags are selected by an abstraction, CMake >= 3.15.
++# The 3.18 policy ceiling already selects CMP0091 NEW. Do not set OLD:
++# that behavior is deprecated and this Linux build does not use it.
++# ENABLE_STATIC_RUNTIME still maps onto the same /MT vs /MD choice.
+ if (POLICY CMP0091)
+ 	if ((DEFINED ENABLE_STATIC_RUNTIME) AND (DEFINED CMAKE_MSVC_RUNTIME_LIBRARY))
+ 		message (FATAL_ERROR "Both ENABLE_STATIC_RUNTIME and CMAKE_MSVC_RUNTIME_LIBRARY are set.")
+ 		return ()
+ 	endif ()
+ 
+-	if (DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+-		cmake_policy (SET CMP0091 NEW)
+-	else ()
+-		cmake_policy (SET CMP0091 OLD)
++	cmake_policy (SET CMP0091 NEW)
++	if (NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY AND DEFINED ENABLE_STATIC_RUNTIME)
++		if (ENABLE_STATIC_RUNTIME)
++			set (CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
++		else ()
++			set (CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
++		endif ()
+ 	endif ()
+ endif ()
+ 

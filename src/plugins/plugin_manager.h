@@ -94,6 +94,11 @@
  * system_screen() sizes its own static items[] array off this. */
 #define PLUGIN_MAX_SYSTEM_LIST_ITEMS 8
 
+/* Same shape as the other native list targets, for the player screen's
+ * three-dot menu. The six built-in actions plus these rows fit the popup's
+ * existing vertical scroll area. */
+#define PLUGIN_MAX_PLAYER_LIST_ITEMS 8
+
 /* Upper bound on how many tiles all plugins combined may register via
  * plugin.register_stream_media_tile() -- sizes plugin_manager.c's own
  * internal plugin_stream_tiles[] array. Stream Media has exactly one
@@ -350,6 +355,14 @@ void plugin_manager_system_list_item_clicked(int index);
 void plugin_manager_get_system_list_item_options(int index, const char ** out_icon, int32_t * out_height,
                                                   int32_t * out_width, const char ** out_text_size);
 
+/* Rows appended to the now-playing three-dot menu after Information. */
+int plugin_manager_get_player_list_item_count(void);
+const char * plugin_manager_get_player_list_item_label(int index);
+void plugin_manager_player_list_item_clicked(int index);
+/* Changes whenever plugin list-item registrations are discarded, allowing
+ * UI callbacks retained across a reload to reject stale registry indices. */
+uint32_t plugin_manager_get_list_registry_generation(void);
+
 /* Invoked by gui.c's plugin-list-screen row click handler when row `index`
  * (into whatever items table the most recent plugin.show_list() call
  * passed) is tapped -- calls back into that call's on_select Lua function
@@ -474,5 +487,7 @@ void plugin_manager_interval_fired(int slot);
  * inherits from the native singleton screen). */
 void plugin_manager_text_input_submitted(const char * text);
 void plugin_manager_text_input_cancelled(void);
+/* GUI bridge for the one pending plugin.pick_file() request. */
+void plugin_manager_file_picker_complete(const char * path);
 
 #endif /* PLUGIN_MANAGER_H */

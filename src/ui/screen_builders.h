@@ -28,7 +28,8 @@
  * margin above/below it. Consumers derive positions algebraically from this
  * constant. */
 #define STATUS_BAR_CLEARANCE BOARD_SCALE_PX(40)
-#define TITLE_ROW_HEIGHT BOARD_SCALE_PX(64)
+#define TITLE_ROW_HEIGHT BOARD_SCALE_PX(80)
+#define HEADER_BUTTON_WIDTH BOARD_SCALE_PX(64)
 #define HOME_INDICATOR_BAND_HEIGHT BOARD_SCALE_PX(24)
 #define HOME_INDICATOR_CONTENT_INSET (HOME_INDICATOR_BAND_HEIGHT + BOARD_SCALE_PX(8))
 
@@ -218,7 +219,7 @@ lv_obj_t * build_icon_grid_screen(const char * title, lv_event_cb_t back_btn_cb,
                                    int32_t icon_scale_percent, bool label_inside_icon, int32_t tile_gap);
 
 /* Top-right counterpart to build_header_back_button() --
- * same 64x64 transparent hitbox, same STATUS_BAR_CLEARANCE vertical position,
+ * same 64x64 transparent hitbox, centered within the title band,
  * so any caller's icon lands at exactly the same visual level as the screen's
  * own back arrow, mirrored to the right edge instead of the left. icon_asset
  * is passed straight to lv_image_set_src() (caller resolves it via
@@ -244,9 +245,16 @@ lv_obj_t * build_screen_header(lv_obj_t * scr, const char * title, lv_event_cb_t
 
 typedef enum {
     PILL_ACCESSORY_NONE = 0,
-    PILL_ACCESSORY_CHEVRON, /* no matching real asset found -- plain ">" label */
+    PILL_ACCESSORY_CHEVRON,
     PILL_ACCESSORY_TOGGLE,  /* real lv_switch, standardized to match the Settings screen's own switches */
 } pill_accessory_type_t;
+
+/* Creates a non-interactive navigation chevron aligned to the parent's
+ * right-middle edge, recolored to the current muted theme text color unless
+ * a per-item color override is supplied. A per-item color override is used for
+ * plugin-defined rows; otherwise the live muted text color is used. */
+lv_obj_t * build_navigation_chevron(lv_obj_t * parent, int32_t right_inset,
+                                    bool has_color_override, uint32_t color_override);
 
 typedef struct {
     const char * label;

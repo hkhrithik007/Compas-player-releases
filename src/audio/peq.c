@@ -50,6 +50,20 @@ static float stereo_width_current = 1.0f;
 static _Atomic float crossfeed_target = 0.0f;
 static float crossfeed_mix = 0.0f;
 static float crossfeed_lp[PEQ_MAX_CHANNELS];
+#define CROSSFEED_DELAY_RING_SIZE 512u
+#define CROSSFEED_DELAY_RING_MASK (CROSSFEED_DELAY_RING_SIZE - 1u)
+/* Two channels of float low-pass history: 4 KiB total. The ring is logically
+ * invalidated on reset and filled from the next input when processing resumes. */
+static float crossfeed_delay_ring[PEQ_MAX_CHANNELS][CROSSFEED_DELAY_RING_SIZE];
+static unsigned int crossfeed_delay_write = 0;
+static bool crossfeed_delay_primed = false;
+static _Atomic int crossfeed_angle_target = 0;
+/* These tap and blend fields are audio-thread owned. A new angle waits for an
+ * in-progress 20 ms blend to finish; the latest requested angle is then used. */
+static unsigned int crossfeed_tap_old = 0;
+static unsigned int crossfeed_tap_target = 0;
+static float crossfeed_tap_blend = 1.0f;
+static unsigned int crossfeed_tap_rate = 0;
 static float crossfeed_alpha = 0.0f;
 static unsigned int crossfeed_coeff_rate = 0;
 /* Set when the rate, PCM format, or a noted discontinuity changes. The next
@@ -121,6 +135,7 @@ static void set_defaults(void) {
     preamp_db = 0.0;
     peq_set_stereo_width(1.0);
     peq_set_crossfeed(0.0);
+    peq_set_crossfeed_angle(0);
     update_preamp_linear_cache();
 }
 
@@ -303,6 +318,16 @@ void peq_set_crossfeed(double strength) {
     atomic_store_explicit(&crossfeed_target, (float) strength, memory_order_relaxed);
 }
 
+int peq_get_crossfeed_angle(void) {
+    return atomic_load_explicit(&crossfeed_angle_target, memory_order_relaxed);
+}
+
+void peq_set_crossfeed_angle(int degrees) {
+    if (degrees != 0 && degrees != 30 && degrees != 45 && degrees != 60 && degrees != 90)
+        degrees = 0;
+    atomic_store_explicit(&crossfeed_angle_target, degrees, memory_order_relaxed);
+}
+
 void peq_note_pcm_discontinuity(void) {
     atomic_store_explicit(&crossfeed_discontinuity, true, memory_order_relaxed);
 }
@@ -313,6 +338,12 @@ static void crossfeed_clear_audio_state(void) {
     crossfeed_lp[0] = 0.0f;
     crossfeed_lp[1] = 0.0f;
     crossfeed_prime = false;
+    crossfeed_delay_primed = false;
+    crossfeed_delay_write = 0;
+    crossfeed_tap_old = 0;
+    crossfeed_tap_target = 0;
+    crossfeed_tap_blend = 1.0f;
+    crossfeed_tap_rate = 0;
 }
 
 /* One-pole coefficient for y += alpha * (x - y), alpha = 1 - exp(-2π fc / sr).
@@ -325,10 +356,50 @@ static void crossfeed_update_alpha(unsigned int sample_rate) {
         crossfeed_lp[0] = 0.0f;
         crossfeed_lp[1] = 0.0f;
         crossfeed_prime = true;
+        crossfeed_delay_primed = false;
+        crossfeed_tap_rate = 0;
     }
     double decay = exp(-2.0 * M_PI * PEQ_CROSSFEED_FC_HZ / (double) sample_rate);
     crossfeed_alpha = (float) (1.0 - decay);
     crossfeed_coeff_rate = sample_rate;
+}
+
+static unsigned int crossfeed_angle_delay_us(int angle) {
+    switch (angle) {
+        case 30: return 261;
+        case 45: return 381;
+        case 60: return 488;
+        case 90: return 655;
+        default: return 0;
+    }
+}
+
+/* Set a nearest-sample delay for the selected ITD. While a blend is underway,
+ * keep its endpoints; the latest requested angle is picked up once it ends. */
+static void crossfeed_update_tap(unsigned int sample_rate) {
+    if (sample_rate == 0) sample_rate = 48000;
+    int angle = peq_get_crossfeed_angle();
+    double delay = (double) crossfeed_angle_delay_us(angle) * (double) sample_rate / 1000000.0;
+    unsigned int wanted = (unsigned int) floor(delay + 0.5);
+    if (wanted > CROSSFEED_DELAY_RING_MASK) wanted = CROSSFEED_DELAY_RING_MASK;
+    if (crossfeed_tap_rate != sample_rate) {
+        /* The history is re-primed on a rate change, so adopt the matching
+         * sample-rate tap immediately instead of blending against old units. */
+        crossfeed_tap_rate = sample_rate;
+        crossfeed_tap_old = wanted;
+        crossfeed_tap_target = wanted;
+        crossfeed_tap_blend = 1.0f;
+        return;
+    }
+    if (crossfeed_tap_blend < 1.0f || wanted == crossfeed_tap_target) return;
+    crossfeed_tap_old = crossfeed_tap_target;
+    crossfeed_tap_target = wanted;
+    crossfeed_tap_blend = 0.0f;
+}
+
+static float crossfeed_read_delay(int channel, unsigned int tap) {
+    unsigned int index = (crossfeed_delay_write - tap) & CROSSFEED_DELAY_RING_MASK;
+    return crossfeed_delay_ring[channel][index];
 }
 
 /* Drop a pending break without arming a prime. Bypass and an idle buffer
@@ -345,13 +416,15 @@ static void crossfeed_consume_discontinuity(bool cross_active) {
         return;
     crossfeed_lp[0] = 0.0f;
     crossfeed_lp[1] = 0.0f;
+    crossfeed_delay_primed = false;
     if (cross_active) crossfeed_prime = true;
 }
 
 /* Strength s maps to k = s * PEQ_CROSSFEED_MAX_BLEND.
  * yL = xL + k * (lpR - lpL), with lp the one-pole low-pass of that channel
- * including the current sample. Steady mono (xL == xR, lp cleared together)
- * stays exactly x. k == 0 skips the filter.
+ * including the current sample. With a non-zero angle the opposite low-pass
+ * is delayed before mixing. No-delay mono remains exact; delayed mono can
+ * change phase/response, while steady DC stays at unity. k == 0 skips it.
  *
  * ceiling is the immediate stereo-linked peak limit used only while this
  * mix is active. A reversal can reach about 1+2k times the input before
@@ -370,6 +443,7 @@ static void crossfeed_frame(float * samples, float target, float step, float cei
     if (k == 0.0f) {
         crossfeed_lp[0] = 0.0f;
         crossfeed_lp[1] = 0.0f;
+        crossfeed_delay_primed = false;
         return;
     }
     float x0 = samples[0];
@@ -382,11 +456,36 @@ static void crossfeed_frame(float * samples, float target, float step, float cei
         crossfeed_lp[0] += crossfeed_alpha * (x0 - crossfeed_lp[0]);
         crossfeed_lp[1] += crossfeed_alpha * (x1 - crossfeed_lp[1]);
     }
-    float y0 = x0 + k * (crossfeed_lp[1] - crossfeed_lp[0]);
-    float y1 = x1 + k * (crossfeed_lp[0] - crossfeed_lp[1]);
+    if (!crossfeed_delay_primed) {
+        for (unsigned int i = 0; i < CROSSFEED_DELAY_RING_SIZE; i++) {
+            crossfeed_delay_ring[0][i] = crossfeed_lp[0];
+            crossfeed_delay_ring[1][i] = crossfeed_lp[1];
+        }
+        crossfeed_delay_write = 0;
+        crossfeed_delay_primed = true;
+    }
+    crossfeed_delay_ring[0][crossfeed_delay_write] = crossfeed_lp[0];
+    crossfeed_delay_ring[1][crossfeed_delay_write] = crossfeed_lp[1];
+    if (crossfeed_tap_blend < 1.0f) {
+        crossfeed_tap_blend = fminf(1.0f, crossfeed_tap_blend + step);
+        if (crossfeed_tap_blend >= 1.0f)
+            crossfeed_tap_old = crossfeed_tap_target;
+    }
+    float lp_right = crossfeed_read_delay(1, crossfeed_tap_target);
+    float lp_left = crossfeed_read_delay(0, crossfeed_tap_target);
+    if (crossfeed_tap_blend < 1.0f) {
+        float old_right = crossfeed_read_delay(1, crossfeed_tap_old);
+        float old_left = crossfeed_read_delay(0, crossfeed_tap_old);
+        lp_right = old_right + crossfeed_tap_blend * (lp_right - old_right);
+        lp_left = old_left + crossfeed_tap_blend * (lp_left - old_left);
+    }
+    float y0 = x0 + k * (lp_right - crossfeed_lp[0]);
+    float y1 = x1 + k * (lp_left - crossfeed_lp[1]);
+    crossfeed_delay_write = (crossfeed_delay_write + 1u) & CROSSFEED_DELAY_RING_MASK;
     if (!isfinite(y0) || !isfinite(y1)) {
         crossfeed_lp[0] = 0.0f;
         crossfeed_lp[1] = 0.0f;
+        crossfeed_delay_primed = false;
         return;
     }
     float in_peak = fabsf(x0);
@@ -493,6 +592,7 @@ void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int s
         memset(state, 0, sizeof(state));
         crossfeed_lp[0] = 0.0f;
         crossfeed_lp[1] = 0.0f;
+        crossfeed_delay_primed = false;
         if (cross_active) crossfeed_prime = true;
         last_call_was_s32 = false;
     }
@@ -512,7 +612,10 @@ void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int s
     unsigned int rate_for_ramp = sample_rate ? sample_rate : 48000;
     float width_step = 2.0f / (STEREO_WIDTH_RAMP_SEC * (float) rate_for_ramp);
     float cross_step = 1.0f / ((float) PEQ_CROSSFEED_RAMP_SEC * (float) rate_for_ramp);
-    if (cross_active) crossfeed_update_alpha(sample_rate);
+    if (cross_active) {
+        crossfeed_update_alpha(sample_rate);
+        crossfeed_update_tap(sample_rate);
+    }
     for (size_t i = 0; i < frame_count; i++) {
         float frame_samples[PEQ_MAX_CHANNELS];
         float frame_peak = 0.0f;
@@ -602,6 +705,7 @@ void peq_process_s32(int32_t * buf, size_t frame_count, int channels, unsigned i
         memset(state, 0, sizeof(state));
         crossfeed_lp[0] = 0.0f;
         crossfeed_lp[1] = 0.0f;
+        crossfeed_delay_primed = false;
         if (cross_active) crossfeed_prime = true;
         last_call_was_s32 = true;
     }
@@ -620,7 +724,10 @@ void peq_process_s32(int32_t * buf, size_t frame_count, int channels, unsigned i
     unsigned int rate_for_ramp = sample_rate ? sample_rate : 48000;
     float width_step = 2.0f / (STEREO_WIDTH_RAMP_SEC * (float) rate_for_ramp);
     float cross_step = 1.0f / ((float) PEQ_CROSSFEED_RAMP_SEC * (float) rate_for_ramp);
-    if (cross_active) crossfeed_update_alpha(sample_rate);
+    if (cross_active) {
+        crossfeed_update_alpha(sample_rate);
+        crossfeed_update_tap(sample_rate);
+    }
     for (size_t i = 0; i < frame_count; i++) {
         float frame_samples[PEQ_MAX_CHANNELS];
         float frame_peak = 0.0f;
@@ -677,6 +784,7 @@ bool peq_load_from_path(const char * path) {
 
     double loaded_width = 1.0; /* Older profiles are neutral, never inherit width. */
     double loaded_crossfeed = 0.0; /* Older profiles are off, never inherit crossfeed. */
+    int loaded_crossfeed_angle = 0; /* Older profiles keep legacy zero delay. */
     char line[128];
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\n")] = '\0';
@@ -715,6 +823,20 @@ bool peq_load_from_path(const char * path) {
             continue;
         }
 
+        if (strcmp(key, "crossfeed_angle") == 0) {
+            char * end;
+            errno = 0;
+            long parsed = strtol(value, &end, 10);
+            bool parsed_number = end != value && errno != ERANGE;
+            while (*end == ' ' || *end == '\t' || *end == '\r') end++;
+            if (parsed_number && *end == '\0' &&
+                (parsed == 0 || parsed == 30 || parsed == 45 || parsed == 60 || parsed == 90))
+                loaded_crossfeed_angle = (int) parsed;
+            else
+                loaded_crossfeed_angle = 0;
+            continue;
+        }
+
         int index;
         char field[16];
         if (sscanf(key, "band%d_%15s", &index, field) == 2 && index >= 0 && index < PEQ_NUM_BANDS) {
@@ -729,6 +851,7 @@ bool peq_load_from_path(const char * path) {
     fclose(f);
     peq_set_stereo_width(loaded_width);
     peq_set_crossfeed(loaded_crossfeed);
+    peq_set_crossfeed_angle(loaded_crossfeed_angle);
     coeffs_dirty = true;
     return true;
 }
@@ -762,6 +885,7 @@ bool peq_save_to_path(const char * path) {
     fprintf(f, "preamp=%.2f\n", preamp_db);
     fprintf(f, "stereo_width=%.6f\n", peq_get_stereo_width());
     fprintf(f, "crossfeed=%.6f\n", peq_get_crossfeed());
+    fprintf(f, "crossfeed_angle=%d\n", peq_get_crossfeed_angle());
     for (int i = 0; i < PEQ_NUM_BANDS; i++) {
         fprintf(f, "band%d_freq=%.2f\n", i, bands[i].freq_hz);
         fprintf(f, "band%d_gain=%.2f\n", i, bands[i].gain_db);

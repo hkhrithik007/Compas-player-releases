@@ -1,11 +1,15 @@
 #include "usb_mode_control.h"
 #include "battery.h"
+#include "board_config.h"
+#include "charge_limiter.h"
+#include "storage_paths.h"
 #include "sd_fsck.h"
 #include "subprocess.h"
 #include "usb_dac_bridge.h"
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -32,6 +36,12 @@
 #ifndef USB_MODE_CONTROL_GADGET_ROOT
 #define USB_MODE_CONTROL_GADGET_ROOT "/sys/kernel/config/usb_gadget"
 #endif
+#ifndef USB_MODE_CONTROL_R1_ROLE_PATH
+#define USB_MODE_CONTROL_R1_ROLE_PATH "/sys/devices/platform/tcs1421/tcs1421_cfg"
+#endif
+#ifndef USB_MODE_CONTROL_DAC_JOURNAL_PATH
+#define USB_MODE_CONTROL_DAC_JOURNAL_PATH INTERNAL_COMPAS_DIR "/usb_dac_session.txt"
+#endif
 #define ANDROID0_DIR USB_MODE_CONTROL_ANDROID0_DIR
 #define ANDROID0_UDC_PATH ANDROID0_DIR "/UDC"
 #define ADB_DEMO_DIR USB_MODE_CONTROL_ADB_DEMO_DIR
@@ -47,6 +57,232 @@ static unsigned storage_write_lease_count;
 static atomic_uint storage_write_active_count;
 static bool storage_write_restore_needed;
 static char storage_write_saved_controller[256];
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+static bool dac_usb_policy_owned;
+static char dac_saved_usb_role[24];
+static bool dac_saved_charger_enabled;
+static bool dac_last_prepare_captured_baseline;
+static bool dac_saved_charger_valid;
+static bool dac_charging_disabled = true;
+#endif
+
+/* The TCS1421 add-on driver accepts these four exact role words and exposes
+ * them on the R1 sysfs node. Save the live value instead of assuming the
+ * usual NormalDRP boot role, so leaving DAC returns to the actual prior role. */
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+static bool r1_usb_role_valid(const char *role) {
+    return strcmp(role, "Sink") == 0 || strcmp(role, "Source") == 0 ||
+           strcmp(role, "StrongDRP") == 0 || strcmp(role, "NormalDRP") == 0;
+}
+
+static bool r1_usb_role_read(char *role, size_t size) {
+    FILE *file = fopen(USB_MODE_CONTROL_R1_ROLE_PATH, "r");
+    if (!file) return false;
+    size_t len = fread(role, 1, size - 1, file);
+    bool ok = !ferror(file) && memchr(role, '\0', len) == NULL;
+    int extra = fgetc(file);
+    if (extra != EOF || !feof(file)) ok = false;
+    if (fclose(file) != 0) ok = false;
+    if (!ok) return false;
+    if (len && role[len - 1] == '\n') --len;
+    if (len && role[len - 1] == '\r') --len;
+    role[len] = '\0';
+    return len > 0 && r1_usb_role_valid(role);
+}
+
+static bool r1_usb_role_set(const char *role) {
+    if (!r1_usb_role_valid(role)) return false;
+    FILE *file = fopen(USB_MODE_CONTROL_R1_ROLE_PATH, "w");
+    if (!file) return false;
+    bool ok = fprintf(file, "%s\n", role) > 0;
+    if (fclose(file) != 0) ok = false;
+    char actual[24];
+    return ok && r1_usb_role_read(actual, sizeof(actual)) && strcmp(actual, role) == 0;
+}
+
+typedef enum {
+    DAC_JOURNAL_ERROR = -1,
+    DAC_JOURNAL_ABSENT = 0,
+    DAC_JOURNAL_VALID = 1
+} dac_journal_result_t;
+
+static bool sync_dac_journal_directory(void) {
+    char parent[sizeof(USB_MODE_CONTROL_DAC_JOURNAL_PATH)];
+    snprintf(parent, sizeof(parent), "%s", USB_MODE_CONTROL_DAC_JOURNAL_PATH);
+    char *slash = strrchr(parent, '/');
+    if (!slash) return false;
+    *slash = '\0';
+    int fd = open(parent, O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return false;
+    bool ok = fsync(fd) == 0;
+    if (close(fd) != 0) ok = false;
+    return ok;
+}
+
+static bool save_dac_session_journal(const char *role, bool charger_enabled) {
+    if (!r1_usb_role_valid(role)) return false;
+    char parent[sizeof(USB_MODE_CONTROL_DAC_JOURNAL_PATH)];
+    snprintf(parent, sizeof(parent), "%s", USB_MODE_CONTROL_DAC_JOURNAL_PATH);
+    char *slash = strrchr(parent, '/');
+    if (!slash) return false;
+    *slash = '\0';
+    if (mkdir(parent, 0755) != 0 && errno != EEXIST) return false;
+
+    char temporary[sizeof(USB_MODE_CONTROL_DAC_JOURNAL_PATH) + 32];
+    snprintf(temporary, sizeof(temporary), "%s.tmp.%ld",
+             USB_MODE_CONTROL_DAC_JOURNAL_PATH, (long) getpid());
+    FILE *file = fopen(temporary, "w");
+    if (!file) return false;
+    bool ok = fprintf(file, "version=1\nrole=%s\ncharger_enabled=%d\n",
+                      role, charger_enabled ? 1 : 0) > 0;
+    if (fflush(file) != 0 || fsync(fileno(file)) != 0) ok = false;
+    if (fclose(file) != 0) ok = false;
+    if (!ok) { unlink(temporary); return false; }
+    if (rename(temporary, USB_MODE_CONTROL_DAC_JOURNAL_PATH) != 0) {
+        unlink(temporary);
+        return false;
+    }
+    return sync_dac_journal_directory();
+}
+
+static bool remove_dac_session_journal(void) {
+    if (unlink(USB_MODE_CONTROL_DAC_JOURNAL_PATH) != 0 && errno != ENOENT) return false;
+    return sync_dac_journal_directory();
+}
+
+static dac_journal_result_t load_dac_session_journal(char *role, size_t role_size,
+                                                      bool *charger_enabled) {
+    FILE *file = fopen(USB_MODE_CONTROL_DAC_JOURNAL_PATH, "r");
+    if (!file) return errno == ENOENT ? DAC_JOURNAL_ABSENT : DAC_JOURNAL_ERROR;
+    char content[128];
+    size_t len = fread(content, 1, sizeof(content) - 1, file);
+    bool ok = !ferror(file) && memchr(content, '\0', len) == NULL;
+    int extra = fgetc(file);
+    if (extra != EOF || !feof(file)) ok = false;
+    if (fclose(file) != 0) ok = false;
+    if (!ok) return DAC_JOURNAL_ERROR;
+    content[len] = '\0';
+
+    static const char *const roles[] = { "Sink", "Source", "StrongDRP", "NormalDRP" };
+    for (size_t i = 0; i < sizeof(roles) / sizeof(roles[0]); ++i) {
+        for (int enabled = 0; enabled <= 1; ++enabled) {
+            char expected[96];
+            int expected_len = snprintf(expected, sizeof(expected),
+                                        "version=1\nrole=%s\ncharger_enabled=%d\n",
+                                        roles[i], enabled);
+            if (expected_len > 0 && (size_t) expected_len < sizeof(expected) &&
+                len == (size_t) expected_len && strcmp(content, expected) == 0) {
+                if (strlen(roles[i]) >= role_size) return DAC_JOURNAL_ERROR;
+                snprintf(role, role_size, "%s", roles[i]);
+                *charger_enabled = enabled != 0;
+                return DAC_JOURNAL_VALID;
+            }
+        }
+    }
+    return DAC_JOURNAL_ERROR;
+}
+#endif
+
+static bool restore_dac_usb_policy(void) {
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    if (!dac_usb_policy_owned) return true;
+    /* A previous restore may have released the in-memory charger claim but
+     * failed to remove the durable record. Reclaim it from the saved snapshot
+     * before retrying, so a poll cannot change the value we eventually restore. */
+    if (!charge_limiter_dac_session_resume(dac_saved_charger_enabled)) {
+        fprintf(stderr, "usb_mode_control: could not reclaim DAC charger inhibit for restore retry\n");
+        return false;
+    }
+    /* Restore the Type-C role first. Charging remains inhibited if that
+     * write cannot be verified, so a still-bound DAC cannot resume charging. */
+    bool role_ok = r1_usb_role_set(dac_saved_usb_role);
+    if (!role_ok) {
+        fprintf(stderr, "usb_mode_control: DAC role restore failed; keeping charger inhibited and retaining ownership\n");
+        return false;
+    }
+    bool charger_ok = charge_limiter_dac_session_release(dac_saved_charger_enabled);
+    if (!charger_ok) {
+        fprintf(stderr, "usb_mode_control: DAC charger restore failed; retaining ownership and journal\n");
+        return false;
+    }
+    if (!remove_dac_session_journal()) {
+        fprintf(stderr, "usb_mode_control: DAC session journal removal failed; retaining ownership for retry\n");
+        return false;
+    }
+    dac_usb_policy_owned = false;
+    return true;
+#else
+    return true;
+#endif
+}
+
+static bool prepare_dac_usb_policy(void) {
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    dac_last_prepare_captured_baseline = false;
+    bool already_owned = dac_usb_policy_owned;
+    if (!dac_usb_policy_owned) {
+        dac_saved_charger_valid = false;
+        if (!r1_usb_role_read(dac_saved_usb_role, sizeof(dac_saved_usb_role))) {
+            fprintf(stderr, "usb_mode_control: cannot read a supported R1 Type-C role; refusing DAC start\n");
+            return false;
+        }
+        dac_last_prepare_captured_baseline = true;
+    } else {
+        dac_last_prepare_captured_baseline = true;
+    }
+    bool reclaimed = !already_owned || (dac_charging_disabled
+        ? charge_limiter_dac_session_resume(dac_saved_charger_enabled)
+        : charge_limiter_dac_session_release(dac_saved_charger_enabled));
+    if (!reclaimed) {
+        fprintf(stderr, "usb_mode_control: failed to reclaim R1 charger inhibit for DAC retry\n");
+        return false;
+    }
+    bool charger_enabled = false;
+    bool charger_ok = true;
+    bool captured = true;
+    if (already_owned) {
+        charger_enabled = dac_saved_charger_enabled;
+    } else if (dac_charging_disabled) {
+        charger_ok = charge_limiter_dac_session_begin(&charger_enabled);
+        captured = charge_limiter_dac_session_get_original_enabled(&charger_enabled);
+    } else {
+        charger_ok = charge_limiter_dac_session_capture_original_enabled(&charger_enabled);
+        captured = charger_ok;
+    }
+    if (!charger_ok && !captured) {
+        if (!already_owned) (void) charge_limiter_dac_session_end();
+        fprintf(stderr, "usb_mode_control: failed to inhibit R1 charging for DAC\n");
+        return false;
+    }
+    if (!already_owned) dac_saved_charger_enabled = charger_enabled;
+    dac_saved_charger_valid = true;
+    dac_usb_policy_owned = true;
+    /* Persist on every attempt, including retries after a failed rollback.
+     * Sink must never be entered without a recoverable original charger value. */
+    if (!save_dac_session_journal(dac_saved_usb_role, dac_saved_charger_enabled)) {
+        fprintf(stderr, "usb_mode_control: failed to persist DAC session recovery journal\n");
+        if (!already_owned && charge_limiter_dac_session_end()) dac_usb_policy_owned = false;
+        return false;
+    }
+    if (!dac_charging_disabled &&
+        !charge_limiter_dac_session_release(dac_saved_charger_enabled)) {
+        fprintf(stderr, "usb_mode_control: failed to allow R1 charging for DAC preference\n");
+        return false;
+    }
+    if (!charger_ok) {
+        fprintf(stderr, "usb_mode_control: failed to inhibit R1 charging for DAC\n");
+        if (!already_owned) (void) restore_dac_usb_policy();
+        return false;
+    }
+    bool role_ok = r1_usb_role_set("Sink");
+    if (!role_ok) {
+        fprintf(stderr, "usb_mode_control: failed to force R1 Type-C Sink role for DAC\n");
+        if (!already_owned) (void) restore_dac_usb_policy();
+        return false;
+    }
+#endif
+    return true;
+}
 
 static bool path_exists(const char * path) {
     return access(path, F_OK) == 0;
@@ -163,6 +399,40 @@ static bool function_linked(const char * gadget_dir, const char * name_prefix) {
     closedir(dir);
     return found;
 }
+
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+static bool dac_gadget_may_be_bound(void) {
+    FILE *udc = fopen(ANDROID0_UDC_PATH, "r");
+    if (!udc) return errno != ENOENT;
+    char value[64];
+    size_t len = fread(value, 1, sizeof(value) - 1, udc);
+    bool readable = !ferror(udc) && memchr(value, '\0', len) == NULL;
+    int extra = fgetc(udc);
+    if (extra != EOF || !feof(udc)) readable = false;
+    if (fclose(udc) != 0) readable = false;
+    if (!readable) return true;
+    if (len && value[len - 1] == '\n') --len;
+    if (len && value[len - 1] == '\r') --len;
+    value[len] = '\0';
+    if (len == 0 || strcmp(value, "none") == 0) return false;
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/configs/c.1", ANDROID0_DIR);
+    DIR *dir = opendir(path);
+    /* If the UDC is bound but configfs cannot be inspected, fail closed and
+     * keep the charger inhibited until a later retry can prove UAC is gone. */
+    if (!dir) return true;
+    bool found = false;
+    errno = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "uac_sa.", 7) == 0) { found = true; break; }
+    }
+    bool read_error = errno != 0;
+    if (closedir(dir) != 0) read_error = true;
+    return found || read_error;
+}
+#endif
 
 /* Generic teardown of a configfs gadget directory -- doesn't
  * assume any particular function name is inside, unlike the stock stop
@@ -333,7 +603,7 @@ static bool start_adb_gadget(void) {
     return ok;
 }
 
-static bool usb_mode_control_apply_locked(usb_mode_t mode) {
+static bool usb_mode_control_apply_gadget_locked(usb_mode_t mode) {
     fprintf(stderr, "usb_mode_control: switching to mode=%d\n", (int) mode);
     /* Capture the source before teardown changes mounts or gadget state. */
     const char * storage_device = mode == USB_MODE_STORAGE ? storage_backing_device() : "/dev/mmcblk0";
@@ -418,6 +688,194 @@ static bool usb_mode_control_apply_locked(usb_mode_t mode) {
         }
     }
     return false;
+}
+
+static bool finish_dac_usb_policy_apply(usb_mode_t mode, bool applied, bool dac_still_bound) {
+    if (mode == USB_MODE_DAC) {
+        if (!applied && !dac_still_bound) {
+            fprintf(stderr, "usb_mode_control: DAC gadget failed and is unbound; restoring pre-DAC USB policy\n");
+            (void) restore_dac_usb_policy();
+        } else if (!applied && dac_still_bound) {
+            fprintf(stderr, "usb_mode_control: DAC apply failed while its gadget remains bound; retaining charger inhibit\n");
+        }
+        return applied;
+    }
+
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    /* Keep the R1 charger inhibited until teardown has proved the UAC gadget
+     * is gone. A failed target switch may have left the old DAC bound, in
+     * which case restoring DRP/charging would recreate the reported failure. */
+    if (dac_usb_policy_owned && !dac_still_bound) {
+        if (!restore_dac_usb_policy()) return false;
+    } else if (dac_usb_policy_owned && dac_still_bound) {
+        fprintf(stderr, "usb_mode_control: DAC remains bound after mode=%d failure; retaining charger inhibit\n",
+                (int) mode);
+    }
+#else
+    (void) dac_still_bound;
+#endif
+    return applied;
+}
+
+/* Keep the R1's Type-C sink/charger policy paired with the lifetime of its
+ * USB DAC gadget. The caller holds usb_mode_mutex, so DAC retries and mode
+ * exits cannot interleave their saved-role bookkeeping. */
+static bool usb_mode_control_apply_locked(usb_mode_t mode) {
+    if (mode == USB_MODE_DAC && !prepare_dac_usb_policy()) return false;
+
+    bool applied = usb_mode_control_apply_gadget_locked(mode);
+    bool dac_still_bound = false;
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    if (dac_usb_policy_owned || (mode == USB_MODE_DAC && !applied))
+        dac_still_bound = dac_gadget_may_be_bound();
+#endif
+    return finish_dac_usb_policy_apply(mode, applied, dac_still_bound);
+}
+
+bool usb_mode_control_reconcile_dac_session(void) {
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    pthread_mutex_lock(&usb_mode_mutex);
+    if (storage_write_lease_count != 0) {
+        pthread_mutex_unlock(&usb_mode_mutex);
+        return false;
+    }
+
+    bool dac_may_be_bound = dac_gadget_may_be_bound();
+    char saved_role[24];
+    bool charger_enabled = false;
+    dac_journal_result_t journal = load_dac_session_journal(
+        saved_role, sizeof(saved_role), &charger_enabled);
+    if (journal == DAC_JOURNAL_ABSENT) {
+        bool ok = true;
+        if (dac_may_be_bound && !prepare_dac_usb_policy()) {
+            if (dac_usb_policy_owned || dac_last_prepare_captured_baseline) {
+                /* Preparation may have captured the real legacy-session
+                 * baseline before a transient role failure. A successful
+                 * rollback can clear ownership, but must not erase that
+                 * still-needed snapshot while the legacy gadget remains live. */
+                if (!dac_saved_charger_valid) {
+                    /* The register read itself failed before an original bit
+                     * could be captured. Keep charging off conservatively. */
+                    dac_saved_charger_enabled = false;
+                    dac_saved_charger_valid = true;
+                }
+                dac_usb_policy_owned = true;
+                bool charger_claimed = dac_charging_disabled
+                    ? charge_limiter_dac_session_resume(dac_saved_charger_enabled)
+                    : charge_limiter_dac_session_release(dac_saved_charger_enabled);
+                bool journal_ok = save_dac_session_journal(
+                    dac_saved_usb_role, dac_saved_charger_enabled);
+                bool role_ok = r1_usb_role_set("Sink");
+                fprintf(stderr, "usb_mode_control: legacy DAC retry retains captured baseline (charger=%d journal=%d role=%d)\n",
+                        charger_claimed, journal_ok, role_ok);
+                pthread_mutex_unlock(&usb_mode_mutex);
+                return false;
+            }
+            /* A legacy live DAC may be active even when its prior role
+             * cannot be captured or durable journaling is unavailable. Keep
+             * it on the conservative role with charging inhibited, and
+             * persist that safe fallback if possible for the next restart. */
+            snprintf(dac_saved_usb_role, sizeof(dac_saved_usb_role), "Sink");
+            dac_saved_charger_enabled = false;
+            dac_saved_charger_valid = true;
+            dac_usb_policy_owned = true;
+            bool charger_ok = dac_charging_disabled
+                ? charge_limiter_dac_session_resume(false)
+                : charge_limiter_dac_session_release(false);
+            if (access(USB_MODE_CONTROL_DAC_JOURNAL_PATH, F_OK) != 0)
+                (void) save_dac_session_journal("Sink", false);
+            bool role_ok = r1_usb_role_set("Sink");
+            fprintf(stderr, "usb_mode_control: legacy DAC recovery retained conservatively (charger=%d role=%d)\n",
+                    charger_ok, role_ok);
+            ok = false;
+        }
+        pthread_mutex_unlock(&usb_mode_mutex);
+        return ok;
+    }
+
+    if (journal == DAC_JOURNAL_ERROR) {
+        fprintf(stderr, "usb_mode_control: DAC session journal is unreadable or invalid\n");
+        if (!dac_may_be_bound) {
+            bool cleaned = remove_dac_session_journal();
+            pthread_mutex_unlock(&usb_mode_mutex);
+            return cleaned;
+        }
+
+        /* Without a trustworthy saved role/state, use the safe session role
+         * and keep charging inhibited. Leave the corrupt record for diagnosis
+         * and retry rather than guessing the prior Type-C/charger policy. */
+        snprintf(dac_saved_usb_role, sizeof(dac_saved_usb_role), "Sink");
+        dac_saved_charger_enabled = false;
+        dac_saved_charger_valid = true;
+        dac_usb_policy_owned = true;
+        bool charger_ok = dac_charging_disabled
+            ? charge_limiter_dac_session_resume(false)
+            : charge_limiter_dac_session_release(false);
+        bool role_ok = r1_usb_role_set("Sink");
+        fprintf(stderr, "usb_mode_control: retaining conservative DAC policy (charger=%d role=%d)\n",
+                charger_ok, role_ok);
+        pthread_mutex_unlock(&usb_mode_mutex);
+        return false;
+    }
+
+    snprintf(dac_saved_usb_role, sizeof(dac_saved_usb_role), "%s", saved_role);
+    dac_saved_charger_enabled = charger_enabled;
+    dac_saved_charger_valid = true;
+    dac_usb_policy_owned = true;
+    if (dac_may_be_bound) {
+        bool charger_ok = dac_charging_disabled
+            ? charge_limiter_dac_session_resume(charger_enabled)
+            : charge_limiter_dac_session_release(charger_enabled);
+        bool role_ok = r1_usb_role_set("Sink");
+        if (!charger_ok || !role_ok)
+            fprintf(stderr, "usb_mode_control: DAC recovery remains owned (charger=%d role=%d)\n",
+                    charger_ok, role_ok);
+        pthread_mutex_unlock(&usb_mode_mutex);
+        return charger_ok && role_ok;
+    }
+
+    bool charger_ok = charge_limiter_dac_session_resume(charger_enabled);
+    if (!charger_ok) {
+        fprintf(stderr, "usb_mode_control: charger could not be inhibited while recovering stale DAC lease\n");
+        pthread_mutex_unlock(&usb_mode_mutex);
+        return false;
+    }
+    bool restored = restore_dac_usb_policy();
+    pthread_mutex_unlock(&usb_mode_mutex);
+    return restored;
+#else
+    return true;
+#endif
+}
+
+bool usb_mode_control_set_dac_charging_disabled(bool disabled) {
+#if !defined(BOARD_R3PROII) && !defined(BOARD_R3II_2025)
+    pthread_mutex_lock(&usb_mode_mutex);
+    if (disabled == dac_charging_disabled && !dac_usb_policy_owned) {
+        pthread_mutex_unlock(&usb_mode_mutex);
+        return true;
+    }
+    if (!dac_usb_policy_owned) {
+        dac_charging_disabled = disabled;
+        pthread_mutex_unlock(&usb_mode_mutex);
+        return true;
+    }
+
+    bool ok = disabled
+        ? charge_limiter_dac_session_resume(dac_saved_charger_enabled)
+        : charge_limiter_dac_session_release(dac_saved_charger_enabled);
+    if (!ok && dac_charging_disabled)
+        (void) charge_limiter_dac_session_resume(dac_saved_charger_enabled);
+    else if (!ok)
+        (void) charge_limiter_dac_session_release(dac_saved_charger_enabled);
+    if (ok) dac_charging_disabled = disabled;
+    else fprintf(stderr, "usb_mode_control: DAC charging preference transition failed; retaining previous preference\n");
+    pthread_mutex_unlock(&usb_mode_mutex);
+    return ok;
+#else
+    (void) disabled;
+    return true;
+#endif
 }
 
 bool usb_mode_control_apply_with_status(usb_mode_t mode, bool * storage_busy) {

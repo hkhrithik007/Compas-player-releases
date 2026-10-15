@@ -70,7 +70,15 @@ static ssize_t span_read(void * opaque, char * buf, size_t bytes) {
     return (ssize_t) total;
 }
 
-static int span_seek(void * opaque, off64_t * offset, int origin) {
+/* glibc's cookie callback explicitly uses its large-file type; musl uses
+ * off_t (already 64-bit), without requiring the legacy off64_t alias. */
+#ifdef __GLIBC__
+typedef off64_t span_offset_t;
+#else
+typedef off_t span_offset_t;
+#endif
+
+static int span_seek(void * opaque, span_offset_t * offset, int origin) {
     span_cookie_t * cookie = opaque;
     int64_t base;
     if (origin == SEEK_SET) base = 0;
@@ -88,7 +96,7 @@ static int span_seek(void * opaque, off64_t * offset, int origin) {
         return -1;
     }
     cookie->pos = base + rel;
-    *offset = (off64_t) cookie->pos;
+    *offset = (span_offset_t) cookie->pos;
     return 0;
 }
 

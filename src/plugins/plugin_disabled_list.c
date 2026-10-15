@@ -125,8 +125,14 @@ bool plugin_disabled_list_set(const char * filename, bool disabled) {
 
     if (found < 0) return true; /* already enabled -- nothing to persist */
 
-    char removed[256];
-    snprintf(removed, sizeof(removed), "%s", disabled_names[found]);
+    /* Copy only a name already terminated inside its own slot. A missing
+     * terminator must not walk into the next slot or restore a prefix. */
+    size_t removed_len = 0;
+    while (removed_len < sizeof(disabled_names[0]) && disabled_names[found][removed_len] != '\0')
+        removed_len++;
+    if (removed_len >= sizeof(disabled_names[0])) return false;
+    char removed[sizeof(disabled_names[0])];
+    memcpy(removed, disabled_names[found], removed_len + 1);
     memmove(&disabled_names[found], &disabled_names[found + 1],
             (size_t) (disabled_count - found - 1) * sizeof(disabled_names[0]));
     disabled_count--;
@@ -135,7 +141,7 @@ bool plugin_disabled_list_set(const char * filename, bool disabled) {
     /* Roll back the removal -- position doesn't matter, contains() is an
      * unordered scan, and the failed write means the reordering was never
      * actually persisted anyway. */
-    snprintf(disabled_names[disabled_count], sizeof(disabled_names[0]), "%s", removed);
+    memcpy(disabled_names[disabled_count], removed, removed_len + 1);
     disabled_count++;
     return false;
 }

@@ -130,6 +130,8 @@ static const char * const s_legacy_asset_inventory[] = {
     "pull_down/dlna.png", "pull_down/dlna_s.png",
     "pull_down/gapless_play.png", "pull_down/gapless_play_s.png",
     "pull_down/hibylink.png", "pull_down/hibylink_s.png",
+    "navigation/search.png", "navigation/more.png",
+    "navigation/chevron-right.png", "navigation/back.png",
     "sub_back/bg_search.png", "sub_back/btn_back.png", "sub_back/btn_search.png", "sub_back/close.png",
     "sub_back/btn_playlist.png", "sub_back/set.png",
     "topbar/lucide_audio_lines.png", "topbar/lucide_headphones.png",
@@ -211,16 +213,27 @@ void gui_themes_reset_state(void) {
  * Path utilities & Strict Validation
  * -------------------------------------------------------------------------- */
 
-static void get_themes_dir(char *out, size_t size) {
-    snprintf(out, size, "%s/%s", s_sd_root, NATIVE_THEMES_SUBDIR);
+/* Join a filesystem path. False leaves out empty so callers never use a truncated path. */
+static bool copy_path2(char *out, size_t size, const char *left, const char *right, bool slash) {
+    int n = slash ? snprintf(out, size, "%s/%s", left, right)
+                  : snprintf(out, size, "%s%s", left, right);
+    if (n < 0 || (size_t)n >= size) {
+        if (size > 0) out[0] = '\0';
+        return false;
+    }
+    return true;
 }
 
-static void get_state_file_path(char *out, size_t size) {
-    snprintf(out, size, "%s/%s", s_internal_compas_dir, NATIVE_STATE_FILENAME);
+static bool get_themes_dir(char *out, size_t size) {
+    return copy_path2(out, size, s_sd_root, NATIVE_THEMES_SUBDIR, true);
 }
 
-static void get_legacy_state_path(char *out, size_t size) {
-    snprintf(out, size, "%s/%s", s_sd_root, LEGACY_STATE_SUBPATH);
+static bool get_state_file_path(char *out, size_t size) {
+    return copy_path2(out, size, s_internal_compas_dir, NATIVE_STATE_FILENAME, true);
+}
+
+static bool get_legacy_state_path(char *out, size_t size) {
+    return copy_path2(out, size, s_sd_root, LEGACY_STATE_SUBPATH, true);
 }
 
 static bool is_valid_hex_sha256(const char *sha) {
@@ -298,8 +311,8 @@ static bool is_safe_icon_source_path(const char *path) {
 
     /* Absolute paths must strictly be within allowed roots (boundary checked) */
     if (path[0] == '/') {
-        char sd_themes[GUI_THEMES_MAX_PATH];
-        get_themes_dir(sd_themes, sizeof(sd_themes));
+        char sd_themes[GUI_THEMES_MAX_PATH] = "";
+        (void)get_themes_dir(sd_themes, sizeof(sd_themes));
 
         bool matched_root = false;
         if (path_is_under_root(path, s_theme1_root)) matched_root = true;
@@ -436,7 +449,7 @@ static bool save_state_atomic_candidate(const char *candidate_selected,
                                        size_t candidate_exclusion_count) {
     char state_path[GUI_THEMES_MAX_PATH];
     char tmp_path[GUI_THEMES_MAX_PATH + 32];
-    get_state_file_path(state_path, sizeof(state_path));
+    if (!get_state_file_path(state_path, sizeof(state_path))) return false;
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld", state_path, (long)getpid());
 
     mkdir(s_internal_compas_dir, 0755);
@@ -493,7 +506,7 @@ static bool save_state_atomic_candidate(const char *candidate_selected,
 
 static bool load_state(void) {
     char state_path[GUI_THEMES_MAX_PATH];
-    get_state_file_path(state_path, sizeof(state_path));
+    if (!get_state_file_path(state_path, sizeof(state_path))) return false;
 
     FILE *f = fopen(state_path, "r");
     if (!f) return false;
@@ -530,11 +543,13 @@ static bool load_state(void) {
             has_version = true;
         } else if (strncmp(line, "selected=", 9) == 0) {
             const char *sel = line + 9;
-            if (sel[0] != '\0' && !is_safe_relative_theme_path(sel)) {
+            size_t sel_len = strlen(sel);
+            if (sel_len >= sizeof(staged_selected) ||
+                (sel[0] != '\0' && !is_safe_relative_theme_path(sel))) {
                 fclose(f);
                 return false;
             }
-            snprintf(staged_selected, sizeof(staged_selected), "%s", sel);
+            memcpy(staged_selected, sel, sel_len + 1);
             has_selected = true;
         } else if (strncmp(line, "imported_legacy=", 16) == 0) {
             const char *val = line + 16;
@@ -607,7 +622,10 @@ static bool load_state(void) {
     size_t valid_count = 0;
     for (size_t i = 0; i < staged_count; i++) {
         char override_path[GUI_THEMES_MAX_PATH];
-        snprintf(override_path, sizeof(override_path), "%s%s", s_override_root, staged_exclusions[i].relpath);
+        if (!copy_path2(override_path, sizeof(override_path), s_override_root,
+                        staged_exclusions[i].relpath, false)) {
+            continue;
+        }
 
         char actual_sha[GUI_THEMES_SHA256_HEX_LEN + 1];
         uint64_t actual_size = 0;
@@ -644,7 +662,7 @@ static bool resolve_theme_source(const char *source, const char *relpath, bool r
                  : snprintf(out, size, "%s", source);
     } else {
         char themes_dir[GUI_THEMES_MAX_PATH];
-        get_themes_dir(themes_dir, sizeof(themes_dir));
+        if (!get_themes_dir(themes_dir, sizeof(themes_dir))) return false;
         n = root ? snprintf(out, size, "%s/%s/%s", themes_dir, source, relpath)
                  : snprintf(out, size, "%s/%s", themes_dir, source);
     }
@@ -678,13 +696,14 @@ static void perform_legacy_migration_if_needed(void) {
     }
 
     char legacy_path[GUI_THEMES_MAX_PATH];
-    get_legacy_state_path(legacy_path, sizeof(legacy_path));
-
-    /* Legacy migration requires either legacy state file or known loader evidence */
-    bool has_legacy_state = (access(legacy_path, R_OK) == 0);
+    /* Legacy migration requires either legacy state file or known loader evidence.
+     * A path that does not fit is treated as absent rather than truncated. */
+    bool has_legacy_state = get_legacy_state_path(legacy_path, sizeof(legacy_path)) &&
+                            access(legacy_path, R_OK) == 0;
     char loader_path[GUI_THEMES_MAX_PATH];
-    snprintf(loader_path, sizeof(loader_path), "%s/.plugins/Themes.lua", s_sd_root);
-    bool has_loader = (access(loader_path, R_OK) == 0);
+    bool has_loader = copy_path2(loader_path, sizeof(loader_path), s_sd_root,
+                                 "/.plugins/Themes.lua", false) &&
+                      access(loader_path, R_OK) == 0;
 
     if (!has_legacy_state && !has_loader) {
         /* No evidence of legacy Themes loader: save imported marker */
@@ -719,15 +738,15 @@ static void perform_legacy_migration_if_needed(void) {
     size_t candidate_count = s_exclusion_count;
 
     char themes_dir[GUI_THEMES_MAX_PATH];
-    get_themes_dir(themes_dir, sizeof(themes_dir));
+    bool have_themes_dir = get_themes_dir(themes_dir, sizeof(themes_dir));
 
     theme_file_t legacy_theme;
     bool has_legacy_theme = false;
     /* Strict validation BEFORE constructing path or calling theme_file_parse */
-    if (imported_theme[0] != '\0' && is_safe_relative_theme_path(imported_theme)) {
+    if (have_themes_dir && imported_theme[0] != '\0' && is_safe_relative_theme_path(imported_theme)) {
         char theme_path[GUI_THEMES_MAX_PATH];
-        snprintf(theme_path, sizeof(theme_path), "%s/%s", themes_dir, imported_theme);
-        if (theme_file_parse(theme_path, &legacy_theme, NULL, 0)) {
+        if (copy_path2(theme_path, sizeof(theme_path), themes_dir, imported_theme, true) &&
+            theme_file_parse(theme_path, &legacy_theme, NULL, 0)) {
             has_legacy_theme = true;
         }
     }
@@ -737,7 +756,7 @@ static void perform_legacy_migration_if_needed(void) {
     for (size_t i = 0; i < inventory_count && candidate_count < GUI_THEMES_MAX_EXCLUSIONS; i++) {
         const char *rel = s_legacy_asset_inventory[i];
         char override_file[GUI_THEMES_MAX_PATH];
-        snprintf(override_file, sizeof(override_file), "%s%s", s_override_root, rel);
+        if (!copy_path2(override_file, sizeof(override_file), s_override_root, rel, false)) continue;
 
         struct stat st;
         if (stat(override_file, &st) != 0 || !S_ISREG(st.st_mode)) {
@@ -746,11 +765,12 @@ static void perform_legacy_migration_if_needed(void) {
 
         /* Check stock theme2 and stock theme1 */
         char stock_theme2[GUI_THEMES_MAX_PATH], stock_theme1[GUI_THEMES_MAX_PATH];
-        snprintf(stock_theme2, sizeof(stock_theme2), "%s%s", s_theme2_root, rel);
-        snprintf(stock_theme1, sizeof(stock_theme1), "%s%s", s_theme1_root, rel);
-
-        bool matches_legacy = files_are_identical(override_file, stock_theme2) ||
-                              files_are_identical(override_file, stock_theme1);
+        bool matches_legacy = false;
+        if (copy_path2(stock_theme2, sizeof(stock_theme2), s_theme2_root, rel, false))
+            matches_legacy = files_are_identical(override_file, stock_theme2);
+        if (!matches_legacy &&
+            copy_path2(stock_theme1, sizeof(stock_theme1), s_theme1_root, rel, false))
+            matches_legacy = files_are_identical(override_file, stock_theme1);
 
         /* Check expected legacy theme source via theme resolver */
         if (!matches_legacy && has_legacy_theme) {
@@ -790,7 +810,7 @@ static void perform_legacy_migration_if_needed(void) {
         for (size_t i = 0; i < legacy_theme.icon_override_count && candidate_count < GUI_THEMES_MAX_EXCLUSIONS; i++) {
             const char *rel = legacy_theme.icon_overrides[i].relpath;
             char override_file[GUI_THEMES_MAX_PATH];
-            snprintf(override_file, sizeof(override_file), "%s%s", s_override_root, rel);
+            if (!copy_path2(override_file, sizeof(override_file), s_override_root, rel, false)) continue;
 
             struct stat st;
             if (stat(override_file, &st) != 0 || !S_ISREG(st.st_mode)) continue;
@@ -901,16 +921,16 @@ size_t gui_themes_scan(gui_theme_entry_t *out_entries, size_t max_entries) {
 
     /* Entry 0 is ALWAYS Default */
     gui_theme_entry_t *def = &out_entries[count++];
-    snprintf(def->filename, sizeof(def->filename), "");
+    def->filename[0] = '\0';
     snprintf(def->name, sizeof(def->name), "%s", TR("Default"));
     def->fullpath[0] = '\0';
     def->is_default = true;
     def->preview_color = GUI_COLOR_PANEL;
 
     char themes_dir[GUI_THEMES_MAX_PATH];
-    get_themes_dir(themes_dir, sizeof(themes_dir));
-
-    scan_dir_recursive(themes_dir, "", out_entries, max_entries, &count, 0);
+    if (get_themes_dir(themes_dir, sizeof(themes_dir))) {
+        scan_dir_recursive(themes_dir, "", out_entries, max_entries, &count, 0);
+    }
 
     /* Stable sort filenames (excluding entry 0) */
     if (count > 2) {
@@ -947,8 +967,8 @@ bool gui_themes_select(const char *filename) {
 
     char themes_dir[GUI_THEMES_MAX_PATH];
     char fullpath[GUI_THEMES_MAX_PATH];
-    get_themes_dir(themes_dir, sizeof(themes_dir));
-    if (snprintf(fullpath, sizeof(fullpath), "%s/%s", themes_dir, filename) >= (int)sizeof(fullpath)) {
+    if (!get_themes_dir(themes_dir, sizeof(themes_dir)) ||
+        !copy_path2(fullpath, sizeof(fullpath), themes_dir, filename, true)) {
         return false;
     }
 
@@ -990,7 +1010,10 @@ bool gui_themes_is_legacy_excluded(const char *relpath) {
     for (size_t i = 0; i < s_exclusion_count; i++) {
         if (strcmp(s_exclusions[i].relpath, relpath) == 0) {
             char override_path[GUI_THEMES_MAX_PATH];
-            snprintf(override_path, sizeof(override_path), "%s%s", s_override_root, relpath);
+            if (!copy_path2(override_path, sizeof(override_path), s_override_root, relpath, false)) {
+                gui_themes_clear_legacy_exclusion(relpath);
+                return false;
+            }
 
             struct stat st;
             if (stat(override_path, &st) != 0 || !S_ISREG(st.st_mode) ||
@@ -1058,8 +1081,11 @@ void gui_themes_apply_active(void) {
 
     char themes_dir[GUI_THEMES_MAX_PATH];
     char fullpath[GUI_THEMES_MAX_PATH];
-    get_themes_dir(themes_dir, sizeof(themes_dir));
-    snprintf(fullpath, sizeof(fullpath), "%s/%s", themes_dir, s_selected_filename);
+    if (!get_themes_dir(themes_dir, sizeof(themes_dir)) ||
+        !copy_path2(fullpath, sizeof(fullpath), themes_dir, s_selected_filename, true)) {
+        s_active_parsed = false;
+        return;
+    }
 
     theme_file_t tf;
     char err[128];
@@ -1195,8 +1221,8 @@ void gui_themes_init(void) {
     refresh_canonical_roots();
     if (!s_state_loaded) {
         char state_path[GUI_THEMES_MAX_PATH];
-        get_state_file_path(state_path, sizeof(state_path));
-        if (access(state_path, F_OK) == 0) {
+        if (get_state_file_path(state_path, sizeof(state_path)) &&
+            access(state_path, F_OK) == 0) {
             if (!load_state()) {
                 /* Corrupt state file exists: do NOT run migration or overwrite corrupt state */
                 return;

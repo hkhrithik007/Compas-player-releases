@@ -176,8 +176,12 @@ void screen_builders_init_list_row_style(void) {
     /* Semantic text roles follow the same live theme override mechanism. */
     lv_style_init(&style_theme_text_primary);
     lv_style_set_text_color(&style_theme_text_primary, lv_color_hex(GUI_COLOR_PRIMARY));
+    lv_style_set_image_recolor(&style_theme_text_primary, lv_color_hex(GUI_COLOR_PRIMARY));
+    lv_style_set_image_recolor_opa(&style_theme_text_primary, LV_OPA_COVER);
     lv_style_init(&style_theme_text_muted);
     lv_style_set_text_color(&style_theme_text_muted, lv_color_hex(GUI_COLOR_SECONDARY));
+    lv_style_set_image_recolor(&style_theme_text_muted, lv_color_hex(GUI_COLOR_SECONDARY));
+    lv_style_set_image_recolor_opa(&style_theme_text_muted, LV_OPA_COVER);
 }
 
 /* The height row_label_apply_bounded_height() will set for this font, for
@@ -591,8 +595,8 @@ static lv_obj_t * build_header_icon_button(lv_obj_t * scr, const char * asset,
      * a tight 44x44 box, so the touch area is padded out generously while
      * the icon itself stays centered at its normal size. */
     lv_obj_t * btn = lv_obj_create(scr);
-    lv_obj_set_size(btn, TITLE_ROW_HEIGHT, TITLE_ROW_HEIGHT);
-    lv_obj_align(btn, alignment, 0, STATUS_BAR_CLEARANCE);
+    lv_obj_set_size(btn, HEADER_BUTTON_WIDTH, HEADER_BUTTON_WIDTH);
+    lv_obj_align(btn, alignment, 0, STATUS_BAR_CLEARANCE + (TITLE_ROW_HEIGHT - HEADER_BUTTON_WIDTH) / 2);
     lv_obj_set_style_bg_opa(btn, 0, 0);
     lv_obj_set_style_border_width(btn, 0, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
@@ -613,7 +617,36 @@ static lv_obj_t * build_header_icon_button(lv_obj_t * scr, const char * asset,
 }
 
 lv_obj_t * build_header_back_button(lv_obj_t * scr, lv_event_cb_t cb) {
-    return build_header_icon_button(scr, asset_path("sub_back/btn_back.png"), LV_ALIGN_TOP_LEFT, cb);
+    lv_obj_t * button = build_header_icon_button(scr, asset_path("navigation/back.png"), LV_ALIGN_TOP_LEFT, cb);
+    if (!button) return NULL;
+    lv_obj_t * image = lv_obj_get_child(button, 0);
+    if (image) {
+        lv_obj_set_size(image, BOARD_SCALE_PX(44), BOARD_SCALE_PX(44));
+        lv_image_set_inner_align(image, LV_IMAGE_ALIGN_CONTAIN);
+        lv_obj_add_style(image, &style_theme_text_primary, 0);
+    }
+    return button;
+}
+
+lv_obj_t * build_navigation_chevron(lv_obj_t * parent, int32_t right_inset,
+                                    bool has_color_override, uint32_t color_override) {
+    if (!parent) return NULL;
+
+    lv_obj_t * chevron = lv_image_create(parent);
+    if (!chevron) return NULL;
+    lv_obj_set_size(chevron, BOARD_SCALE_PX(24), BOARD_SCALE_PX(24));
+    lv_image_set_src(chevron, asset_path("navigation/chevron-right.png"));
+    lv_image_set_inner_align(chevron, LV_IMAGE_ALIGN_CONTAIN);
+
+    if (has_color_override) {
+        lv_obj_set_style_image_recolor(chevron, lv_color_hex(color_override), 0);
+        lv_obj_set_style_image_recolor_opa(chevron, LV_OPA_COVER, 0);
+    } else {
+        lv_obj_add_style(chevron, &style_theme_text_muted, 0);
+    }
+    lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, -right_inset, 0);
+    lv_obj_remove_flag(chevron, LV_OBJ_FLAG_CLICKABLE);
+    return chevron;
 }
 
 void align_screen_header_action(lv_obj_t * action, int32_t right_inset) {
@@ -676,7 +709,7 @@ lv_obj_t * build_top_right_icon_button(lv_obj_t * scr, const char * icon_asset, 
         lv_obj_t * child = lv_obj_get_child(scr, i);
         if (lv_obj_check_type(child, &lv_label_class) &&
             lv_obj_has_flag(child, LV_OBJ_FLAG_USER_4) && !lv_obj_get_user_data(child)) {
-            lv_obj_set_width(child, active_display_width() - 76 - TITLE_ROW_HEIGHT - 12);
+            lv_obj_set_width(child, active_display_width() - 76 - HEADER_BUTTON_WIDTH - 12);
             screen_title_fit(child);
         }
     }
@@ -694,8 +727,8 @@ lv_obj_t * build_top_right_icon_button(lv_obj_t * scr, const char * icon_asset, 
 #define BUILD_TITLE_RIGHT_MARGIN 20
 
 /* Keeps a header title on its one line, vertically centered within the
- * TITLE_ROW_HEIGHT band below the status bar (matches the back button's own
- * 64px height). A title wider than the label (translations often are) drops
+ * TITLE_ROW_HEIGHT band below the status bar (matching the back button's
+ * vertical center). A title wider than the label (translations often are) drops
  * to the row font; if even that is too wide it ends in an ellipsis. The
  * fixed one-line height is what stops LV_LABEL_LONG_DOT from wrapping onto
  * the first row, including for titles whose text changes later. Rerun after
@@ -739,7 +772,7 @@ lv_obj_t * build_screen_header(lv_obj_t * scr, const char * title, lv_event_cb_t
     if (trailing_asset) {
         build_top_right_icon_button(scr, trailing_asset, trailing_cb);
         if (label) {
-            lv_obj_set_width(label, active_display_width() - BUILD_TITLE_LEFT_INSET - TITLE_ROW_HEIGHT - 12);
+            lv_obj_set_width(label, active_display_width() - BUILD_TITLE_LEFT_INSET - HEADER_BUTTON_WIDTH - 12);
             screen_title_fit(label);
         }
     }
@@ -939,7 +972,7 @@ lv_obj_t * build_icon_grid_screen(const char * title, lv_event_cb_t back_btn_cb,
             lv_obj_align(img_wrap, LV_ALIGN_TOP_MID, 0, top_offset);
             /* ~83% down the icon's own scaled height -- matches where the
              * reserved band actually starts, per a pixel scan of every
-             * wireless/*.png asset (glyph content ends around 60-68% down
+             * wireless PNG asset (glyph content ends around 60-68% down
              * their shared 190px-tall native canvas; centering the label a
              * bit past that, within the remaining flat-background band,
              * comfortably clears every icon's glyph regardless of its
@@ -1032,18 +1065,22 @@ void pill_row_apply_icon(lv_obj_t * row, lv_obj_t * label, const char * icon_pat
     if (!icon_path) return;
 
     /* Relative icon paths are resolved against <sd_root>/.plugins/ (the plugin directory),
-     * while absolute paths starting with '/' are preserved verbatim. */
+     * while absolute paths starting with '/' are preserved verbatim.
+     * A path that does not fit is skipped; a truncated path could open a different file. */
     char resolved[600];
+    int resolved_len;
     if (icon_path[0] == '/') {
-        snprintf(resolved, sizeof(resolved), "%s", icon_path);
+        resolved_len = snprintf(resolved, sizeof(resolved), "%s", icon_path);
     } else {
-        snprintf(resolved, sizeof(resolved), "%s/.plugins/%s", MUSIC_ROOT_DIR, icon_path);
+        resolved_len = snprintf(resolved, sizeof(resolved), "%s/.plugins/%s", MUSIC_ROOT_DIR, icon_path);
     }
+    if (resolved_len < 0 || (size_t)resolved_len >= sizeof(resolved)) return;
 
     /* "S:" is LVGL's POSIX-filesystem driver letter (lv_conf.h). Opens
-     * resolved as an absolute filesystem path. */
-    char src[600];
-    snprintf(src, sizeof(src), "S:%s", resolved);
+     * resolved as an absolute filesystem path. Two extra bytes hold that prefix. */
+    char src[sizeof(resolved) + 2];
+    int src_len = snprintf(src, sizeof(src), "S:%s", resolved);
+    if (src_len < 0 || (size_t)src_len >= sizeof(src)) return;
 
     /* lv_image_set_scale() only scales rendering without altering widget bounds.
      * Wrap in an explicitly-sized container matching target dimensions so layout
@@ -1272,16 +1309,7 @@ lv_obj_t * build_pill_list_screen(const char * title, lv_event_cb_t back_btn_cb,
             }
         } else {
             if (item->accessory == PILL_ACCESSORY_CHEVRON) {
-                /* No matching real chevron asset found in theme2 at this
-                 * screen scale -- plain text is the honest fallback rather
-                 * than forcing a mismatched sprite. */
-                lv_obj_t * chevron = lv_label_create(row);
-                lv_label_set_text(chevron, ">");
-                lv_obj_add_style(chevron, &style_theme_text_muted, 0);
-                if (item->has_text_color)
-                    lv_obj_set_style_text_color(chevron, lv_color_hex(item->text_color), 0);
-                lv_obj_set_style_text_font(chevron, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
-                lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(20), 0);
+                build_navigation_chevron(row, BOARD_SCALE_PX(20), item->has_text_color, item->text_color);
             }
 
             if (item->on_click) {
@@ -2741,12 +2769,7 @@ lv_obj_t * add_pill_toggle_row(lv_obj_t * parent, const char * label_text, bool 
 
 lv_obj_t * add_pill_chevron_row(lv_obj_t * parent, const char * label_text, lv_event_cb_t on_click) {
     lv_obj_t * row = add_pill_row_base(parent, label_text);
-
-    lv_obj_t * chevron = lv_label_create(row);
-    lv_label_set_text(chevron, ">");
-    lv_obj_add_style(chevron, &style_theme_text_muted, 0);
-    lv_obj_set_style_text_font(chevron, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
-    lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, -20, 0);
+    build_navigation_chevron(row, BOARD_SCALE_PX(20), false, 0);
 
     lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
     if (on_click) lv_obj_add_event_cb(row, on_click, LV_EVENT_CLICKED, NULL);

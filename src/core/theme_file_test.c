@@ -18,43 +18,6 @@ static const char *get_scratch_dir(void) {
     return "build_ui_test/theme-parser";
 }
 
-static void test_repo_themes(void) {
-    const char *repo_themes[] = {
-        "plugins_examples/Themes/Earthy.theme",
-        "plugins_examples/Themes/GameBoy.theme",
-        "plugins_examples/Themes/Monastic.theme",
-        "plugins_examples/Themes/MountainSunset.theme",
-        "plugins_examples/Themes/ObsidianAudio.theme",
-        "plugins_examples/Themes/Retro.theme",
-        "plugins_examples/Themes/Swamp.theme",
-        "plugins_examples/Themes/Terminal.theme",
-        "plugins_examples/Themes/Trees.theme",
-        "plugins_examples/Themes/Vaporwave.theme",
-        "plugins_examples/Themes/Wavy.theme",
-        "plugins_examples/Themes/White.theme",
-        "plugins_examples/Themes/ZenTerracotta.theme",
-    };
-
-    printf("Testing %zu repository themes...\n", sizeof(repo_themes)/sizeof(repo_themes[0]));
-    assert(sizeof(repo_themes)/sizeof(repo_themes[0]) == 13);
-
-    for (size_t i = 0; i < sizeof(repo_themes)/sizeof(repo_themes[0]); i++) {
-        theme_file_t theme;
-        char err[256] = {0};
-        bool ok = theme_file_parse(repo_themes[i], &theme, err, sizeof(err));
-        if (!ok) {
-            fprintf(stderr, "Failed to parse %s: %s\n", repo_themes[i], err);
-        }
-        assert(ok);
-        assert(strlen(theme.name) > 0);
-        assert(theme.screen <= 0xFFFFFF);
-        assert(theme.card <= 0xFFFFFF);
-        assert(theme.list_row <= 0xFFFFFF);
-        assert(theme.text_primary <= 0xFFFFFF);
-        assert(theme.text_muted <= 0xFFFFFF);
-    }
-}
-
 static void test_compas_plugins_themes(void) {
     const char *compas_plugins_dir = "../compas-plugins/plugins/Themes/Themes";
     DIR *d = opendir(compas_plugins_dir);
@@ -78,6 +41,11 @@ static void test_compas_plugins_themes(void) {
             }
             assert(ok);
             assert(strlen(theme.name) > 0);
+            assert(theme.screen <= 0xFFFFFF);
+            assert(theme.card <= 0xFFFFFF);
+            assert(theme.list_row <= 0xFFFFFF);
+            assert(theme.text_primary <= 0xFFFFFF);
+            assert(theme.text_muted <= 0xFFFFFF);
             count++;
         }
     }
@@ -306,7 +274,6 @@ static void test_regression_cases(void) {
 
 int main(void) {
     printf("Running theme_file unit tests...\n");
-    test_repo_themes();
     test_compas_plugins_themes();
     test_regression_cases();
     printf("All theme_file unit tests and regressions PASSED successfully!\n");

@@ -627,7 +627,9 @@ else
     copy_tracked_assets assets/r3proii/theme2 "$work/root/usr/resource/litegui/theme2"
     copy_tracked_assets assets/r3proii/etc "$work/root/etc"
 fi
+python3 "$repo/scripts/generate_ui_fonts.py" --verify
 copy_tracked_assets assets/fonts  "$work/root/usr/resource/fonts"
+python3 "$repo/scripts/generate_ui_fonts.py" --verify --font-directory "$work/root/usr/resource/fonts"
 
 # Non-asset files we own that are not in stock, laid out as squashfs-root-
 # relative paths under firmware/overlay/ (e.g. usr/share/udhcpc/
