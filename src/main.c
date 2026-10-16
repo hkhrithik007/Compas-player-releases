@@ -1,3 +1,4 @@
+#include "app_version.h"
 #include "lvgl/lvgl.h"
 #include "audio.h"
 #include "waveform.h"
@@ -14,6 +15,10 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <time.h>
+#if !defined(HOST_BUILD) && defined(__mips__) && defined(_MIPS_SIM) && \
+    (_MIPS_SIM == _ABIO32)
+#include <sys/syscall.h>
+#endif
 #ifdef HOST_BUILD
 #include <execinfo.h>
 #endif
@@ -21,9 +26,10 @@
 #include "gui.h"
 #include "settings.h"
 #include "db_log.h"
-#include "storage_migration.h"
+#include "storage_paths.h"
 #include "ui_wake.h"
 #include "ui_fonts.h"
+#include "fallback_font.h"
 #include <fcntl.h>
 
 #ifdef HOST_BUILD
@@ -57,9 +63,25 @@ static volatile sig_atomic_t running = 1;
 
 /* Custom tick interface for LVGL timing (replaces older thread-based ticks) */
 static uint32_t custom_tick_get(void) {
+#if !defined(HOST_BUILD) && defined(__mips__) && defined(_MIPS_SIM) && \
+    (_MIPS_SIM == _ABIO32) && defined(SYS_clock_gettime32)
+    /* musl's o32 clock_gettime wrapper first tries the time64 syscall, which
+     * older kernels reject on every LVGL tick. Keep the legacy ABI layout
+     * explicit: two 32-bit fields, independent of libc's timespec width. */
+    struct {
+        int32_t tv_sec;
+        int32_t tv_nsec;
+    } ts32;
+    if (syscall(SYS_clock_gettime32, CLOCK_MONOTONIC, &ts32) == 0) {
+        return (uint32_t)ts32.tv_sec * 1000U +
+               (uint32_t)ts32.tv_nsec / 1000000U;
+    }
+#endif
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (ts.tv_sec * 1000) + (ts.tv_nsec / 1000000);
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (uint32_t)ts.tv_sec * 1000U + (uint32_t)ts.tv_nsec / 1000000U;
 }
 
 #ifdef UI_PERF_TRACE
@@ -519,6 +541,7 @@ int main(int argc, char ** argv) {
      * just returning EPIPE (which audio_output_write() already handles
      * correctly). Must run before anything else opens a subprocess pipe. */
     signal(SIGPIPE, SIG_IGN);
+    fprintf(stdout, "Player model: %s\n", app_board_marker());
 #ifdef HOST_BUILD
     signal(SIGSEGV, crash_handler);
     signal(SIGABRT, crash_handler);
@@ -581,6 +604,9 @@ int main(int argc, char ** argv) {
 
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("Starting compas_player...\n");
+    /* PEQ saves target this directory directly; create it before audio_init()
+     * can load or persist the profile on both host and device builds. */
+    (void) mkdir(INTERNAL_COMPAS_DIR, 0755);
 
 #ifndef HOST_BUILD
     boot_checkpoint("main entered");
@@ -601,10 +627,6 @@ int main(int argc, char ** argv) {
     boot_checkpoint("mount_sd_card_if_needed begin");
     mount_sd_card_if_needed();
     boot_checkpoint("mount_sd_card_if_needed done");
-    boot_checkpoint("storage migration begin");
-    storage_migrate_internal_data();
-    if (sd_card_root_is_mounted()) storage_migrate_legacy_data();
-    boot_checkpoint("storage migration done");
 
     /* Deliberately no startup-time Bluetooth/D-Bus cleanup call here -- see
      * bluetooth_control.h's comment above bt_control_is_powered(): doing
@@ -703,9 +725,8 @@ int main(int argc, char ** argv) {
         lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_180);
     }
 
-    /* As early as this process can paint anything -- see gui_show_boot_
-     * splash()'s own comment (gui.c) for why this exists and how gui_init()
-     * further down uses the tick recorded here. */
+    /* The optional player splash is disabled at zero duration; boot artwork
+     * remains owned by the loader. */
     boot_checkpoint("gui_show_boot_splash begin");
     gui_show_boot_splash();
     boot_checkpoint("gui_show_boot_splash done");
@@ -775,16 +796,25 @@ int main(int argc, char ** argv) {
     boot_checkpoint("gui_init done");
 #endif
 
+    /* Complete the fallback chain only after every startup screen is built,
+     * so the first paint uses the same fonts as later redraws. */
+#ifndef HOST_BUILD
+    boot_checkpoint("startup fallback fonts begin");
+#endif
+    fallback_font_load_now();
+#ifndef HOST_BUILD
+    boot_checkpoint("startup fallback fonts done");
+#endif
+
     /* 3. Main event loop */
     printf("Entering main event loop...\n");
 #ifndef HOST_BUILD
     boot_checkpoint("entering main loop");
 #endif
-    /* LVGL normally calls its registered tick callback thousands of times
-     * per second. On this old 32-bit kernel, musl implements each call as a
-     * failing clock_gettime64 syscall followed by a legacy clock_gettime
-     * fallback. Switch LVGL to its in-memory tick counter after setup and
-     * advance it once per handler iteration from one real clock read. Timer
+    /* LVGL calls its registered tick callback thousands of times per second.
+     * The startup callback keeps real time advancing during eager setup;
+     * switch to the in-memory tick counter for runtime to avoid even the
+     * fast kernel clock reads, advancing once per handler iteration. Timer
      * semantics remain identical: the tick is stable while one handler pass
      * runs, just like the conventional interrupt-driven lv_tick_inc model. */
     /* Preserve LVGL's exact clock domain across the handoff to prevent
@@ -804,6 +834,9 @@ int main(int argc, char ** argv) {
     uint64_t perf_handler_max_us = 0;
     unsigned perf_handler_calls = 0;
     unsigned perf_handler_over_16ms = 0;
+#endif
+#ifndef HOST_BUILD
+    bool first_mainloop_handler = true;
 #endif
     /* HOST_BUILD only: a stray SIGINT on the real device must NOT reach this
      * loop's exit path -- falling through to gui_deinit(); return 0; makes
@@ -825,7 +858,22 @@ int main(int argc, char ** argv) {
 #ifdef UI_PERF_TRACE
         uint64_t perf_handler_start_us = perf_now_us();
 #endif
+#ifndef HOST_BUILD
+        if (first_mainloop_handler)
+            boot_checkpoint("first mainloop handler begin");
+#endif
         uint32_t time_till_next = lv_timer_handler();
+#ifndef HOST_BUILD
+        if (first_mainloop_handler) {
+            boot_checkpoint("first mainloop handler end");
+            boot_checkpoint(lv_linux_fbdev_last_present_succeeded(disp)
+                                ? "startup first present succeeded"
+                                : "startup first present failed");
+        }
+#endif
+#ifndef HOST_BUILD
+        first_mainloop_handler = false;
+#endif
         /* After lv_tick_set_cb(NULL), LVGL's tick stays frozen at the loop-top
          * lv_tick_inc() value for this entire handler pass. lv_timer_exec()
          * stamps timer->last_run = lv_tick_get() (that frozen value)

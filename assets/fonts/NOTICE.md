@@ -111,7 +111,7 @@ coverage). This project ships its own copy for both host and target.
 directory as part of a full firmware repack -- the same mechanism this
 project already uses to ship other files it owns that aren't in stock
 (e.g. `usr/bin/sync_ntp.sh`). A standalone player-binary update (SD-card
-`.open_hiby_player/open_hiby_player` swap, or `adb push`) does not carry
+`.compas/compas_player` swap, or `adb push`) does not carry
 this file; on a device that never received a full repack, the emoji fallback
 face is simply absent and every other font/rendering behavior is
 unaffected -- see `src/ui/fallback_font.c`'s own comment on why loading

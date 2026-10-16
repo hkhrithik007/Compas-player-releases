@@ -1,0 +1,335 @@
+diff --git a/bootloader/hibyos_linux.c b/bootloader/hibyos_linux.c
+index f42070d..c9dfad0 100644
+--- a/bootloader/hibyos_linux.c
++++ b/bootloader/hibyos_linux.c
+@@ -42,12 +42,19 @@
+ #include <unistd.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#include <errno.h>
+ #include <fcntl.h>
+ #include <dirent.h>
+ #include <sys/wait.h>
+ #include <stdarg.h>
+ #include "version.h"
+ 
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++#include "rockbox_bridge.h"
++#include "selector_controller.h"
++#include "compas_loader.h"
++#endif
++
+ //#define ENABLE_LOGGING
+ //#define AUTO_ENABLE_ADB
+ 
+@@ -212,6 +219,9 @@ static void display_text_centerf(int y, const char *format, ...)
+ /* get timeout before taking action if the user doesn't touch the device */
+ static int get_inactivity_tmo(int same_as_last)
+ {
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++    return same_as_last ? 1 * HZ : 3 * HZ;
++#else
+ #if defined(HAS_BUTTON_HOLD)
+     if(button_hold())
+         return 5 * HZ; /* Inactivity timeout when on hold */
+@@ -221,6 +231,7 @@ static int get_inactivity_tmo(int same_as_last)
+             return 1 * HZ; /* Timeout when mode is the same as the previous mode */
+         else
+             return 10 * HZ; /* Default timeout */
++#endif
+ }
+ 
+ /* return action on idle timeout */
+@@ -235,16 +246,103 @@ static enum boot_mode inactivity_action(enum boot_mode cur_selection)
+ }
+ 
+ static int mounted = 0;
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++static bool compas_initial_rockbox_checked;
++static bool compas_force_rockbox_check;
++#endif
++
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++static char *saved_ld_library_path;
++static int ld_library_path_was_set;
++static int ld_library_path_changed;
++
++/* Return the stock rfkill state only when it is an unambiguous 0 or 1. */
++static int get_bluetooth_state(void)
++{
++    char state;
++    int fd = open("/sys/class/rfkill/rfkill0/state", O_RDONLY | O_CLOEXEC);
++    if (fd < 0)
++        return -1;
++    ssize_t n = read(fd, &state, 1);
++    close(fd);
++    if (n != 1 || (state != '0' && state != '1'))
++        return -1;
++    return state - '0';
++}
++
++static void restore_bluetooth_if_enabled(int previous_state)
++{
++    if (previous_state == 1) {
++        char *bt_resume_argv[] = { (char *) "/usr/bin/bt_resume", NULL };
++        (void) compas_boot_run_bounded(bt_resume_argv, 10);
++    }
++}
++
++static void restore_ld_library_path(void)
++{
++    if (!ld_library_path_changed)
++        return;
++    if (ld_library_path_was_set)
++        (void) setenv("LD_LIBRARY_PATH", saved_ld_library_path, 1);
++    else
++        (void) unsetenv("LD_LIBRARY_PATH");
++    free(saved_ld_library_path);
++    saved_ld_library_path = NULL;
++    ld_library_path_changed = 0;
++}
++
++static int set_rockbox_library_path(void)
++{
++#ifdef HIBY_R1
++    const char *old_path = getenv("LD_LIBRARY_PATH");
++    size_t old_len = old_path ? strlen(old_path) : 0;
++    size_t rb_len = strlen(BASE_DIR ROCKBOX_DIR);
++    char *path = malloc(rb_len + old_len + (old_len ? 2 : 1));
++    if (!path)
++        return -1;
++
++    if (old_len)
++        snprintf(path, rb_len + old_len + 2, "%s:%s", BASE_DIR ROCKBOX_DIR, old_path);
++    else
++        snprintf(path, rb_len + 1, "%s", BASE_DIR ROCKBOX_DIR);
++
++    saved_ld_library_path = old_path ? strdup(old_path) : NULL;
++    if (old_path && !saved_ld_library_path) {
++        free(path);
++        return -1;
++    }
++    ld_library_path_was_set = old_path != NULL;
++    if (setenv("LD_LIBRARY_PATH", path, 1) != 0) {
++        free(saved_ld_library_path);
++        saved_ld_library_path = NULL;
++        free(path);
++        return -1;
++    }
++    ld_library_path_changed = 1;
++    free(path);
++#endif
++    return 0;
++}
++#endif
+ 
+ static void mount_storage(int enable)
+ {
+     if (enable && !mounted) {
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++        compas_boot_mount_sd();
++#else
+         system("/bin/mkdir -p " BASE_DIR);
+         if (system("/bin/mount /dev/mmcblk0 " BASE_DIR))
+             system("/bin/mount /dev/mmcblk0p1 " BASE_DIR);
++#endif
+         // XXX possibly invoke sys_serv -> "MOUNT:MOUNT:%s %s", blkdev, mntpoint
+     } else if (!enable && mounted) {
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++        char *unmount_argv[] = { (char *) "/bin/umount", (char *) BASE_DIR, NULL };
++        (void) compas_boot_run_bounded(unmount_argv, 5);
++#else
+         system("/bin/unmount " BASE_DIR);
++#endif
+         // XXX possibly invoke sys_serv -> "MOUNT:UNMOUNT:%s %s", mntpoint
+     }
+     mounted = enable;
+@@ -266,7 +364,24 @@ static enum boot_mode load_boot_mode(enum boot_mode mode)
+ static void save_boot_mode(enum boot_mode mode)
+ {
+     mount_storage(true);
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++    /* Tools is a one-shot action, never a persistent unattended boot choice. */
++    if (mode == BOOT_TOOLS)
++        mode = BOOT_OF;
++
++    enum boot_mode stored_mode;
++    int old_fd = open(BASE_DIR ROCKBOX_DIR "/rb_bl_mode.txt", O_RDONLY | O_CLOEXEC);
++    if (old_fd >= 0) {
++        ssize_t n = read(old_fd, &stored_mode, sizeof(stored_mode));
++        close(old_fd);
++        if (n == sizeof(stored_mode) && stored_mode == mode)
++            return;
++    }
++    int fd = open(BASE_DIR ROCKBOX_DIR "/rb_bl_mode.txt",
++                  O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
++#else
+     int fd = open(BASE_DIR ROCKBOX_DIR "/rb_bl_mode.txt", O_RDWR | O_CREAT | O_TRUNC);
++#endif
+     if(fd >= 0)
+     {
+         write(fd, &mode, sizeof(mode));
+@@ -278,14 +393,43 @@ static enum boot_mode get_boot_mode(void)
+ {
+     /* load previous mode, or start with rockbox if none */
+     enum boot_mode init_mode = load_boot_mode(BOOT_CANARY);
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++    if (init_mode == BOOT_TOOLS)
++        init_mode = BOOT_OF;
++    if (init_mode != BOOT_CANARY && init_mode != BOOT_OF &&
++        init_mode != BOOT_ROCKBOX && init_mode != BOOT_TOOLS)
++        init_mode = BOOT_OF;
++#endif
+     /* wait for user action */
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++    enum boot_mode mode = (init_mode == BOOT_CANARY) ? BOOT_OF : init_mode;
++#else
+     enum boot_mode mode = (init_mode == BOOT_CANARY) ? BOOT_ROCKBOX : init_mode;
++#endif
+     int last_activity = current_tick;
+ #if defined(HAS_BUTTON_HOLD)
+     bool hold_status = button_hold();
+ #endif
+     while(true)
+     {
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++        /* If the SD card or the validated Rockbox installation disappears
++         * while the selector is open, continue directly to Compás. */
++        static bool checked_rockbox;
++        static int last_rockbox_check;
++        if (!checked_rockbox) {
++            checked_rockbox = true;
++            last_rockbox_check = current_tick;
++            if (!compas_initial_rockbox_checked && !compas_rockbox_available())
++                return BOOT_OF;
++            compas_initial_rockbox_checked = false;
++        } else if (compas_force_rockbox_check || TIME_AFTER(current_tick, last_rockbox_check + HZ)) {
++            compas_force_rockbox_check = false;
++            last_rockbox_check = current_tick;
++            if (!compas_rockbox_available())
++                return BOOT_OF;
++        }
++#endif
+         /* on usb detect, immediately boot with last choice */
+ #if !defined(HIBY_R3PROII) && !defined(HIBY_R1) && !defined(HIDIZS_AP80MAX)
+         if(!adb_running && power_input_status() & POWER_INPUT_USB_CHARGER)
+@@ -324,7 +468,12 @@ static enum boot_mode get_boot_mode(void)
+             (mode == BOOT_ROCKBOX) ? &bm_rockboxicon : &bm_toolsicon;
+         lcd_bmp(icon, (LCD_WIDTH - ICON_WIDTH) / 2, get_icon_y());
+         /* display bottom description */
+-        const char *desc = (mode == BOOT_OF) ? OF_NAME :
++        const char *desc = (mode == BOOT_OF) ?
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++            "COMPAS" :
++#else
++            OF_NAME :
++#endif
+             (mode == BOOT_ROCKBOX) ? "ROCKBOX" : "TOOLS";
+ 
+         int desc_height;
+@@ -638,6 +787,12 @@ static int open_log(void)
+ 
+ int main(int argc, char **argv)
+ {
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++    if (argc == 2 && strcmp(argv[1], COMPAS_LOADER_ARG) == 0) {
++        compas_loader_run(true);
++        return 1;
++    }
++#endif
+     (void) argc;
+     (void) argv;
+ 
+@@ -662,6 +817,28 @@ int main(int argc, char **argv)
+     printf("%s\n", MODEL_NAME);
+     #endif
+ 
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++    /* Prepare the splash and SD card for installation detection before
++     * Rockbox initializes its UI. Compás updates run only in loader mode. */
++    compas_boot_prepare();
++    mounted = 1;
++    if (selector_controller_run(compas_rockbox_available())) {
++        const char *rockbox_path = compas_rockbox_stage();
++        if (rockbox_path && set_rockbox_library_path() == 0) {
++            int previous_bluetooth_state = get_bluetooth_state();
++            char *bt_suspend_argv[] = { (char *) "/usr/bin/bt_suspend", NULL };
++            (void) compas_boot_run_bounded(bt_suspend_argv, 5);
++            char *rockbox_argv[] = { (char *) BOOTFILE, NULL };
++            execv(rockbox_path, rockbox_argv);
++            fprintf(stderr, "Cannot boot Rockbox at %s: %s\n", rockbox_path, strerror(errno));
++            restore_ld_library_path();
++            restore_bluetooth_if_enabled(previous_bluetooth_state);
++        }
++    }
++    compas_boot_start_compas();
++    return 1;
++#endif
++
+     system_init();
+     core_allocator_init();
+     kernel_init();
+@@ -684,6 +861,10 @@ int main(int argc, char **argv)
+         enum boot_mode mode = get_boot_mode();
+         if (mode == BOOT_OF)
+         {
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++            compas_boot_start_compas();
++            return 1;
++#else
+ #ifdef ENABLE_LOGGING
+             fflush(stdout);
+             fflush(stderr);
+@@ -699,14 +880,43 @@ int main(int argc, char **argv)
+ #endif
+             error_screen("Cannot boot OF");
+             sleep(5 * HZ);
++#endif
+         }
+         else if(mode == BOOT_TOOLS)
+         {
+             tools_screen();
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++            compas_force_rockbox_check = true;
++#endif
+         }
+         else if(mode == BOOT_ROCKBOX)
+         {
+-#if defined(HIBY_R3PROII) || defined(HIBY_R1) || defined(HIDIZS_AP80MAX)
++#if defined(HIBY_R1) || defined(HIBY_R3PROII)
++            const char *rockbox_path = compas_rockbox_stage();
++            if (!rockbox_path) {
++                compas_boot_start_compas();
++                return 1;
++            }
++
++            if (set_rockbox_library_path() != 0) {
++                compas_boot_start_compas();
++                return 1;
++            }
++
++            /* Snapshot the stock rfkill state before suspending Bluetooth. */
++            int previous_bluetooth_state = get_bluetooth_state();
++            char *bt_suspend_argv[] = { (char *) "/usr/bin/bt_suspend", NULL };
++            (void) compas_boot_run_bounded(bt_suspend_argv, 5);
++
++            char *rockbox_argv[] = { (char *) BOOTFILE, NULL };
++            execv(rockbox_path, rockbox_argv);
++            fprintf(stderr, "Cannot boot Rockbox at %s: %s\n", rockbox_path, strerror(errno));
++            restore_ld_library_path();
++            restore_bluetooth_if_enabled(previous_bluetooth_state);
++            compas_boot_start_compas();
++            return 1;
++#else
++#if defined(HIDIZS_AP80MAX)
+             /* Suspend bluetooth as it's not currently supported */
+             system("/usr/bin/bt_suspend");
+ #endif
+@@ -734,6 +944,7 @@ int main(int argc, char **argv)
+             error_screen("Cannot boot Rockbox!");
+             mode = BOOT_TOOLS;
+             sleep(2 * HZ);
++#endif
+         }
+         else
+         {

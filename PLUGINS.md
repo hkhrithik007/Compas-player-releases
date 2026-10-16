@@ -178,12 +178,12 @@ plugin.define({
 
   | Area | Tokens |
   | --- | --- |
-  | UI | `ui.list`, `ui.settings`, `ui.row_width`, `ui.text_input`, `ui.toast`, `ui.progress`, `ui.screenshot`, `ui.theme`, `ui.theme_refresh`, `ui.reload`, `ui.home_layout`, `ui.home_tiles`, `ui.launcher_layout`, `ui.home_background`, `ui.lock_screen`, `ui.quick_toggle`, `ui.text_view`, `ui.text_view_images`, `ui.list_grid`, `ui.list_showing`, `ui.list_update`, `ui.list_wrap`, `ui.settings_list_wrap`, `ui.player_layout_xml`, `ui.file_manager`, `ui.file_picker` |
+  | UI | `ui.list`, `ui.settings`, `ui.row_width`, `ui.text_input`, `ui.toast`, `ui.progress`, `ui.screenshot`, `ui.theme`, `ui.theme_refresh`, `ui.reload`, `ui.home_layout`, `ui.home_tiles`, `ui.launcher_layout`, `ui.home_background`, `ui.lock_screen`, `ui.quick_toggle`, `ui.text_view`, `ui.text_view_images`, `ui.list_grid`, `ui.list_showing`, `ui.list_update`, `ui.list_wrap`, `ui.settings_list_wrap`, `ui.player_layout_xml`, `ui.file_manager`, `ui.file_picker`, `ui.startup_image` |
   | Playback and audio | `playback.control`, `playback.state`, `playback.events`, `playback.progress`, `playback.remote`, `playback.transport_skip`, `playback.speed`, `playback.format`, `playback.output_info`, `playback.silent_volume`, `playback.transient_volume`, `playback.output_events`, `playback.settings`, `playback.ab_loop`, `playback.ab_switch`, `playback.http_seek`, `audio.peq`, `audio.peq.transient`, `audio.peq.state`, `audio.stereo_width`, `audio.crossfeed`, `audio.crossfeed.angle`, `audio.hw_volume_curve` |
   | Files | `filesystem.sd`, `filesystem.mkdir`, `filesystem.playlists`, `filesystem.file_ops` |
   | Storage | `storage.namespaced`, `storage.secrets`, `storage.secrets_get` |
   | Network | `network.http.sync`, `network.http.async`, `network.http.download`, `network.http.download_progress` |
-  | Data | `data.json`, `crypto.md5`, `data.zip`, `data.zip_image`, `data.image_thumbnail`, `data.html` |
+  | Data | `data.json`, `crypto.md5`, `data.zip`, `data.zip_image`, `data.image_thumbnail`, `data.wallpaper`, `data.html` |
   | Library | `library.artist_albums`, `library.paged`, `library.refresh`, `library.track_metadata` |
 
 - LEDs depend on the model: check `plugin.led_available()` instead.
@@ -512,6 +512,68 @@ programmatic UI styling.
 | colors | nothing, they apply immediately |
 | icons, Home and launcher layouts | `plugin.refresh_theme()` |
 | anything, the heavy way | `plugin.reload_ui()` |
+
+### Music menu and Quick Drawer customization
+
+Additive API 16 capabilities: `ui.music_layout` and `ui.quick_drawer_layout`.
+Check these capabilities before calling the new functions on an older player.
+Declare layouts after `plugin.define()` during startup; use `plugin.reload_ui()`
+after saving a change in your plugin's own settings. These declarations do not
+write the user's preferences to storage.
+
+```lua
+if plugin.has_capability("ui.music_layout") then
+    plugin.set_music_layout({
+        order = { "albums", "artists", "files", "playlists" },
+        toolbar = { "library" },
+    })
+end
+if plugin.has_capability("ui.quick_drawer_layout") then
+    plugin.set_quick_drawer_layout({
+        enabled = true,
+        order = { "sleep", "bluetooth", "wifi", "plugins" },
+        eq_visible = false,
+        volume_visible = true,
+    })
+end
+```
+
+`plugin.set_music_layout(options)` accepts `order` and `toolbar` arrays.
+Music keys are `files`, `artists`, `albums`, `album_artist`, `genres`,
+`all_songs`, and `playlists`. Toolbar keys are `sound`, `playback`, and
+`library`, ordered left to right. Existing `plugin.set_icon()` overrides still
+apply to their native icons. Native library browsing, artwork, and paging are
+preserved.
+
+`plugin.set_quick_drawer_layout(options)` accepts `enabled`, `order`,
+`eq_visible`, and `volume_visible`. Drawer keys are `wifi`, `bluetooth`,
+`sleep`, `crossfade`, `airplay`, `dlna`, `gapless`, `remote_control`,
+`car_mode`, and `plugins`. The `plugins` key places all registered quick
+toggles as a block in their registration order. The first four visible toggles
+appear collapsed; the remaining toggles appear in the expanded area.
+Brightness and the now-playing card retain their native layout. Hiding a
+control does not turn off its feature or cancel an active sleep timer.
+
+Omitted Music options use the standard native layout; omitted Drawer options
+inherit saved preferences. Within an explicit array,
+omitted keys are hidden; an empty array hides all entries in that section.
+Unknown, duplicate, sparse, or incorrectly typed entries raise an error before
+changing the previous declaration. Passing `nil` releases that plugin's
+declaration for the corresponding function.
+
+The latest declaration for each option determines its order or value; an
+omitted option leaves other plugins' declarations intact. Visibility restrictions
+combine: an item hidden by any plugin stays hidden, and a `false` request for
+drawer enablement, EQ visibility, or volume visibility wins over `true`.
+This keeps a later theme from undoing Kids Mode restrictions. Failed or unloaded plugins lose their
+declarations, restoring another plugin's declaration or the saved preferences.
+Music menu and toolbar customization is available only to plugins and themes.
+Users can configure the Quick Drawer under Settings > Display > Appearance >
+Quick Drawer. Plugin overrides can take precedence over these choices. These
+controls simplify navigation; they are not a device security boundary.
+Customized saved Drawer orders are explicit selections:
+new entries added in future releases remain hidden until selected. Unchanged
+default orders follow the defaults of the installed release.
 
 ### `plugin.set_icon(theme_path, source_file)`
 
@@ -1039,7 +1101,7 @@ saved immediately, and the EQ screen shows it.
 | `plugin.eq_load_profile(path)` | Loads a `.peq` profile. Returns `false` if it can't be read. |
 | `plugin.eq_save_profile(path)` | Saves the current EQ as a `.peq` profile, the same format as the EQ screen. Returns `false` if it can't be written. |
 | `plugin.eq_reset()` | Restores the defaults. |
-| `plugin.eq_set_bypass(on)` | `true` turns the whole EQ off, including stereo width and crossfeed. The PCM stage then leaves samples unchanged. DoP output never reaches it. |
+| `plugin.eq_set_bypass(on)` | `true` turns off the EQ bands, preamp and stereo width. Crossfeed remains independent; with Crossfeed also off and its ramp settled, the PCM stage leaves samples unchanged. DoP output never reaches it. |
 | `plugin.eq_set_preamp(db)` | Sets the preamp gain. |
 | `plugin.eq_get_stereo_width()` | Gets the configured width (API 16, capability `audio.stereo_width`). |
 | `plugin.eq_set_stereo_width(width)` | Sets width from 0 (mono fold) through 1 (neutral) to 2 (wider). Rejects nonfinite/out-of-range values. |
@@ -1060,10 +1122,10 @@ shows the band/preamp response and excludes this channel-dependent matrix.
 Crossfeed is saved as `crossfeed` in the same `.peq` current file and named
 profiles, so `eq_save_profile` / `eq_load_profile` and `get_eq_state` /
 `eq_apply_state` round-trip it. Profiles and snapshots that omit the field load
-as off. `eq_reset()` and the EQ screen's Flat / Reset actions turn it off.
-New installs start off. The EQ band-options screen has a strength slider (0 is off) and a global
-Crossfeed angle selector. There is no separate enable switch. Crossfeed runs
-only when EQ is On; bypass skips the entire stage.
+as off. `eq_reset()` turns it off; the PEQ screen's Flat / Reset actions preserve
+Crossfeed strength and angle. New installs start off. Settings → Sound → Crossfeed
+has a strength slider (0 is off) and an angle selector. There is no separate
+enable switch. Crossfeed runs independently of the PEQ On/Off switch.
 
 Crossfeed is a filtered-difference headphone blend. It is not a stereo-width
 matrix, a room model, or a head-related transfer function. In No delay mode
@@ -1103,9 +1165,10 @@ low-pass. A sample-rate or 16/24-bit format change does the same restart, so
 the previous stream is not replayed and a steady tone does not step. Mono
 input is unchanged. Any non-zero strength runs the PCM processor even when
 every EQ band is flat, preamp is 0 dB, and stereo width is 1, so the PCM
-stage rewrites samples. Strength 0, with the ramp already at 0, leaves this
-stage's samples unchanged and does no per-sample work. EQ bypass skips
-crossfeed along with the rest of that stage. Native DoP never enters it.
+stage rewrites samples. With the other processors inactive, strength 0 and a
+settled ramp leave samples unchanged and do no per-sample work. EQ bypass
+disables preamp, bands and stereo width while preserving Crossfeed. Native DoP
+never enters this stage.
 ReplayGain and volume stay outside this stage, in their existing order around
 it. Bluetooth and USB conversion can still change the signal after this
 stage; a matching PCM format alone does not prove bit-perfect output.
@@ -1348,6 +1411,37 @@ background and call `callback(dest)` or `callback(nil, reason)`.
   don't treat the image as broken.
 - `dest` is replaced only on success. Jobs are cancelled, without callback,
   when the plugins reload.
+
+- `plugin.image_wallpaper_async(source, dest, callback)` (API 16,
+  `data.wallpaper`) prepares a JPEG, PNG or BMP file up to 3 MB as a wallpaper.
+  It center-crops and resizes to the active display's exact pixel dimensions,
+  then writes an LVGL RGB565 `.bin` image. It uses the same background worker,
+  callback, cancellation, and failure behavior as `image_thumbnail_async`.
+
+### Startup splash image
+
+`plugin.set_startup_image_async(prepared_bin_path_or_nil, callback)` selects
+the image shown while the player starts. Use `plugin.image_startup_async(source,
+dest, callback)` to prepare a JPEG, PNG or BMP (up to 3 MB) as a board-sized RGB565
+`.bin` first. It center-crops to the firmware's native screen width and height;
+the image is not tinted. The callback receives `dest` or `nil, reason`, with
+the same shared worker, busy result, cancellation and failure behavior as
+`image_wallpaper_async`. The destination must end in `.bin`.
+
+Check `plugin.has_capability("ui.startup_image")` before preparing, installing
+or restoring a splash. This additive capability does not change API version 16.
+Startup image selection requires firmware whose loader supports the override.
+
+`set_startup_image_async` returns `true` when the job starts, or `nil, "busy"`
+if another image job is running. Its callback receives `(true, nil)` after
+install or restore succeeds, or `(false, reason)` on failure. Passing `nil`
+removes the custom override and restores the built-in splash. Validation and
+preparation failures keep the previous selection intact. Changes are used on
+the next boot; they do not redraw the current screen or restart the player.
+
+`plugin.has_startup_image()` returns whether a valid custom image is installed
+for this board. The native Accent Color setting can tint the built-in splash;
+it does not recolor custom images.
 
 ### `plugin.html_to_blocks(bytes [, options])`
 

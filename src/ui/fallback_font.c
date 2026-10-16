@@ -77,10 +77,6 @@ extern player_settings_t current_settings;
 extern void settings_save(const player_settings_t * s);
 extern void player_transition_mark_dirty(void);
 
-#ifndef HOST_BUILD
-extern void boot_checkpoint(const char * step);
-#endif
-
 static int s_font_size_tier = 1;
 static int s_lyrics_font_size_tier = 1;
 static char s_active_custom_name[64] = "";
@@ -1193,22 +1189,4 @@ void fallback_font_load_now(void) {
     if (s_custom_staged_valid) commit_custom_font_data(s_custom_font_generation);
 
     fallback_font_refresh_ui();
-}
-
-static void fallback_font_load_deferred(lv_timer_t * timer) {
-    lv_timer_delete(timer);
-
-#ifndef HOST_BUILD
-    boot_checkpoint("fallback_font_load_deferred entered");
-#endif
-    DBG_LOG("fallback_font: loading multilingual fallbacks (tier=%d)\n", s_font_size_tier);
-    fallback_font_load_now();
-#ifndef HOST_BUILD
-    boot_checkpoint("fallback_font_load_deferred done");
-#endif
-}
-
-#define FALLBACK_FONT_LOAD_DELAY_MS 500
-void fallback_font_schedule_deferred_load(void) {
-    lv_timer_create(fallback_font_load_deferred, FALLBACK_FONT_LOAD_DELAY_MS, NULL);
 }

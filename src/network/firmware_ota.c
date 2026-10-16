@@ -313,7 +313,9 @@ static const char * describe_http_error(const char * code) {
     return TR("Could not read the release list from GitHub.");
 }
 
-static bool fetch_latest_release(firmware_ota_release_t * release, char * error, size_t error_size) {
+bool firmware_ota_fetch_release_for_asset(const char * asset_name, firmware_ota_release_t * release,
+                                          char * error, size_t error_size) {
+    if (!asset_name || !release || !error || error_size == 0) return false;
     http_request_t request;
     memset(&request, 0, sizeof(request));
     snprintf(request.url, sizeof(request.url), "%s", OTA_RELEASES_URL);
@@ -346,9 +348,13 @@ static bool fetch_latest_release(firmware_ota_release_t * release, char * error,
         return false;
     }
     bool parsed = firmware_ota_parse_releases((const char *) response.body, response.body_len,
-                                              firmware_ota_board_asset(), release, error, error_size);
+                                              asset_name, release, error, error_size);
     http_response_free(&response);
     return parsed;
+}
+
+static bool fetch_latest_release(firmware_ota_release_t * release, char * error, size_t error_size) {
+    return firmware_ota_fetch_release_for_asset(firmware_ota_board_asset(), release, error, error_size);
 }
 
 static void * check_worker(void * unused) {

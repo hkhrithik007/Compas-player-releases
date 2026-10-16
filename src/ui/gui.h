@@ -40,10 +40,8 @@ void gui_deinit(void);
 /* True while the screen is lit or its selected wake surface is ready to paint. */
 bool gui_display_refresh_allowed(void);
 
-/* Shows a minimal boot-settle splash screen -- call once, as early as
- * possible after display setup, before gui_init(). See gui.c's own
- * comment above the definition for why. Target-only: HOST_BUILD callers
- * don't have a real cold-boot race to guard against. */
+/* Optional player splash after display setup, before gui_init(). Currently
+ * disabled (zero duration); the loader owns the boot artwork. */
 #ifndef HOST_BUILD
 void gui_show_boot_splash(void);
 

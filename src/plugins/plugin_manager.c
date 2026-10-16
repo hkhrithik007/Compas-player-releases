@@ -13,6 +13,7 @@
 #include "audio.h"
 #include "audio_output.h"
 #include "settings.h"
+#include "ui_customization.h"
 #include "bluetooth_control.h"
 #include "usb_mode_control.h"
 #include "file_ops.h"
@@ -35,6 +36,7 @@
 #include "image_thumb.h"
 #include "gui_text_view.h"
 #include "metadata_db.h"
+#include "../core/startup_splash.h"
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -139,6 +141,9 @@ typedef struct {
      * longjmp-aborted (see plugin_call()). Its lua_State is then left frozen
      * mid-execution and must never be run again. */
     bool aborted;
+    ui_customization_override_t ui_override;
+    uint64_t music_layout_sequence;
+    uint64_t drawer_layout_sequence;
     time_t last_library_refresh;
     /* Source filename (basename, e.g. "Themes.lua"), not just the derived
      * plugin id -- needed by plugin_manager_scan_available() to map a
@@ -163,6 +168,7 @@ static uint64_t plugin_filename_hash(const char * name) {
 }
 static int loading_plugin_slot = -1;
 static lua_State * plugin_led_override_owner = NULL;
+static uint64_t ui_layout_sequence;
 
 /* plugin.storage and plugin.secrets need to know WHICH plugin is calling
  * at arbitrary runtime (not just at plugin.define() time, unlike
@@ -568,12 +574,12 @@ static int plugin_settings_list_row_counts[PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE
  *
  *   plugin.eq_reset()
  *     Restores every band, the preamp, bypass, stereo width, and crossfeed
- *     to peq.c's own built-in defaults (same as the native EQ screen's Reset
- *     button). Crossfeed is off.
+ *     to peq.c's own built-in defaults. Crossfeed is off; the native PEQ
+ *     screen's Reset button preserves Crossfeed instead.
  *
  *   plugin.eq_set_bypass(enabled)
  *   plugin.eq_set_preamp(db)
- *     Toggles/sets the whole-EQ bypass and pre-amp (dB).
+ *     Toggles/sets the PEQ bypass and pre-amp (dB). Crossfeed is independent.
  *
  *   plugin.eq_set_band(index, freq_hz, gain_db, q)
  *   plugin.eq_set_band_type(index, type)
@@ -2557,6 +2563,191 @@ static int l_plugin_set_home_layout(lua_State * L) {
     }
 
     gui_plugin_set_home_layout(&config);
+    return 0;
+}
+
+/* Structural declarations run during startup, before native screens exist.
+ * Keep each owner's contribution so a failed/disabled plugin cannot leave
+ * a restriction behind or erase another plugin's earlier declaration. */
+static unsigned ui_order_mask(const ui_item_order_t *order) {
+    unsigned mask = 0;
+    for (unsigned i = 0; i < order->count && i < UI_ORDER_MAX; ++i)
+        if (order->ids[i] < UI_ORDER_MAX) mask |= 1u << order->ids[i];
+    return mask;
+}
+
+static void restrict_ui_order(ui_item_order_t *order, unsigned allowed) {
+    unsigned count = 0;
+    for (unsigned i = 0; i < order->count && i < UI_ORDER_MAX; ++i)
+        if (order->ids[i] < UI_ORDER_MAX && (allowed & (1u << order->ids[i])))
+            order->ids[count++] = order->ids[i];
+    order->count = (uint8_t)count;
+}
+
+static void refresh_plugin_ui_customization(void) {
+    ui_customization_override_t merged = {0};
+    uint64_t sequence[6] = {0};
+    unsigned allowed[3] = {UINT_MAX, UINT_MAX, UINT_MAX};
+    bool drawer_disabled = false, eq_hidden = false, volume_hidden = false;
+    for (int i = 0; i < PLUGIN_MAX_FILES; ++i) {
+        const plugin_instance_t *inst = &plugin_instances[i];
+        if (!inst->L || inst->disposing || inst->aborted) continue;
+        const ui_customization_override_t *o = &inst->ui_override;
+        if (o->has_music) {
+            allowed[0] &= ui_order_mask(&o->value.music);
+            if (inst->music_layout_sequence > sequence[0]) {
+                sequence[0] = inst->music_layout_sequence;
+                merged.has_music = true;
+                merged.value.music = o->value.music;
+            }
+        }
+        if (o->has_music_toolbar) {
+            allowed[1] &= ui_order_mask(&o->value.music_toolbar);
+            if (inst->music_layout_sequence > sequence[1]) {
+                sequence[1] = inst->music_layout_sequence;
+                merged.has_music_toolbar = true;
+                merged.value.music_toolbar = o->value.music_toolbar;
+            }
+        }
+        if (o->has_drawer) {
+            allowed[2] &= ui_order_mask(&o->value.drawer);
+            if (inst->drawer_layout_sequence > sequence[2]) {
+                sequence[2] = inst->drawer_layout_sequence;
+                merged.has_drawer = true;
+                merged.value.drawer = o->value.drawer;
+            }
+        }
+        if (o->has_drawer_enabled) {
+            drawer_disabled |= !o->value.drawer_enabled;
+            if (inst->drawer_layout_sequence > sequence[3]) {
+                sequence[3] = inst->drawer_layout_sequence;
+                merged.has_drawer_enabled = true;
+                merged.value.drawer_enabled = o->value.drawer_enabled;
+            }
+        }
+        if (o->has_drawer_eq_visible) {
+            eq_hidden |= !o->value.drawer_eq_visible;
+            if (inst->drawer_layout_sequence > sequence[4]) {
+                sequence[4] = inst->drawer_layout_sequence;
+                merged.has_drawer_eq_visible = true;
+                merged.value.drawer_eq_visible = o->value.drawer_eq_visible;
+            }
+        }
+        if (o->has_drawer_volume_visible) {
+            volume_hidden |= !o->drawer_volume_visible;
+            if (inst->drawer_layout_sequence > sequence[5]) {
+                sequence[5] = inst->drawer_layout_sequence;
+                merged.has_drawer_volume_visible = true;
+                merged.drawer_volume_visible = o->drawer_volume_visible;
+            }
+        }
+    }
+    restrict_ui_order(&merged.value.music, allowed[0]);
+    restrict_ui_order(&merged.value.music_toolbar, allowed[1]);
+    restrict_ui_order(&merged.value.drawer, allowed[2]);
+    if (drawer_disabled) merged.value.drawer_enabled = false;
+    if (eq_hidden) merged.value.drawer_eq_visible = false;
+    if (volume_hidden) merged.drawer_volume_visible = false;
+    ui_customization_set_override(&merged);
+}
+
+static plugin_instance_t *require_ui_layout_load(lua_State *L, const char *api) {
+    lua_State *main = plugin_main_state(L);
+    plugin_instance_t *inst = plugin_instance_for_state(main);
+    if (!inst || !inst->defined || inst->disposing || inst->aborted ||
+        loading_plugin_slot < 0 || loading_plugin_slot >= PLUGIN_MAX_FILES ||
+        &plugin_instances[loading_plugin_slot] != inst) {
+        luaL_error(L, "%s must run after plugin.define during plugin startup; use plugin.reload_ui to apply changes", api);
+        return NULL;
+    }
+    return inst;
+}
+
+static bool parse_ui_order_field(lua_State *L, const char *field, ui_order_kind_t kind,
+                                 ui_item_order_t *out, const char *api) {
+    lua_getfield(L, 1, field);
+    if (lua_isnil(L, -1)) { lua_pop(L, 1); return false; }
+    if (!lua_istable(L, -1)) luaL_error(L, "%s: %s must be an array", api, field);
+    lua_Unsigned count = lua_rawlen(L, -1);
+    if (count > (lua_Unsigned)ui_order_size(kind))
+        luaL_error(L, "%s: too many %s entries", api, field);
+    lua_pushnil(L);
+    while (lua_next(L, -2)) {
+        if (!lua_isinteger(L, -2) || lua_tointeger(L, -2) < 1 ||
+            (lua_Unsigned)lua_tointeger(L, -2) > count)
+            luaL_error(L, "%s: %s must be a contiguous array", api, field);
+        lua_pop(L, 1);
+    }
+    ui_item_order_t order = { .count = (uint8_t)count };
+    unsigned seen = 0;
+    for (lua_Unsigned i = 0; i < count; ++i) {
+        lua_rawgeti(L, -1, (lua_Integer)i + 1);
+        if (lua_type(L, -1) != LUA_TSTRING)
+            luaL_error(L, "%s: %s entries must be strings", api, field);
+        size_t len;
+        const char *key = lua_tolstring(L, -1, &len);
+        int id = strlen(key) == len ? ui_order_find_key(kind, key) : -1;
+        if (id < 0) luaL_error(L, "%s: unknown %s entry", api, field);
+        if (seen & (1u << id)) luaL_error(L, "%s: duplicate %s entry", api, field);
+        seen |= 1u << id;
+        order.ids[i] = (uint8_t)id;
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+    *out = order;
+    return true;
+}
+
+static bool parse_ui_bool_field(lua_State *L, const char *field, bool *out, const char *api) {
+    lua_getfield(L, 1, field);
+    if (lua_isnil(L, -1)) { lua_pop(L, 1); return false; }
+    if (!lua_isboolean(L, -1)) luaL_error(L, "%s: %s must be a boolean", api, field);
+    *out = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    return true;
+}
+
+static int l_plugin_set_music_layout(lua_State *L) {
+    const char *api = "plugin.set_music_layout";
+    plugin_instance_t *inst = require_ui_layout_load(L, api);
+    ui_customization_override_t parsed = {0};
+    if (!lua_isnoneornil(L, 1)) {
+        luaL_checktype(L, 1, LUA_TTABLE);
+        parsed.has_music = parse_ui_order_field(L, "order", UI_ORDER_MUSIC, &parsed.value.music, api);
+        parsed.has_music_toolbar = parse_ui_order_field(L, "toolbar", UI_ORDER_MUSIC_TOOLBAR,
+                                                       &parsed.value.music_toolbar, api);
+    }
+    inst->ui_override.has_music = parsed.has_music;
+    inst->ui_override.has_music_toolbar = parsed.has_music_toolbar;
+    inst->ui_override.value.music = parsed.value.music;
+    inst->ui_override.value.music_toolbar = parsed.value.music_toolbar;
+    inst->music_layout_sequence = parsed.has_music || parsed.has_music_toolbar ? ++ui_layout_sequence : 0;
+    refresh_plugin_ui_customization();
+    return 0;
+}
+
+static int l_plugin_set_quick_drawer_layout(lua_State *L) {
+    const char *api = "plugin.set_quick_drawer_layout";
+    plugin_instance_t *inst = require_ui_layout_load(L, api);
+    ui_customization_override_t parsed = {0};
+    if (!lua_isnoneornil(L, 1)) {
+        luaL_checktype(L, 1, LUA_TTABLE);
+        parsed.has_drawer = parse_ui_order_field(L, "order", UI_ORDER_DRAWER, &parsed.value.drawer, api);
+        parsed.has_drawer_enabled = parse_ui_bool_field(L, "enabled", &parsed.value.drawer_enabled, api);
+        parsed.has_drawer_eq_visible = parse_ui_bool_field(L, "eq_visible", &parsed.value.drawer_eq_visible, api);
+        parsed.has_drawer_volume_visible = parse_ui_bool_field(L, "volume_visible", &parsed.drawer_volume_visible, api);
+    }
+    inst->ui_override.has_drawer = parsed.has_drawer;
+    inst->ui_override.has_drawer_enabled = parsed.has_drawer_enabled;
+    inst->ui_override.has_drawer_eq_visible = parsed.has_drawer_eq_visible;
+    inst->ui_override.has_drawer_volume_visible = parsed.has_drawer_volume_visible;
+    inst->ui_override.value.drawer = parsed.value.drawer;
+    inst->ui_override.value.drawer_enabled = parsed.value.drawer_enabled;
+    inst->ui_override.value.drawer_eq_visible = parsed.value.drawer_eq_visible;
+    inst->ui_override.drawer_volume_visible = parsed.drawer_volume_visible;
+    inst->drawer_layout_sequence = parsed.has_drawer || parsed.has_drawer_enabled ||
+        parsed.has_drawer_eq_visible || parsed.has_drawer_volume_visible ? ++ui_layout_sequence : 0;
+    refresh_plugin_ui_customization();
     return 0;
 }
 
@@ -4873,6 +5064,7 @@ static int l_plugin_led_release(lua_State * L) {
 }
 
 static const char * const plugin_capabilities[] = {
+    "ui.music_layout", "ui.quick_drawer_layout",
     "ui.progress", "network.http.download_progress", "ui.list", "ui.settings", "ui.row_width", "ui.text_input", "ui.toast", "ui.screenshot", "ui.theme",
     "filesystem.sd", "playback.control", "playback.state", "playback.events",
     "library.artist_albums", "library.paged", "network.http.sync", "network.http.async",
@@ -4880,13 +5072,14 @@ static const char * const plugin_capabilities[] = {
     "storage.namespaced", "storage.secrets", "playback.remote", "filesystem.playlists", "library.refresh",
     "ui.home_layout", "ui.theme_refresh", "ui.reload", "ui.home_tiles", "ui.launcher_layout",
     "audio.stereo_width", "audio.crossfeed", "audio.crossfeed.angle", "playback.speed", "ui.home_background", "audio.hw_volume_curve", "ui.lock_screen", "ui.quick_toggle",
-    "data.zip", "data.html", "ui.text_view", "data.zip_image", "data.image_thumbnail", "ui.list_grid", "ui.list_showing",
+    "data.zip", "data.html", "ui.text_view", "data.zip_image", "data.image_thumbnail", "data.wallpaper", "ui.list_grid", "ui.list_showing",
     "ui.list_update", "ui.text_view_images", "ui.list_wrap", "ui.settings_list_wrap", "playback.transport_skip",
     "ui.player_layout_xml", "storage.secrets_get", "playback.progress",
     "playback.format", "playback.output_info", "playback.silent_volume", "audio.peq.transient",
     "playback.output_events", "playback.settings", "playback.ab_loop", "playback.ab_switch", "playback.http_seek",
     "audio.peq.state", "library.track_metadata", "playback.transient_volume",
-    "filesystem.file_ops", "ui.file_manager", "ui.player_menu", "ui.file_picker"
+    "filesystem.file_ops", "ui.file_manager", "ui.player_menu", "ui.file_picker",
+    "ui.startup_image"
 };
 
 static int l_plugin_has_capability(lua_State * L) {
@@ -5204,6 +5397,8 @@ typedef struct {
     int max_w;
     int max_h;
     bool source_is_file;
+    bool wallpaper;
+    bool startup_install;
     bool ok;
     const char * error; /* static string */
 } plugin_zip_image_t;
@@ -5224,6 +5419,12 @@ static void * plugin_zip_image_thread(void * arg) {
 #endif
     if (install_thread_crash_altstack) install_thread_crash_altstack(); /* see its own comment (main.c) */
     plugin_zip_image_t * job = arg;
+    if (job->startup_install) {
+        job->ok = startup_splash_install(job->zip_path[0] ? job->zip_path : NULL,
+                                         BOARD_SCREEN_WIDTH, BOARD_SCREEN_HEIGHT, &job->error);
+        atomic_store(&job->done, true);
+        return NULL;
+    }
     unsigned char * data = NULL;
     size_t len = 0;
     if (job->source_is_file) {
@@ -5262,8 +5463,14 @@ static void * plugin_zip_image_thread(void * arg) {
     if (!job->error && plugin_zip_image_cancelled(job)) {
         job->error = "cancelled";
     } else if (!job->error) {
-        job->ok = image_thumb_write_bin(data, len, job->max_w, job->max_h, job->dest_path, ARTWORK_PRIO_THUMBNAIL,
-                                        plugin_zip_image_cancelled, job, &job->error);
+        if (job->wallpaper)
+            job->ok = image_wallpaper_write_bin(data, len, job->max_w, job->max_h, job->dest_path,
+                                                ARTWORK_PRIO_THUMBNAIL, plugin_zip_image_cancelled, job,
+                                                &job->error);
+        else
+            job->ok = image_thumb_write_bin(data, len, job->max_w, job->max_h, job->dest_path,
+                                            ARTWORK_PRIO_THUMBNAIL, plugin_zip_image_cancelled, job,
+                                            &job->error);
     }
     free(data);
     atomic_store(&job->done, true);
@@ -5275,23 +5482,49 @@ static bool path_has_bin_extension(const char * path) {
     return n > 4 && strcmp(path + n - 4, ".bin") == 0;
 }
 
+/* Startup splash override. The loader consumes a board-native RGB565 frame,
+ * so its dimensions are the firmware constants even when LVGL is rotated. */
+static int plugin_image_thumbnail_start(lua_State * L, const char * source_path, const char * entry,
+                                       const char * dest_path, int max_w, int max_h,
+                                       int callback_index, bool source_is_file, bool wallpaper,
+                                       bool startup_install);
+
+static int l_plugin_set_startup_image_async(lua_State * L) {
+    const char * path = NULL;
+    if (!lua_isnoneornil(L, 1))
+        path = check_plugin_external_path(L, 1, "plugin.set_startup_image_async");
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    if (path && strlen(path) >= sizeof(plugin_zip_image.zip_path))
+        return luaL_error(L, "plugin.set_startup_image_async: path too long");
+    return plugin_image_thumbnail_start(L, path, NULL, "", BOARD_SCREEN_WIDTH,
+                                        BOARD_SCREEN_HEIGHT, 2, true, false, true);
+}
+
+static int l_plugin_has_startup_image(lua_State * L) {
+    lua_pushboolean(L, startup_splash_configured());
+    return 1;
+}
+
 /* Starts the shared ZIP/file thumbnail job after each Lua API has validated
  * its own argument layout and emitted any API-specific argument errors. */
 static int plugin_image_thumbnail_start(lua_State * L, const char * source_path, const char * entry,
                                        const char * dest_path, int max_w, int max_h,
-                                       int callback_index, bool source_is_file) {
+                                       int callback_index, bool source_is_file, bool wallpaper,
+                                       bool startup_install) {
     if (plugin_zip_image.active) return push_plugin_error(L, "busy");
 
     plugin_zip_image_t * job = &plugin_zip_image;
     memset(job, 0, sizeof(*job));
     atomic_init(&job->done, false);
     atomic_init(&job->cancel, false);
-    snprintf(job->zip_path, sizeof(job->zip_path), "%s", source_path);
+    if (source_path) snprintf(job->zip_path, sizeof(job->zip_path), "%s", source_path);
     if (entry) snprintf(job->entry, sizeof(job->entry), "%s", entry);
     snprintf(job->dest_path, sizeof(job->dest_path), "%s", dest_path);
     job->max_w = max_w;
     job->max_h = max_h;
     job->source_is_file = source_is_file;
+    job->wallpaper = wallpaper;
+    job->startup_install = startup_install;
     lua_pushvalue(L, callback_index);
     job->callback_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     job->L = plugin_main_state(L);
@@ -5326,7 +5559,7 @@ static int l_plugin_zip_image_async(lua_State * L) {
         return luaL_error(L, "plugin.zip_image_async: path too long");
     if (!path_has_bin_extension(dest_path))
         return luaL_error(L, "plugin.zip_image_async: dest_path must end in .bin");
-    return plugin_image_thumbnail_start(L, zip_path, entry, dest_path, (int) max_w, (int) max_h, 6, false);
+    return plugin_image_thumbnail_start(L, zip_path, entry, dest_path, (int) max_w, (int) max_h, 6, false, false, false);
 }
 
 static int l_plugin_image_thumbnail_async(lua_State * L) {
@@ -5340,7 +5573,40 @@ static int l_plugin_image_thumbnail_async(lua_State * L) {
     if (strlen(source_path) >= sizeof(plugin_zip_image.zip_path) || strlen(dest_path) >= sizeof(plugin_zip_image.dest_path) - 8)
         return luaL_error(L, "plugin.image_thumbnail_async: path too long");
     if (!path_has_bin_extension(dest_path)) return luaL_error(L, "plugin.image_thumbnail_async: dest_path must end in .bin");
-    return plugin_image_thumbnail_start(L, source_path, NULL, dest_path, (int) max_w, (int) max_h, 5, true);
+    return plugin_image_thumbnail_start(L, source_path, NULL, dest_path, (int) max_w, (int) max_h, 5, true, false, false);
+}
+
+static int l_plugin_image_wallpaper_async(lua_State * L) {
+    const char * source_path = check_plugin_external_path(L, 1, "plugin.image_wallpaper_async");
+    const char * dest_path = check_plugin_external_path(L, 2, "plugin.image_wallpaper_async");
+    luaL_checktype(L, 3, LUA_TFUNCTION);
+    if (strlen(source_path) >= sizeof(plugin_zip_image.zip_path) ||
+        strlen(dest_path) >= sizeof(plugin_zip_image.dest_path) - 8)
+        return luaL_error(L, "plugin.image_wallpaper_async: path too long");
+    if (!path_has_bin_extension(dest_path))
+        return luaL_error(L, "plugin.image_wallpaper_async: dest_path must end in .bin");
+    lv_display_t * display = lv_display_get_default();
+    int width = display ? lv_display_get_horizontal_resolution(display) : BOARD_SCREEN_WIDTH;
+    int height = display ? lv_display_get_vertical_resolution(display) : BOARD_SCREEN_HEIGHT;
+    if (width <= 0 || height <= 0)
+        return luaL_error(L, "plugin.image_wallpaper_async: display dimensions unavailable");
+    return plugin_image_thumbnail_start(L, source_path, NULL, dest_path, width, height, 3, true, true, false);
+}
+
+/* Board-native counterpart to image_wallpaper_async, for startup splash
+ * images which are read before LVGL applies its display rotation. */
+static int l_plugin_image_startup_async(lua_State * L) {
+    const char * source_path = check_plugin_external_path(L, 1, "plugin.image_startup_async");
+    const char * dest_path = check_plugin_external_path(L, 2, "plugin.image_startup_async");
+    luaL_checktype(L, 3, LUA_TFUNCTION);
+    if (strlen(source_path) >= sizeof(plugin_zip_image.zip_path) ||
+        strlen(dest_path) >= sizeof(plugin_zip_image.dest_path) - 8)
+        return luaL_error(L, "plugin.image_startup_async: path too long");
+    if (!path_has_bin_extension(dest_path))
+        return luaL_error(L, "plugin.image_startup_async: dest_path must end in .bin");
+    return plugin_image_thumbnail_start(L, source_path, NULL, dest_path,
+                                        BOARD_SCREEN_WIDTH, BOARD_SCREEN_HEIGHT,
+                                        3, true, true, false);
 }
 
 /* Delivers a finished job's callback (skipped when cancelled or the plugin
@@ -5358,7 +5624,11 @@ static void plugin_zip_image_poll(void) {
     if (inst && inst->aborted) return; /* frozen state: never touched again */
     if (!atomic_load(&job->cancel)) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
-        if (job->ok) {
+        if (job->startup_install) {
+            lua_pushboolean(L, job->ok);
+            if (job->ok) lua_pushnil(L);
+            else lua_pushstring(L, job->error ? job->error : "could not set startup image");
+        } else if (job->ok) {
             lua_pushstring(L, job->dest_path);
             lua_pushnil(L);
         } else {
@@ -5692,6 +5962,8 @@ static int l_plugin_show_text_view(lua_State * L) {
 }
 
 static const luaL_Reg plugin_funcs[] = {
+    { "set_music_layout",          l_plugin_set_music_layout },
+    { "set_quick_drawer_layout",   l_plugin_set_quick_drawer_layout },
     { "define",                    l_plugin_define },
     { "api_version",               l_plugin_api_version },
     { "has_capability",            l_plugin_has_capability },
@@ -5821,10 +6093,14 @@ static const luaL_Reg plugin_funcs[] = {
     { "set_interval",              l_plugin_set_interval },
     { "clear_interval",            l_plugin_clear_interval },
     { "show_lock_screen",          l_plugin_show_lock_screen },
+    { "set_startup_image_async",   l_plugin_set_startup_image_async },
+    { "has_startup_image",         l_plugin_has_startup_image },
     { "zip_read",                  l_plugin_zip_read },
     { "zip_list",                  l_plugin_zip_list },
     { "zip_image_async",           l_plugin_zip_image_async },
     { "image_thumbnail_async",     l_plugin_image_thumbnail_async },
+    { "image_wallpaper_async",     l_plugin_image_wallpaper_async },
+    { "image_startup_async",       l_plugin_image_startup_async },
     { "html_to_blocks",            l_plugin_html_to_blocks },
     { "show_text_view",            l_plugin_show_text_view },
     { NULL, NULL }
@@ -6162,6 +6438,13 @@ static void discard_failed_plugin_intervals(lua_State * L, bool aborted) {
 }
 
 static void discard_failed_plugin_resources(lua_State * L, bool aborted) {
+    for (int i = 0; i < PLUGIN_MAX_FILES; ++i) {
+        plugin_instance_t *inst = &plugin_instances[i];
+        if (!failed_load_owner_matches(inst->L, L, aborted)) continue;
+        memset(&inst->ui_override, 0, sizeof(inst->ui_override));
+        inst->music_layout_sequence = inst->drawer_layout_sequence = 0;
+    }
+    refresh_plugin_ui_customization();
     if (failed_load_owner_matches(plugin_progress_owner, L, aborted))
         plugin_progress_reset();
     bool removed_list_item = false;
@@ -6393,45 +6676,57 @@ static char (*scan_plugin_dir_sorted_names(char dir_path_out[600], int * out_cou
     DIR * d = opendir(dir_path_out);
     if (!d) return NULL; /* no .plugins folder -- nothing to do, not an error */
 
-    int total = 0;
+    char (*names)[256] = NULL;
+    size_t name_count = 0;
+    size_t capacity = 0;
     struct dirent * ent;
-    while ((ent = readdir(d)) != NULL) {
+    for (;;) {
+        errno = 0;
+        ent = readdir(d);
+        if (!ent) {
+            if (errno != 0) goto fail;
+            break;
+        }
         size_t len = strlen(ent->d_name);
         if (len < 5 || strcasecmp(ent->d_name + len - 4, ".lua") != 0) continue;
         if (gui_themes_is_legacy_theme_loader(NULL, ent->d_name)) continue;
-        total++;
-    }
-    if (total == 0) {
-        closedir(d);
-        return NULL;
-    }
-
-    char (*names)[256] = malloc((size_t) total * sizeof(*names));
-    if (!names) {
-        closedir(d);
-        return NULL;
-    }
-
-    /* rewinddir(), not a second opendir() -- same DIR* handle, standard
-     * POSIX way to restart a directory stream already open. name_count is
-     * bounded by `total` from the pass above regardless of whether the
-     * directory's real contents shift between the two passes (a file
-     * added/removed concurrently) -- defensive, not expected in practice at
-     * this point in boot. */
-    rewinddir(d);
-    int name_count = 0;
-    while (name_count < total && (ent = readdir(d)) != NULL) {
-        size_t len = strlen(ent->d_name);
-        if (len < 5 || strcasecmp(ent->d_name + len - 4, ".lua") != 0) continue;
-        if (gui_themes_is_legacy_theme_loader(NULL, ent->d_name)) continue;
+        if (name_count >= (size_t) INT_MAX) {
+            errno = EOVERFLOW;
+            goto fail;
+        }
+        if (name_count == capacity) {
+            size_t next_capacity = capacity ? capacity * 2 : 16;
+            if (next_capacity < capacity || next_capacity > (size_t) INT_MAX)
+                next_capacity = (size_t) INT_MAX;
+            if (next_capacity <= capacity || next_capacity > SIZE_MAX / sizeof(*names)) {
+                errno = EOVERFLOW;
+                goto fail;
+            }
+            void * grown = realloc(names, next_capacity * sizeof(*names));
+            if (!grown) goto fail;
+            names = grown;
+            capacity = next_capacity;
+        }
         snprintf(names[name_count], sizeof(names[0]), "%s", ent->d_name);
         name_count++;
     }
-    closedir(d);
+    if (closedir(d) != 0) {
+        free(names);
+        return NULL;
+    }
 
-    qsort(names, (size_t) name_count, sizeof(names[0]), plugin_filename_cmp);
-    *out_count = name_count;
+    if (name_count == 0) {
+        free(names);
+        return NULL;
+    }
+    qsort(names, name_count, sizeof(names[0]), plugin_filename_cmp);
+    *out_count = (int) name_count;
     return names;
+
+fail:
+    closedir(d);
+    free(names);
+    return NULL;
 }
 
 void plugin_manager_init(void) {
@@ -6687,6 +6982,8 @@ static void plugin_manager_mark_disposing(void) {
 void plugin_manager_deinit(void) {
     advance_list_registry_generation();
     plugin_manager_mark_disposing();
+    ui_customization_set_override(NULL);
+    ui_layout_sequence = 0;
     plugin_progress_reset();
     deinit_diag("plugin_manager_deinit: reset_home_layout before");
     gui_plugin_reset_home_layout();

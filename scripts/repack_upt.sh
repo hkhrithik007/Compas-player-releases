@@ -12,18 +12,18 @@ usage() {
 
 patch_bootloader_wrapper() {
     local wrapper=$1
-    if grep -Eq '^[[:space:]]*(exec[[:space:]]+)?/usr/bin/(open_hiby_bootloader|compas_bootloader)[[:space:]]*$' \
+    if grep -Eq '^[[:space:]]*(exec[[:space:]]+)?/usr/bin/(open_hiby_bootloader|compas_bootloader|compas_loader)[[:space:]]*$' \
         "$wrapper"; then
-        sed -i -E 's#^([[:space:]]*)(exec[[:space:]]+)?/usr/bin/open_hiby_bootloader([[:space:]]*)$#\1\2/usr/bin/compas_bootloader\3#' \
+        sed -i -E 's#^([[:space:]]*)(exec[[:space:]]+)?/usr/bin/(open_hiby_bootloader|compas_bootloader)([[:space:]]*)$#\1\2/usr/bin/compas_loader\4#' \
             "$wrapper"
     else
         grep -Eq '^[[:space:]]*(exec[[:space:]]+)?/usr/bin/hiby_player[[:space:]]*$' \
             "$wrapper" || return 1
-        sed -i -E 's#^([[:space:]]*)(exec[[:space:]]+)?/usr/bin/hiby_player([[:space:]]*)$#\1\2/usr/bin/compas_bootloader\3#' \
+        sed -i -E 's#^([[:space:]]*)(exec[[:space:]]+)?/usr/bin/hiby_player([[:space:]]*)$#\1\2/usr/bin/compas_loader\3#' \
             "$wrapper"
     fi
-    grep -Eq '^[[:space:]]*(exec[[:space:]]+)?/usr/bin/compas_bootloader[[:space:]]*$' "$wrapper" &&
-        ! grep -Eq '^[[:space:]]*(exec[[:space:]]+)?/usr/bin/open_hiby_bootloader[[:space:]]*$' "$wrapper"
+    grep -Eq '^[[:space:]]*(exec[[:space:]]+)?/usr/bin/compas_loader[[:space:]]*$' "$wrapper" &&
+        ! grep -Eq '^[[:space:]]*(exec[[:space:]]+)?/usr/bin/(open_hiby_bootloader|compas_bootloader)[[:space:]]*$' "$wrapper"
 }
 
 board=${BOARD:-r1}
@@ -483,7 +483,7 @@ if [[ $board == r1 ]]; then
     # An approved R1 Staging Image must already contain the bootloader handoff.
     # Refuse an older public beta instead of quietly producing a firmware that
     # bypasses the boot menu after the new bootloader binary is copied in.
-    grep -Eq '^[[:space:]]*(exec[[:space:]]+)?/usr/bin/(open_hiby_bootloader|compas_bootloader)[[:space:]]*$' "$wrapper" || {
+    grep -Eq '^[[:space:]]*(exec[[:space:]]+)?/usr/bin/(open_hiby_bootloader|compas_bootloader|compas_loader)[[:space:]]*$' "$wrapper" || {
         echo "Base OTA is not an approved R1 Staging Image (bootloader wrapper missing)" >&2
         exit 1
     }
@@ -787,8 +787,8 @@ if ! patch_bootloader_wrapper "$wrapper"; then
 fi
 
 # Remove a stale base or overlay copy so the wrapper has one bootloader path.
-rm -f "$work/root/usr/bin/open_hiby_bootloader"
-install -m 0755 "$bootloader" "$work/root/usr/bin/compas_bootloader"
+rm -f "$work/root/usr/bin/open_hiby_bootloader" "$work/root/usr/bin/compas_bootloader"
+install -m 0755 "$bootloader" "$work/root/usr/bin/compas_loader"
 
 # The player promises the Speex rate converter, which is built from the
 # pinned, redistributable SpeexDSP/alsa-plugins sources by the base-image

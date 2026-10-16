@@ -69,7 +69,7 @@
  * Never touches: audio_init(), settings_load(), volume/backlight/LED/
  * charge-limiter/timezone reapply, hostname_apply(), usb_mode detection,
  * the network_modes_changed forcing block, library_load_from_cache_only(),
- * playlist_files_migrate_to_relative(), the Subsonic-cache auto-resume/Car
+ * the Subsonic-cache auto-resume/Car
  * Mode last-track logic (documented crash history -- boot-only), update_
  * timer_cb (created once at real boot, already running continuously -- a
  * second lv_timer_create() here would duplicate it), or start_refresh_bt_

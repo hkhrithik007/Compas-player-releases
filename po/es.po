@@ -23,7 +23,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-13 10:21-0600\n"
+"POT-Creation-Date: 2026-10-16 00:10-0600\n"
 "PO-Revision-Date: 2026-10-01 00:00+0000\n"
 "Last-Translator: Machine draft\n"
 "Language-Team: Spanish\n"
@@ -158,6 +158,69 @@ msgstr "Nombre de perfil inválido"
 msgid "Could not start the update."
 msgstr "No se pudo iniciar la búsqueda de actualizaciones."
 
+#, fuzzy
+msgid "Update failed."
+msgstr "Actualización disponible"
+
+msgid "Could not prepare secure update storage."
+msgstr ""
+
+msgid "Could not download the release checksums."
+msgstr "No se pudieron descargar las sumas de verificación."
+
+msgid "The release does not provide a valid player checksum."
+msgstr ""
+
+#, fuzzy
+msgid "The release checksum does not match the published asset digest."
+msgstr "La versión no tiene suma de verificación para la imagen de este equipo."
+
+#, fuzzy
+msgid "The latest player release changed. Check again."
+msgstr "El archivo de actualización en la tarjeta SD cambió. Descárgalo de nuevo."
+
+msgid "The player image exceeds the safe size limit."
+msgstr ""
+
+#, fuzzy
+msgid "Not enough internal storage for the player update."
+msgstr "No hay espacio suficiente en la tarjeta SD para la actualización."
+
+#, fuzzy
+msgid "The player download did not complete."
+msgstr "La descarga no se completó. Revisa el Wi-Fi e inténtalo de nuevo."
+
+#, fuzzy
+msgid "The downloaded player failed SHA-256 verification."
+msgstr "La imagen descargada no pasó la verificación y se eliminó."
+
+msgid "Place a valid player executable at SD/.compas/compas_player."
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update check."
+msgstr "No se pudo iniciar la búsqueda de actualizaciones."
+
+#, fuzzy
+msgid "Another update is already active."
+msgstr "Ya hay una actualización en curso."
+
+#, fuzzy
+msgid "Check for a player update first."
+msgstr "Buscar actualización en línea"
+
+#, fuzzy
+msgid "Not enough memory."
+msgstr "No hay memoria suficiente para conectar"
+
+#, fuzzy
+msgid "Could not start the player download."
+msgstr "No se pudo iniciar la descarga."
+
+#, fuzzy
+msgid "Could not start the SD player update."
+msgstr "No se pudo iniciar la actualización del plugin."
+
 msgid "Screenshots unavailable"
 msgstr "Capturas no disponibles"
 
@@ -172,6 +235,66 @@ msgstr "Falló la captura (framebuffer)"
 
 msgid "Screenshot failed (worker)"
 msgstr "Falló la captura (proceso)"
+
+msgid "Files"
+msgstr "Archivos"
+
+msgid "Artists"
+msgstr "Artistas"
+
+msgid "Albums"
+msgstr "Álbumes"
+
+msgid "Album Artist"
+msgstr "Artista del álbum"
+
+msgid "Genres"
+msgstr "Géneros"
+
+msgid "All Songs"
+msgstr "Todas las canciones"
+
+msgid "Playlists"
+msgstr "Listas"
+
+msgid "Sound"
+msgstr "Sonido"
+
+msgid "Playback"
+msgstr "Reproducción"
+
+msgid "Library"
+msgstr "Biblioteca"
+
+msgid "Wi-Fi"
+msgstr "Wi-Fi"
+
+msgid "Bluetooth"
+msgstr "Bluetooth"
+
+msgid "Sleep Timer"
+msgstr "Temporizador de sueño"
+
+msgid "Crossfade"
+msgstr "Crossfade"
+
+msgid "AirPlay"
+msgstr "AirPlay"
+
+msgid "DLNA"
+msgstr "DLNA"
+
+msgid "Gapless"
+msgstr "Gapless"
+
+msgid "Remote Control"
+msgstr "Control remoto"
+
+msgid "Car Mode"
+msgstr "Modo auto"
+
+msgid "Plugins"
+msgstr "Plugins"
 
 #, fuzzy, c-format
 msgid "Page %d of %d"
@@ -245,9 +368,6 @@ msgstr ""
 
 msgid "Insert an SD card to download the update."
 msgstr "Inserta una tarjeta SD para descargar la actualización."
-
-msgid "Could not download the release checksums."
-msgstr "No se pudieron descargar las sumas de verificación."
 
 msgid "The release has no checksum for this device's image."
 msgstr "La versión no tiene suma de verificación para la imagen de este equipo."
@@ -706,9 +826,6 @@ msgstr "Agregar a lista"
 msgid "+ New Playlist"
 msgstr "+ Nueva lista"
 
-msgid "Files"
-msgstr "Archivos"
-
 msgid "Audio"
 msgstr "Audio"
 
@@ -726,9 +843,6 @@ msgid "%lld track"
 msgid_plural "%lld tracks"
 msgstr[0] "%lld pista"
 msgstr[1] "%lld pistas"
-
-msgid "All Songs"
-msgstr "Todas las canciones"
 
 msgid "Recently Added"
 msgstr "Agregadas recientemente"
@@ -787,23 +901,11 @@ msgstr "La biblioteca cambió. Abre el álbum otra vez."
 msgid "Cannot load album tracks"
 msgstr "No se pueden cargar las pistas del álbum"
 
-msgid "Artists"
-msgstr "Artistas"
-
-msgid "Albums"
-msgstr "Álbumes"
-
-msgid "Album Artist"
-msgstr "Artista del álbum"
-
 #, c-format
 msgid "%d song"
 msgid_plural "%d songs"
 msgstr[0] "%d canción"
 msgstr[1] "%d canciones"
-
-msgid "Genres"
-msgstr "Géneros"
 
 msgid "Recently Played"
 msgstr "Reproducidas recientemente"
@@ -868,9 +970,6 @@ msgstr "Crea una lista arriba o copia una a la carpeta Playlists de la tarjeta S
 msgid "SD card not available"
 msgstr "Tarjeta SD no disponible"
 
-msgid "Playlists"
-msgstr "Listas"
-
 msgid "Not enough memory to load CUE tracks"
 msgstr "No hay memoria suficiente para cargar las pistas CUE"
 
@@ -920,21 +1019,11 @@ msgstr "Usa Ajustes > Actualizar base de datos de música"
 msgid "Later"
 msgstr "Después"
 
-msgid "Library migration pending. Favourites and play history will be kept"
-msgstr "Migración de la biblioteca pendiente. Se conservarán favoritos e historial"
-
 msgid "No SD card"
 msgstr "Sin tarjeta SD"
 
 msgid "Library loaded"
 msgstr "Biblioteca cargada"
-
-msgid ""
-"Migrating\n"
-"music database..."
-msgstr ""
-"Migrando\n"
-"base de datos de música..."
 
 msgid ""
 "Refreshing\n"
@@ -956,9 +1045,6 @@ msgid ""
 msgstr ""
 "Actualizando\n"
 "base de datos de música..."
-
-msgid "Preparing database migration..."
-msgstr "Preparando la migración de la base de datos..."
 
 msgid "Preparing metadata refresh..."
 msgstr "Preparando la actualización de metadatos..."
@@ -1076,9 +1162,6 @@ msgstr ""
 "Guardando la base de datos de música\n"
 "Puede tardar en bibliotecas grandes"
 
-msgid "Library migration failed. Old library intact. Use Settings > Update Music Database to retry"
-msgstr "Falló la migración de la biblioteca. La anterior sigue intacta. Usa Ajustes > Actualizar base de datos de música para reintentar"
-
 msgid "Library unavailable. Use Settings > Update Music Database to rebuild"
 msgstr "Biblioteca no disponible. Usa Ajustes > Actualizar base de datos de música para reconstruirla"
 
@@ -1090,12 +1173,6 @@ msgstr "No se pudieron leer algunas canciones"
 
 msgid "Metadata refreshed"
 msgstr "Metadatos actualizados"
-
-msgid "Library migrated. Old database cleanup will retry"
-msgstr "Biblioteca migrada. Se reintentará limpiar la base de datos anterior"
-
-msgid "Library migrated. Favourites and play history kept"
-msgstr "Biblioteca migrada. Se conservaron favoritos e historial"
 
 msgid "Library recovered and saved, some folders could not be read"
 msgstr "Biblioteca recuperada y guardada; no se pudieron leer algunas carpetas"
@@ -1163,6 +1240,11 @@ msgstr "Esto elimina todo en la tarjeta de forma permanente. No se puede deshace
 
 msgid "Format"
 msgstr "Formatear"
+
+#
+#, fuzzy
+msgid "Could not restart into the boot selector"
+msgstr "No se pudo crear la carpeta"
 
 #, fuzzy
 msgid "An update is in progress. Please wait."
@@ -1417,9 +1499,6 @@ msgstr "Sin definir"
 msgid "DNS Settings"
 msgstr "Ajustes de DNS"
 
-msgid "Wi-Fi"
-msgstr "Wi-Fi"
-
 msgid "Manual SSID Entry"
 msgstr "SSID manual"
 
@@ -1601,6 +1680,17 @@ msgstr "No se pudo cambiar a %s"
 msgid "USB Mode"
 msgstr "Modo USB"
 
+#, fuzzy
+msgid "Failed to update USB charging"
+msgstr "No se pudo eliminar el perfil"
+
+msgid "USB charging setting is busy"
+msgstr ""
+
+#, fuzzy
+msgid "Could not start USB charging update"
+msgstr "No se pudo iniciar la actualización del plugin."
+
 msgid "Leave USB DAC mode?"
 msgstr "¿Salir del modo DAC USB?"
 
@@ -1629,9 +1719,6 @@ msgstr "Entrada USB: %s · %u bits"
 #, c-format
 msgid "DAC path: %s · %u-bit"
 msgstr "Ruta DAC: %s · %u bits"
-
-msgid "Bluetooth"
-msgstr "Bluetooth"
 
 msgid "Bluetooth is off"
 msgstr "Bluetooth apagado"
@@ -1679,9 +1766,6 @@ msgstr "Activa el Wi-Fi para acceder"
 msgid "Web Server is busy"
 msgstr "El servidor web está ocupado"
 
-msgid "AirPlay"
-msgstr "AirPlay"
-
 msgid "When on, this device is visible to AirPlay senders on your Wi-Fi network -- stream audio from an iPhone, iPad, or Mac to be played through this device's own output."
 msgstr "Si está activado, este equipo es visible para emisores AirPlay en tu red Wi-Fi: envía audio desde un iPhone, iPad o Mac para reproducirlo por su propia salida."
 
@@ -1699,9 +1783,6 @@ msgstr "Si está activado, este equipo es visible para apps controladoras DLNA/U
 
 msgid "Service is busy"
 msgstr "El servicio está ocupado"
-
-msgid "DLNA"
-msgstr "DLNA"
 
 msgid "Unavailable"
 msgstr "No disponible"
@@ -1744,9 +1825,6 @@ msgstr "Las apps y navegadores que usen el PIN actual necesitarán el nuevo para
 
 msgid "Generate"
 msgstr "Generar"
-
-msgid "Remote Control"
-msgstr "Control remoto"
 
 msgid "Connection PIN"
 msgstr "PIN de conexión"
@@ -2087,8 +2165,8 @@ msgid "Crossfeed: %d%%"
 msgstr ""
 
 #, c-format
-msgid "Pre-Amp: %+.2f dB"
-msgstr "Preamplificador: %+.2f dB"
+msgid "%+.2f dB"
+msgstr "%+.2f dB"
 
 #, c-format
 msgid "%.0f Hz"
@@ -2139,6 +2217,82 @@ msgstr ""
 "¿Actualizar con %s?\n"
 "El equipo se reiniciará en modo de recuperación."
 
+msgid ""
+"Install the player update from the SD card?\n"
+"\n"
+"Updates the player and restarts the device. Firmware, fonts, and artwork are unchanged."
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update"
+msgstr "No se pudo iniciar la búsqueda de actualizaciones."
+
+#, fuzzy
+msgid "Updating player"
+msgstr "Actualizando plugins"
+
+#, fuzzy
+msgid "Starting update"
+msgstr "Preparando actualización"
+
+msgid "Connect to Wi-Fi before downloading the player update"
+msgstr ""
+
+msgid "Starting download"
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update check"
+msgstr "No se pudo iniciar la búsqueda de actualizaciones."
+
+#, fuzzy
+msgid "Checking for player updates"
+msgstr "Buscando actualizaciones"
+
+msgid "Check for online update"
+msgstr "Buscar actualización en línea"
+
+msgid "Install from SD card"
+msgstr "Instalar desde tarjeta SD"
+
+#, fuzzy
+msgid "Download & Install"
+msgstr "Falló la descarga"
+
+#, fuzzy
+msgid "Install & Restart"
+msgstr "Instalar y reiniciar"
+
+#, fuzzy
+msgid "Downloading player update"
+msgstr "Descargando actualización"
+
+#, fuzzy
+msgid "Installing player update"
+msgstr "Instalando plugin"
+
+#, fuzzy
+msgid "Checking the latest release"
+msgstr "Revisando el archivo en la tarjeta SD"
+
+msgid "Replacing the player and preparing to restart"
+msgstr ""
+
+#, c-format
+msgid ""
+"Available player release: %s.\n"
+"Installed: %s\n"
+"\n"
+"Download and install? This updates the player and restarts the device. Firmware, fonts, and artwork are unchanged."
+msgstr ""
+
+msgid "Player updated successfully"
+msgstr ""
+
+#, fuzzy
+msgid "Player update failed"
+msgstr "Error de reproducción: falló la salida de audio"
+
 #, c-format
 msgid ""
 "Firmware release %s is downloaded and verified.\n"
@@ -2168,12 +2322,6 @@ msgstr "Descargando actualización"
 #, fuzzy
 msgid "Update saved. Connect to Wi-Fi, then install from Firmware Update > Install from SD card."
 msgstr "Actualización guardada. Instálala cuando quieras desde Actualizar firmware > Instalar desde tarjeta SD."
-
-msgid "Check for online update"
-msgstr "Buscar actualización en línea"
-
-msgid "Install from SD card"
-msgstr "Instalar desde tarjeta SD"
 
 msgid "Download"
 msgstr "Descargar"
@@ -2272,8 +2420,8 @@ msgstr "Capturas (Encendido + Vol. -)"
 msgid "Enable debug logging"
 msgstr "Activar registro de depuración"
 
-msgid "Load covers during playback (Experimental)"
-msgstr "Cargar carátulas al reproducir (experimental)"
+msgid "Reboot to bootloader"
+msgstr ""
 
 msgid "Custom color"
 msgstr "Color personalizado"
@@ -2292,6 +2440,12 @@ msgstr "Igualar la carátula"
 
 msgid "Takes its color from the cover of the playing track"
 msgstr "Toma su color de la carátula de la pista actual"
+
+msgid "Tint startup image"
+msgstr "Teñir imagen de inicio"
+
+msgid "Uses the accent color for the default splash."
+msgstr "Usa el color de acento para la imagen de inicio predeterminada."
 
 msgid "Presets"
 msgstr "Predefinidos"
@@ -2348,9 +2502,6 @@ msgstr "Volumen de inicio"
 msgid "Limits the player volume, including buttons, remote controls and plugins."
 msgstr ""
 
-msgid "Car Mode"
-msgstr "Modo auto"
-
 msgid "Car Mode is disabled."
 msgstr "El modo auto está desactivado."
 
@@ -2392,9 +2543,6 @@ msgstr "Tiempo restante: %d:%02d:%02d"
 #, c-format
 msgid "Time remaining: %d:%02d"
 msgstr "Tiempo restante: %d:%02d"
-
-msgid "Sleep Timer"
-msgstr "Temporizador de sueño"
 
 msgid "Enable Sleep Timer"
 msgstr "Activar temporizador de sueño"
@@ -2469,12 +2617,6 @@ msgstr "Efectos de sonido"
 msgid "Download Profiles"
 msgstr "Descargar perfiles"
 
-msgid "Crossfade"
-msgstr "Crossfade"
-
-msgid "Gapless"
-msgstr "Gapless"
-
 msgid "Buttons & Remote"
 msgstr "Botones y control remoto"
 
@@ -2484,8 +2626,9 @@ msgstr "Reproducción y controles"
 msgid "Equalizer"
 msgstr "Ecualizador"
 
-msgid "Sound"
-msgstr "Sonido"
+#, fuzzy
+msgid "Crossfeed"
+msgstr "Crossfade"
 
 msgid "Power"
 msgstr "Energía"
@@ -2596,9 +2739,6 @@ msgstr "Modificados recientemente"
 msgid "Release Year (oldest first)"
 msgstr "Año de lanzamiento (más antiguo primero)"
 
-msgid "Albums (main list)"
-msgstr "Álbumes (lista principal)"
-
 msgid "Files use modification dates. Albums use the newest track added; missing release years sort last. Update Music Database once to read years from existing files."
 msgstr "Los archivos usan la fecha de modificación. Los álbumes usan la pista agregada más reciente; los que no tienen año van al final. Actualiza la base de datos de música una vez para leer los años de los archivos existentes."
 
@@ -2610,9 +2750,6 @@ msgstr "Actualizar todos los metadatos"
 
 msgid "Refresh All Covers"
 msgstr "Actualizar todas las carátulas"
-
-msgid "Library"
-msgstr "Biblioteca"
 
 msgid "Animation Speed"
 msgstr "Velocidad de animación"
@@ -2626,14 +2763,75 @@ msgstr "QWERTY"
 msgid "Keyboard"
 msgstr "Teclado"
 
-msgid "Drawer Volume Slider"
-msgstr "Control de volumen del panel"
+msgid "Plugins can override these saved preferences."
+msgstr "Los plugins pueden sobrescribir estas preferencias guardadas."
+
+msgid "Quick Drawer"
+msgstr "Panel rápido"
+
+msgid "Enabled"
+msgstr "Activado"
+
+msgid "Volume Slider"
+msgstr "Control deslizante de volumen"
+
+msgid "Reorder Items"
+msgstr "Reordenar elementos"
+
+#, fuzzy
+msgid "Volume"
+msgstr "Subir volumen"
+
+msgid "Clock"
+msgstr "Reloj"
+
+msgid "Wired Headphones"
+msgstr ""
+
+#, fuzzy
+msgid "Bluetooth Audio (A2DP)"
+msgstr "Bluetooth apagado"
+
+#, fuzzy
+msgid "USB Audio"
+msgstr "Audio"
+
+#, fuzzy
+msgid "Playback Status"
+msgstr "Reproducción"
+
+#, fuzzy
+msgid "Bluetooth Codec"
+msgstr "Modo DAC Bluetooth"
+
+#, fuzzy
+msgid "Battery Icon"
+msgstr "Porcentaje de batería"
+
+msgid "Left"
+msgstr ""
+
+msgid "Center"
+msgstr ""
+
+msgid "Right"
+msgstr ""
+
+#, fuzzy
+msgid "Clock Position"
+msgstr "Posición"
 
 msgid "Battery Percentage"
 msgstr "Porcentaje de batería"
 
+msgid "Top Bar"
+msgstr ""
+
 msgid "Artist Images"
 msgstr "Imágenes de artistas"
+
+msgid "Themes"
+msgstr "Temas"
 
 msgid "Appearance"
 msgstr "Apariencia"
@@ -2674,6 +2872,11 @@ msgstr "Carga segura (500 mA)"
 msgid "LED charge indicator"
 msgstr "Indicador LED de carga"
 
+msgid ""
+"Disable charging\n"
+"in USB DAC mode"
+msgstr ""
+
 msgid "Charging"
 msgstr "Carga"
 
@@ -2692,9 +2895,6 @@ msgstr "Ajustar hora"
 msgid "24-Hour Clock"
 msgstr "Reloj de 24 horas"
 
-msgid "Clock"
-msgstr "Reloj"
-
 msgid "Save"
 msgstr "Guardar"
 
@@ -2709,6 +2909,10 @@ msgstr "Mantenimiento"
 
 msgid "Firmware Update"
 msgstr "Actualizar firmware"
+
+#, fuzzy
+msgid "Player Update"
+msgstr "Diseño del reproductor"
 
 msgid "Plugins & Layouts"
 msgstr "Plugins y diseños"
@@ -2728,17 +2932,14 @@ msgstr "Ajustes"
 msgid "Turn off ADB first (Settings > System > USB Mode), then enable USB DAC from here."
 msgstr "Desactiva primero ADB (Ajustes > Sistema > Modo USB) y luego activa el DAC USB desde aquí."
 
-msgid "Plugins"
-msgstr "Plugins"
-
-msgid "Themes"
-msgstr "Temas"
-
 msgid "Now Playing layouts"
 msgstr "Diseños del reproductor"
 
 msgid "More"
 msgstr "Más"
+
+msgid "0 dB"
+msgstr "0 dB"
 
 msgid "Combined response (dB) · EQ off"
 msgstr "Respuesta combinada (dB) · EQ apagado"
@@ -2845,14 +3046,32 @@ msgstr ""
 msgid "Enable band"
 msgstr "Activar banda"
 
-msgid "Reset to defaults"
-msgstr "Restablecer valores"
+#, fuzzy
+msgid "Crossfeed angle"
+msgstr "Crossfade"
 
-msgid "Parametric EQ"
-msgstr "EQ paramétrico"
+msgid ""
+"No delay\n"
+"30°\n"
+"45°\n"
+"60°\n"
+"90°"
+msgstr ""
+
+msgid "Crossfeed blends a filtered signal from the opposite channel and works independently of PEQ. With No delay, identical left and right signals are affected very little."
+msgstr ""
+
+msgid "PEQ"
+msgstr "PEQ"
 
 msgid "Frequency"
 msgstr "Frecuencia"
+
+msgid "Pre-Amp"
+msgstr "Preamplificador"
+
+msgid "Reset to defaults"
+msgstr "Restablecer valores"
 
 msgid "48 kHz reference"
 msgstr "Referencia de 48 kHz"
@@ -3317,6 +3536,46 @@ msgstr "Controles de energía"
 
 msgid "Playback and device actions"
 msgstr "Reproducción y acciones del equipo"
+
+#~ msgid "Parametric EQ"
+#~ msgstr "EQ paramétrico"
+
+#~ msgid "Library migration pending. Favourites and play history will be kept"
+#~ msgstr "Migración de la biblioteca pendiente. Se conservarán favoritos e historial"
+
+#~ msgid ""
+#~ "Migrating\n"
+#~ "music database..."
+#~ msgstr ""
+#~ "Migrando\n"
+#~ "base de datos de música..."
+
+#~ msgid "Preparing database migration..."
+#~ msgstr "Preparando la migración de la base de datos..."
+
+#~ msgid "Library migration failed. Old library intact. Use Settings > Update Music Database to retry"
+#~ msgstr "Falló la migración de la biblioteca. La anterior sigue intacta. Usa Ajustes > Actualizar base de datos de música para reintentar"
+
+#~ msgid "Library migrated. Old database cleanup will retry"
+#~ msgstr "Biblioteca migrada. Se reintentará limpiar la base de datos anterior"
+
+#~ msgid "Library migrated. Favourites and play history kept"
+#~ msgstr "Biblioteca migrada. Se conservaron favoritos e historial"
+
+#~ msgid "Load covers during playback (Experimental)"
+#~ msgstr "Cargar carátulas al reproducir (experimental)"
+
+#~ msgid "Albums (main list)"
+#~ msgstr "Álbumes (lista principal)"
+
+#~ msgid "Visible"
+#~ msgstr "Visible"
+
+#~ msgid "Move Up"
+#~ msgstr "Mover arriba"
+
+#~ msgid "Move Down"
+#~ msgstr "Mover abajo"
 
 #~ msgid "Back"
 #~ msgstr "Atrás"

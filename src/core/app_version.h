@@ -6,5 +6,7 @@
  * switching RELEASE_LABEL cannot leave an incremental build with stale text. */
 const char * app_version_label(void);
 const char * app_build_identifier(void);
+/* Retained in the executable for model-safe player-only updates. */
+const char * app_board_marker(void);
 
 #endif

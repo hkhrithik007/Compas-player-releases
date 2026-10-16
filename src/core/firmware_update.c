@@ -328,8 +328,8 @@ static bool prepare_recovery(const char * path) {
         return finish_update(false, TR("Saving data failed. Recovery remains selected; keep the update file and check .compas/ota/update.log."));
     if (!set_phase(FIRMWARE_UPDATE_REBOOT, "requesting recovery reboot"))
         return finish_update(false, TR("Recovery remains selected. Keep the update file; saving diagnostics failed."));
-    /* Keep the validated SD log open across the handoff. If a standalone
-     * reboot syscall fails, finish_update() can still record the error; if
+    /* Keep the validated SD log open across the handoff. If the standalone
+     * reboot syscall fails, finish_update() can record the error; if
      * supervised, _exit() closes it before the parent can reap the player. */
     if (fsync(phase_log_fd) != 0)
         return finish_update(false, TR("Recovery remains selected. Keep the update file; saving diagnostics failed."));

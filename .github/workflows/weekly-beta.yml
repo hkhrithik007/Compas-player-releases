@@ -57,20 +57,20 @@ jobs:
           make bootloader BOARD=r3proii
           make -j2 target BOARD=r3ii_2025 RELEASE_LABEL="$RELEASE_LABEL"
           make bootloader BOARD=r3ii_2025
-          file compas_player_target compas_bootloader \
-            compas_player_target_r3proii compas_bootloader_r3proii \
-            compas_player_target_r3ii_2025 compas_bootloader_r3ii_2025
+          file compas_player_target compas_loader \
+            compas_player_target_r3proii compas_loader_r3proii \
+            compas_player_target_r3ii_2025 compas_loader_r3ii_2025
           mipsel-linux-musl-readelf -h compas_player_target \
             | grep 'Machine:.*MIPS' >/dev/null
-          mipsel-linux-musl-readelf -h compas_bootloader \
+          mipsel-linux-musl-readelf -h compas_loader \
             | grep 'Machine:.*MIPS' >/dev/null
           mipsel-linux-musl-readelf -h compas_player_target_r3proii \
             | grep 'Machine:.*MIPS' >/dev/null
-          mipsel-linux-musl-readelf -h compas_bootloader_r3proii \
+          mipsel-linux-musl-readelf -h compas_loader_r3proii \
             | grep 'Machine:.*MIPS' >/dev/null
           mipsel-linux-musl-readelf -h compas_player_target_r3ii_2025 \
             | grep 'Machine:.*MIPS' >/dev/null
-          mipsel-linux-musl-readelf -h compas_bootloader_r3ii_2025 \
+          mipsel-linux-musl-readelf -h compas_loader_r3ii_2025 \
             | grep 'Machine:.*MIPS' >/dev/null
           for player in compas_player_target compas_player_target_r3proii \
               compas_player_target_r3ii_2025; do
@@ -110,14 +110,14 @@ jobs:
           set -euo pipefail
           mkdir -p release
           scripts/repack_upt.sh base/r1.upt compas_player_target \
-            compas_bootloader release/r1.upt
+            compas_loader release/r1.upt
           cp compas_player_target release/compas_player
           BOARD=r3proii scripts/repack_upt.sh base/r3proii.upt \
-            compas_player_target_r3proii compas_bootloader_r3proii \
+            compas_player_target_r3proii compas_loader_r3proii \
             release/r3proii.upt
           cp compas_player_target_r3proii release/compas_player_r3proii
           BOARD=r3ii_2025 scripts/repack_upt.sh base/r3ii_2025.upt \
-            compas_player_target_r3ii_2025 compas_bootloader_r3ii_2025 \
+            compas_player_target_r3ii_2025 compas_loader_r3ii_2025 \
             release/r3ii_2025.upt
           cp compas_player_target_r3ii_2025 release/compas_player_r3ii_2025
           (
@@ -214,7 +214,7 @@ jobs:
             echo
             echo "### Update only Compás Player"
             echo
-            echo "Copy **compas_player** to **SD/.compas/compas_player** for the R1, **compas_player_r3proii** to **SD/.compas/compas_player** for the R3 Pro II, or **compas_player_r3ii_2025** to **SD/.compas/compas_player** for the R3II 2025, replacing the existing file, then reboot the matching device."
+            echo "Copy **compas_player** to **SD/.compas/compas_player** for the R1, **compas_player_r3proii** to **SD/.compas/compas_player** for the R3 Pro II, or **compas_player_r3ii_2025** to **SD/.compas/compas_player** for the R3II 2025, replacing the existing file, then choose **Settings > Updates > Player Update > Install from SD card** on the matching device."
             echo
             echo "Checksums are attached in **SHA256SUMS**."
           } > release/RELEASE_NOTES.md

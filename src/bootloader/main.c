@@ -1,4 +1,4 @@
-/* Bootloader entry: installs a pending SD update, then supervises the internal
+/* Bootloader entry: selects and supervises the internal
  * Compás player. Reboots on unexpected exits for crash recovery, or powers
  * off on a clean exit. */
 
@@ -7,6 +7,13 @@
 #include "fb_draw.h"
 #include "idle_shutdown.h"
 #include "boot_trace.h"
+#include "boot_tuning.h"
+#include "reboot_handoff.h"
+#include "sd_ready.h"
+#include "compas_loader.h"
+#include "internal_storage.h"
+#include "selector_controller.h"
+#include "subprocess.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -24,9 +31,6 @@
 
 extern char ** environ;
 
-/* Background JPEG image from theme assets used for the boot splash. */
-#define BOOTLOADER_BG_PATH "/usr/resource/litegui/theme2/boot_animation/en/0.jpg"
-
 #define COLOR_BG fb_rgb(0x12, 0x12, 0x12)
 
 static boot_trace_t boot_trace = BOOT_TRACE_INITIALIZER;
@@ -34,6 +38,9 @@ static boot_trace_t boot_trace = BOOT_TRACE_INITIALIZER;
 static void bootloader_checkpoint(const char *step) {
     (void)boot_trace_checkpoint(&boot_trace, step);
 }
+
+/* Shared filesystem-repair runner records through this loader trace. */
+void boot_checkpoint(const char *step) { bootloader_checkpoint(step); }
 
 static void record_shutdown_phase(const char * phase, int error);
 
@@ -212,49 +219,27 @@ static void record_player_exit(int status) {
     close(fd);
 }
 
-static bool init_is_busybox(void) {
-    char executable[256];
-    ssize_t length = readlink("/proc/1/exe", executable, sizeof(executable) - 1);
-    if (length <= 0 || length >= (ssize_t) sizeof(executable) - 1) return false;
-    executable[length] = '\0';
-    const char * name = strrchr(executable, '/');
-    return strcmp(name ? name + 1 : executable, "busybox") == 0;
+static void before_init_shutdown_request(void) {
+    record_shutdown_phase("requesting init reboot", 0);
+    /* Close persistent trace storage before init runs its unmount hooks. */
+    boot_trace_close(&boot_trace);
 }
 
-static void reboot_device(void) {
-    sleep(1);
+static void reboot_device(bool requested_restart) {
+    if (!requested_restart) sleep(1);
     release_sd_card();
     /* The child has been reaped, closing its audio and storage handles.
      * Ask BusyBox init to run rcK and the remaining shutdown hooks. Sending
      * SIGTERM here cannot be misread as a clean player exit/poweroff.
      * Keep the normal SIGTERM disposition: init eventually terminates this
      * supervisor too. The fallback covers hooks that stall before that. */
-    if (init_is_busybox()) {
-        struct sigaction action = {0};
-        sigset_t unblocked;
-        action.sa_handler = SIG_DFL;
-        sigemptyset(&action.sa_mask);
-        sigemptyset(&unblocked);
-        sigaddset(&unblocked, SIGTERM);
-        /* An ignored or blocked signal can survive the launcher exec. Init
-         * must be able to terminate us after its shutdown hooks finish. */
-        if (sigaction(SIGTERM, &action, NULL) != 0 ||
-            sigprocmask(SIG_UNBLOCK, &unblocked, NULL) != 0) {
-            record_shutdown_phase("init signal setup failed; direct fallback", errno);
-        } else {
-            record_shutdown_phase("requesting init reboot", 0);
-            /* Release writable userdata descriptors before init's unmount and
-             * read-only remount hooks. Fallback diagnostics still use the
-             * existing short-lived player_exit log writes. */
-            boot_trace_close(&boot_trace);
-            if (kill(1, SIGTERM) == 0) {
-                struct timespec remaining = {20, 0};
-                while (nanosleep(&remaining, &remaining) < 0 && errno == EINTR) {}
-                record_shutdown_phase("init reboot timed out; direct fallback", 0);
-            } else {
-                record_shutdown_phase("init reboot request failed; direct fallback", errno);
-            }
-        }
+    reboot_handoff_result_t handoff = reboot_request_orderly_shutdown(before_init_shutdown_request);
+    if (handoff == REBOOT_HANDOFF_REQUESTED) {
+        record_shutdown_phase("init reboot timed out; direct fallback", 0);
+    } else if (handoff == REBOOT_HANDOFF_SIGNAL_SETUP_FAILED) {
+        record_shutdown_phase("init signal setup failed; direct fallback", errno);
+    } else if (handoff == REBOOT_HANDOFF_REQUEST_FAILED) {
+        record_shutdown_phase("init reboot request failed; direct fallback", errno);
     } else {
         record_shutdown_phase("unsupported init; direct fallback", 0);
     }
@@ -271,48 +256,12 @@ static void poweroff_device(void) {
     reboot(RB_POWER_OFF);
     /* If poweroff syscall fails, pause indefinitely rather than rebooting. */
     record_shutdown_phase("direct poweroff failed", errno);
-    perror("compas_bootloader: poweroff syscall failed");
+    perror("compas_loader: poweroff syscall failed");
     for (;;) pause();
 }
 
-/* Measured OOM, about 30s after boot: the player (~20 MB RSS) was killed in
- * fat_write_begin. free was the 954 KB min watermark, writeback was 9.4 MB,
- * dirty 0.85 MB, and the file LRU was unreclaimable. Defaults (dirty_ratio
- * 20 and dirty_background_ratio 10 of ~58 MB, expire 30s, min_free_kbytes
- * 954) let writeback pin more RAM than the player can spare. Cap dirty pages
- * at a few MB so writers stall first, expire a little sooner so that 30s
- * burst cannot rebuild, and start reclaim slightly earlier. Best-effort:
- * a failure is logged and boot continues. */
-static void tune_vm_writeback(void) {
-    static const struct { const char * path; const char * value; } settings[] = {
-        /* Flusher starts at 1 MiB instead of ~10% (~6 MiB). */
-        { "/proc/sys/vm/dirty_background_bytes", "1048576\n" },
-        /* Writers block at 4 MiB instead of ~20% (~12 MiB). Must stay above
-         * the background threshold; 4 MiB is under the 9.4 MiB of writeback
-         * that was stuck when the player was killed. */
-        { "/proc/sys/vm/dirty_bytes", "4194304\n" },
-        /* 15s instead of 30s: still coarse on a slow card, but dirty pages
-         * cannot sit for the whole window that matched the OOM. */
-        { "/proc/sys/vm/dirty_expire_centisecs", "1500\n" },
-        /* 2560 KB. The kill happened with free == the 954 KB watermark;
-         * this starts reclaim ~1.6 MB sooner and is ~4% of 58 MB. */
-        { "/proc/sys/vm/min_free_kbytes", "2560\n" },
-    };
-    for (size_t i = 0; i < sizeof settings / sizeof settings[0]; i++) {
-        int fd = open(settings[i].path, O_WRONLY | O_CLOEXEC);
-        if (fd < 0) {
-            fprintf(stderr, "compas_bootloader: %s: %s\n", settings[i].path, strerror(errno));
-            continue;
-        }
-        size_t len = strlen(settings[i].value);
-        ssize_t wrote = write(fd, settings[i].value, len);
-        if (wrote < 0)
-            fprintf(stderr, "compas_bootloader: write %s failed: %s\n", settings[i].path, strerror(errno));
-        else if ((size_t) wrote != len)
-            fprintf(stderr, "compas_bootloader: write %s short (%zd)\n", settings[i].path, wrote);
-        close(fd);
-    }
-}
+void compas_loader_restart(void) { reboot_device(true); }
+void compas_loader_poweroff(void) { poweroff_device(); }
 
 /* A clean player exit powers off; signals and non-zero exits reboot. */
 static void run_player_supervised(const char * player_path) {
@@ -320,16 +269,16 @@ static void run_player_supervised(const char * player_path) {
     pid_t pid = fork();
     if (pid < 0) {
         /* If fork fails, attempt direct execve before rebooting. */
-        perror("compas_bootloader: fork failed, execve'ing directly (no reboot-on-crash this launch)");
+        perror("compas_loader: fork failed, execve'ing directly (no reboot-on-crash this launch)");
         execve(player_path, (char * []) { (char *) player_path, NULL }, environ);
-        perror("compas_bootloader: execve failed");
-        reboot_device();
+        perror("compas_loader: execve failed");
+        reboot_device(false);
     }
 
     if (pid == 0) {
         execve(player_path, (char * []) { (char *) player_path, NULL }, environ);
         /* Fall back to the packaged internal player if the installed copy fails. */
-        perror("compas_bootloader: execve failed, falling back to packaged player");
+        perror("compas_loader: execve failed, falling back to packaged player");
         if (strcmp(player_path, INTERNAL_PLAYER_PATH) != 0) {
             execve(INTERNAL_PLAYER_PATH, (char * []) { (char *) INTERNAL_PLAYER_PATH, NULL }, environ);
         }
@@ -358,42 +307,146 @@ static void run_player_supervised(const char * player_path) {
     if (reaped != pid) {
         /* Child wait failed unexpectedly; fall through to reboot. */
         errno = wait_error;
-        perror("compas_bootloader: waitpid failed unexpectedly");
+        perror("compas_loader: waitpid failed unexpectedly");
     } else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        fprintf(stderr, "compas_bootloader: %s exited cleanly -- powering off\n", player_path);
+        fprintf(stderr, "compas_loader: %s exited cleanly -- powering off\n", player_path);
         poweroff_device();
     } else {
-        fprintf(stderr, "compas_bootloader: %s exited abnormally (status=0x%x) -- rebooting\n",
+        fprintf(stderr, "compas_loader: %s exited abnormally (status=0x%x) -- rebooting\n",
                 player_path, (unsigned) status);
         record_player_exit(status);
     }
-    reboot_device();
+    bool requested_restart = reaped == pid && WIFEXITED(status) &&
+                             WEXITSTATUS(status) == IDLE_SHUTDOWN_REBOOT_EXIT_CODE;
+    reboot_device(requested_restart);
 }
 
-int main(void) {
+/* Kernel log, readable over ADB with dmesg. Best effort: failures are ignored. */
+static void log_kernel(const char * text) {
+    char line[256];
+    int len = snprintf(line, sizeof(line), "<3>compas_loader: %s\n", text);
+    fprintf(stderr, "compas_loader: %s\n", text);
+    if (len <= 0) return;
+    if (len >= (int) sizeof(line)) len = (int) sizeof(line) - 1;
+    int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    (void) write(fd, line, (size_t) len);
+    close(fd);
+}
+
+/* The player normally starts ADB, and the player is blocked on this path, so
+ * run the same stock ADB sequence as usb_mode_control. No other USB function
+ * is started or stopped. */
+static void start_recovery_adb(void) {
+    int exit_code = -1;
+    char * start_argv[] = { (char *) "/etc/init.d/adb/S440adb", (char *) "start", NULL };
+    if (!subprocess_run_checked(start_argv, NULL, 0, 15000, &exit_code) || exit_code != 0) {
+        log_kernel("recovery ADB start failed");
+        return;
+    }
+    for (int i = 0; i < 20 && access("/dev/usb-ffs/adb", F_OK) != 0; i++) usleep(50000);
+    char * bind_argv[] = { (char *) "/sbin/usb_adb_enable.sh", NULL };
+    exit_code = -1;
+    bool bound = subprocess_run_checked(bind_argv, NULL, 0, 5000, &exit_code);
+    char msg[64];
+    if (bound)
+        snprintf(msg, sizeof(msg), "recovery ADB bind exit=%d", exit_code);
+    else
+        snprintf(msg, sizeof(msg), "recovery ADB bind did not complete");
+    log_kernel(msg);
+}
+
+#define INTERNAL_STORAGE_RECOVERY_SECONDS (10 * 60)
+
+static void internal_storage_recovery(const char * reason) __attribute__((noreturn));
+
+/* Blocks the player, updates and selector when /usr/data is not the writable
+ * internal userdata mount. There is no automatic reboot: the same mount would
+ * fail again in a loop. Poweroff is safe because the loader has mounted
+ * nothing writable, so userdata is left untouched for a later boot or manual
+ * recovery. ADB stays reachable during the wait. This path must not reach the
+ * reboot, SD, or boot-trace helpers, which write under /usr/data. */
+static void internal_storage_recovery(const char * reason) {
+    char msg[128];
+    snprintf(msg, sizeof(msg), "internal storage not ready: %s", reason);
+    log_kernel(msg);
+    log_kernel("data not erased; player, updates and selector blocked");
+
+    if (fb_open()) {
+        fb_fill(COLOR_BG);
+        static const char * const text[] = {
+            "INTERNAL STORAGE", "COULD NOT MOUNT", "", "YOUR DATA WAS",
+            "NOT ERASED", "", "TURNING OFF SOON", "TURN ON TO RETRY",
+        };
+        const int count = (int) (sizeof(text) / sizeof(text[0]));
+        const int pitch = fb_text_height() * 2;
+        const int block = (count - 1) * pitch + fb_text_height();
+        const int top = (FB_HEIGHT - block) / 2;
+        for (int i = 0; i < count; i++)
+            fb_draw_text_centered(top + i * pitch, text[i], fb_rgb(0xFF, 0xFF, 0xFF));
+        fb_flush();
+    }
+
+    start_recovery_adb();
+
+    unsigned int remaining = INTERNAL_STORAGE_RECOVERY_SECONDS;
+    while (remaining > 0) remaining = sleep(remaining);
+
+    log_kernel("powering off after internal storage failure");
+    sync();
+    reboot(RB_POWER_OFF);
+    int error = errno;
+    snprintf(msg, sizeof(msg), "poweroff failed errno=%d", error);
+    log_kernel(msg);
+    for (;;) pause();
+}
+
+static void require_internal_storage(void) {
+    char reason[64];
+    if (!internal_storage_ready(reason, sizeof(reason))) internal_storage_recovery(reason);
+}
+
+bool compas_loader_prepare(void) {
+    require_internal_storage();
     (void)boot_trace_open(&boot_trace, "/usr/data/bootloader_boot.log");
-    bootloader_checkpoint("bootloader main entered; framebuffer open begin");
-    /* Open framebuffer and paint the splash before waiting for the SD card. */
+    bootloader_checkpoint("bootloader prepare entered; framebuffer open begin");
     bool fb_ready = fb_open();
     bootloader_checkpoint(fb_ready ? "framebuffer open done" : "framebuffer open failed");
     if (fb_ready) {
         bootloader_checkpoint("bootloader splash draw begin");
-        if (!fb_draw_background_jpeg(BOOTLOADER_BG_PATH)) fb_fill(COLOR_BG);
+        if (!fb_draw_startup_background()) fb_fill(COLOR_BG);
         bootloader_checkpoint("bootloader splash draw done; flush begin");
         fb_flush();
         bootloader_checkpoint("bootloader splash flush done");
     }
 
-    scan_result_t scan;
-    bootloader_checkpoint("SD scanner begin");
-    scanner_scan(&scan);
-    bootloader_checkpoint("SD scanner done");
+    bootloader_checkpoint("SD mount begin");
+    mount_sd_card_if_needed();
+    bootloader_checkpoint("SD mount done");
+    return fb_ready;
+}
 
-    /* Install a pending SD update before choosing the internal player copy. */
+void compas_loader_run(bool startup_prepared) {
+    bool fb_ready;
+    if (startup_prepared) {
+        require_internal_storage();
+        (void)boot_trace_open(&boot_trace, "/usr/data/bootloader_boot.log");
+        bootloader_checkpoint("bootloader main entered after selector; framebuffer open begin");
+        /* The selector already drew the splash and waited for SD. Reopen the
+         * framebuffer only so an SD update can display its progress screen. */
+        fb_ready = fb_open();
+        bootloader_checkpoint(fb_ready ? "framebuffer reopened" : "framebuffer reopen failed");
+    } else {
+        fb_ready = compas_loader_prepare();
+    }
+
+    scan_result_t scan = {
+        .sd_update_present = access(SD_UPDATE_PLAYER_PATH, F_OK) == 0,
+        .sd_update_path = SD_UPDATE_PLAYER_PATH,
+    };
     bootloader_checkpoint("player installer begin");
     installer_run(&scan, fb_ready);
     bootloader_checkpoint("player installer done");
-
     bootloader_checkpoint("internal player selection begin");
     const char * internal_path = installer_internal_player_path();
     bootloader_checkpoint("internal player selection done");
@@ -402,7 +455,16 @@ int main(void) {
         fb_close();
         bootloader_checkpoint("framebuffer close done");
     }
-    tune_vm_writeback();
+    boot_tune_vm_writeback();
     run_player_supervised(internal_path);
+}
+
+#ifndef COMPAS_LOADER_EMBEDDED
+int main(void) {
+    (void)compas_loader_prepare();
+    fb_close();
+    (void)selector_controller_run(false);
+    compas_loader_run(true);
     return 1; /* unreachable -- run_player_supervised() never returns */
 }
+#endif

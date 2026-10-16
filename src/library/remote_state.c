@@ -12,7 +12,6 @@
 #include <unistd.h>
 
 #define REMOTE_STATE_DIR SD_COMPAS_ROOT
-#define REMOTE_STATE_LEGACY_DIR SD_LEGACY_ROOT
 
 #define REMOTE_STATE_FILE "remote_state.tsv"
 #define REMOTE_STATE_PATH_MAX 600
@@ -53,10 +52,6 @@ static void load_file(void) {
     char path[640];
     snprintf(path, sizeof(path), "%s/%s", REMOTE_STATE_DIR, REMOTE_STATE_FILE);
     FILE * f = fopen(path, "r");
-    if (!f) {
-        snprintf(path, sizeof(path), "%s/%s", REMOTE_STATE_LEGACY_DIR, REMOTE_STATE_FILE);
-        f = fopen(path, "r");
-    }
     if (!f) return;
     char line[REMOTE_STATE_PATH_MAX + 64];
     while (fgets(line, sizeof(line), f)) {

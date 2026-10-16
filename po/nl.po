@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-13 10:21-0600\n"
+"POT-Creation-Date: 2026-10-16 00:10-0600\n"
 "PO-Revision-Date: 2026-10-11 13:10-0600\n"
 "Last-Translator: Machine draft; pending native review\n"
 "Language-Team: Dutch\n"
@@ -133,6 +133,69 @@ msgstr "Ongeldig updatepad."
 msgid "Could not start the update."
 msgstr "Kan de update niet starten."
 
+#, fuzzy
+msgid "Update failed."
+msgstr "Update beschikbaar"
+
+msgid "Could not prepare secure update storage."
+msgstr ""
+
+msgid "Could not download the release checksums."
+msgstr "Kan de controlesommen van de uitgave niet downloaden."
+
+msgid "The release does not provide a valid player checksum."
+msgstr ""
+
+#, fuzzy
+msgid "The release checksum does not match the published asset digest."
+msgstr "De uitgave bevat geen controlesom voor de image van dit apparaat."
+
+#, fuzzy
+msgid "The latest player release changed. Check again."
+msgstr "Het geselecteerde updatebestand is gewijzigd. Selecteer het opnieuw."
+
+msgid "The player image exceeds the safe size limit."
+msgstr ""
+
+#, fuzzy
+msgid "Not enough internal storage for the player update."
+msgstr "Onvoldoende vrije ruimte op de SD-kaart voor de update."
+
+#, fuzzy
+msgid "The player download did not complete."
+msgstr "Download is niet voltooid. Controleer wifi en probeer opnieuw."
+
+#, fuzzy
+msgid "The downloaded player failed SHA-256 verification."
+msgstr "De gedownloade image is niet goedgekeurd en is verwijderd."
+
+msgid "Place a valid player executable at SD/.compas/compas_player."
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update check."
+msgstr "Kan de updatecontrole niet starten."
+
+#, fuzzy
+msgid "Another update is already active."
+msgstr "Er wordt al een update uitgevoerd."
+
+#, fuzzy
+msgid "Check for a player update first."
+msgstr "Online-update controleren"
+
+#, fuzzy
+msgid "Not enough memory."
+msgstr "Onvoldoende geheugen om verbinding te maken"
+
+#, fuzzy
+msgid "Could not start the player download."
+msgstr "Kan de download niet starten."
+
+#, fuzzy
+msgid "Could not start the SD player update."
+msgstr "Kan de plugin-update niet starten."
+
 msgid "Screenshots unavailable"
 msgstr "Schermafbeeldingen niet beschikbaar"
 
@@ -147,6 +210,66 @@ msgstr "Schermafbeelding mislukt (framebuffer)"
 
 msgid "Screenshot failed (worker)"
 msgstr "Schermafbeelding mislukt (worker)"
+
+msgid "Files"
+msgstr "Bestanden"
+
+msgid "Artists"
+msgstr "Artiesten"
+
+msgid "Albums"
+msgstr "Albums"
+
+msgid "Album Artist"
+msgstr "Albumartiest"
+
+msgid "Genres"
+msgstr "Genres"
+
+msgid "All Songs"
+msgstr "Alle nummers"
+
+msgid "Playlists"
+msgstr "Afspeellijsten"
+
+msgid "Sound"
+msgstr "Geluid"
+
+msgid "Playback"
+msgstr "Afspelen"
+
+msgid "Library"
+msgstr "Bibliotheek"
+
+msgid "Wi-Fi"
+msgstr "Wifi"
+
+msgid "Bluetooth"
+msgstr "Bluetooth"
+
+msgid "Sleep Timer"
+msgstr "Slaaptimer"
+
+msgid "Crossfade"
+msgstr "Overlappend afspelen"
+
+msgid "AirPlay"
+msgstr "AirPlay"
+
+msgid "DLNA"
+msgstr "DLNA"
+
+msgid "Gapless"
+msgstr "Naadloos"
+
+msgid "Remote Control"
+msgstr "Afstandsbediening"
+
+msgid "Car Mode"
+msgstr "Automodus"
+
+msgid "Plugins"
+msgstr "Plugins"
 
 #, c-format
 msgid "Page %d of %d"
@@ -219,9 +342,6 @@ msgstr "Er is een nieuwere of gewijzigde versie beschikbaar. Controleer opnieuw 
 
 msgid "Insert an SD card to download the update."
 msgstr "Plaats een SD-kaart om de update te downloaden."
-
-msgid "Could not download the release checksums."
-msgstr "Kan de controlesommen van de uitgave niet downloaden."
 
 msgid "The release has no checksum for this device's image."
 msgstr "De uitgave bevat geen controlesom voor de image van dit apparaat."
@@ -651,9 +771,6 @@ msgstr "Toevoegen aan afspeellijst"
 msgid "+ New Playlist"
 msgstr "+ Nieuwe afspeellijst"
 
-msgid "Files"
-msgstr "Bestanden"
-
 msgid "Audio"
 msgstr "Audio"
 
@@ -671,9 +788,6 @@ msgid "%lld track"
 msgid_plural "%lld tracks"
 msgstr[0] "%lld nummer"
 msgstr[1] "%lld nummers"
-
-msgid "All Songs"
-msgstr "Alle nummers"
 
 msgid "Recently Added"
 msgstr "Recent toegevoegd"
@@ -732,23 +846,11 @@ msgstr "Bibliotheek gewijzigd. Open het album opnieuw."
 msgid "Cannot load album tracks"
 msgstr "Kan albumtracks niet laden"
 
-msgid "Artists"
-msgstr "Artiesten"
-
-msgid "Albums"
-msgstr "Albums"
-
-msgid "Album Artist"
-msgstr "Albumartiest"
-
 #, c-format
 msgid "%d song"
 msgid_plural "%d songs"
 msgstr[0] "%d nummer"
 msgstr[1] "%d nummers"
-
-msgid "Genres"
-msgstr "Genres"
 
 msgid "Recently Played"
 msgstr "Recent afgespeeld"
@@ -813,9 +915,6 @@ msgstr "Maak hierboven een afspeellijst of kopieer er een naar de map Playlists 
 msgid "SD card not available"
 msgstr "SD-kaart niet beschikbaar"
 
-msgid "Playlists"
-msgstr "Afspeellijsten"
-
 msgid "Not enough memory to load CUE tracks"
 msgstr "Onvoldoende geheugen om CUE-nummers te laden"
 
@@ -865,21 +964,11 @@ msgstr "Gebruik Instellingen > Muziekdatabase bijwerken"
 msgid "Later"
 msgstr "Later"
 
-msgid "Library migration pending. Favourites and play history will be kept"
-msgstr "Bibliotheekmigratie in afwachting. Favorieten en afspeelgeschiedenis blijven behouden"
-
 msgid "No SD card"
 msgstr "Geen SD-kaart"
 
 msgid "Library loaded"
 msgstr "Bibliotheek geladen"
-
-msgid ""
-"Migrating\n"
-"music database..."
-msgstr ""
-"Bezig met migreren van\n"
-"muziekdatabase..."
 
 msgid ""
 "Refreshing\n"
@@ -901,9 +990,6 @@ msgid ""
 msgstr ""
 "Bezig met bijwerken van\n"
 "muziekdatabase..."
-
-msgid "Preparing database migration..."
-msgstr "Database migratie voorbereiden..."
 
 msgid "Preparing metadata refresh..."
 msgstr "Metadata bijwerken voorbereiden..."
@@ -1021,9 +1107,6 @@ msgstr ""
 "Muziekdatabase opslaan\n"
 "Dit kan even duren bij grote bibliotheken"
 
-msgid "Library migration failed. Old library intact. Use Settings > Update Music Database to retry"
-msgstr "Bibliotheekmigratie mislukt. Oude bibliotheek is intact. Probeer opnieuw via Instellingen > Muziekdatabase bijwerken"
-
 msgid "Library unavailable. Use Settings > Update Music Database to rebuild"
 msgstr "Bibliotheek niet beschikbaar. Gebruik Instellingen > Muziekdatabase bijwerken om deze opnieuw op te bouwen"
 
@@ -1035,12 +1118,6 @@ msgstr "Sommige nummers konden niet worden gelezen"
 
 msgid "Metadata refreshed"
 msgstr "Metadata vernieuwd"
-
-msgid "Library migrated. Old database cleanup will retry"
-msgstr "Bibliotheek gemigreerd. Opruimen van oude database wordt opnieuw geprobeerd"
-
-msgid "Library migrated. Favourites and play history kept"
-msgstr "Bibliotheek gemigreerd. Favorieten en afspeelgeschiedenis zijn behouden"
 
 msgid "Library recovered and saved, some folders could not be read"
 msgstr "Bibliotheek hersteld en opgeslagen; sommige mappen konden niet worden gelezen"
@@ -1108,6 +1185,10 @@ msgstr "Hiermee wordt alles op de kaart permanent verwijderd. Dit kan niet onged
 
 msgid "Format"
 msgstr "Formatteren"
+
+#, fuzzy
+msgid "Could not restart into the boot selector"
+msgstr "Kan de map niet maken"
 
 msgid "An update is in progress. Please wait."
 msgstr "Er wordt een update uitgevoerd. Even geduld."
@@ -1356,9 +1437,6 @@ msgstr "Niet ingesteld"
 msgid "DNS Settings"
 msgstr "DNS-instellingen"
 
-msgid "Wi-Fi"
-msgstr "Wifi"
-
 msgid "Manual SSID Entry"
 msgstr "SSID handmatig invoeren"
 
@@ -1540,6 +1618,17 @@ msgstr "Omschakelen naar %s mislukt"
 msgid "USB Mode"
 msgstr "USB-modus"
 
+#, fuzzy
+msgid "Failed to update USB charging"
+msgstr "Profiel verwijderen mislukt"
+
+msgid "USB charging setting is busy"
+msgstr ""
+
+#, fuzzy
+msgid "Could not start USB charging update"
+msgstr "Kan de plugin-update niet starten."
+
 msgid "Leave USB DAC mode?"
 msgstr "USB-DAC-modus verlaten?"
 
@@ -1568,9 +1657,6 @@ msgstr "USB-ingang: %s · %u-bits"
 #, c-format
 msgid "DAC path: %s · %u-bit"
 msgstr "DAC-pad: %s · %u-bits"
-
-msgid "Bluetooth"
-msgstr "Bluetooth"
 
 msgid "Bluetooth is off"
 msgstr "Bluetooth is uitgeschakeld"
@@ -1616,9 +1702,6 @@ msgstr "Schakel wifi in voor toegang"
 msgid "Web Server is busy"
 msgstr "Webserver is bezet"
 
-msgid "AirPlay"
-msgstr "AirPlay"
-
 msgid "When on, this device is visible to AirPlay senders on your Wi-Fi network -- stream audio from an iPhone, iPad, or Mac to be played through this device's own output."
 msgstr "Als deze optie aanstaat, is dit apparaat zichtbaar voor AirPlay-zenders op je wifi-netwerk. Stream audio vanaf een iPhone, iPad of Mac om die via de eigen uitgang van dit apparaat af te spelen."
 
@@ -1636,9 +1719,6 @@ msgstr "Als deze optie aanstaat, is dit apparaat zichtbaar voor DLNA/UPnP-contro
 
 msgid "Service is busy"
 msgstr "Service is bezet"
-
-msgid "DLNA"
-msgstr "DLNA"
 
 msgid "Unavailable"
 msgstr "Niet beschikbaar"
@@ -1681,9 +1761,6 @@ msgstr "Apps en browsers die de huidige pincode gebruiken, moeten opnieuw verbin
 
 msgid "Generate"
 msgstr "Genereren"
-
-msgid "Remote Control"
-msgstr "Afstandsbediening"
 
 msgid "Connection PIN"
 msgstr "Verbindingspincode"
@@ -2018,8 +2095,8 @@ msgid "Crossfeed: %d%%"
 msgstr "Crossfeed: %d%%"
 
 #, c-format
-msgid "Pre-Amp: %+.2f dB"
-msgstr "Voorversterking: %+.2f dB"
+msgid "%+.2f dB"
+msgstr "%+.2f dB"
 
 #, c-format
 msgid "%.0f Hz"
@@ -2070,6 +2147,82 @@ msgstr ""
 "Bijwerken met %s?\n"
 "Apparaat start opnieuw op in herstelmodus."
 
+msgid ""
+"Install the player update from the SD card?\n"
+"\n"
+"Updates the player and restarts the device. Firmware, fonts, and artwork are unchanged."
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update"
+msgstr "Kan de update niet starten."
+
+#, fuzzy
+msgid "Updating player"
+msgstr "Plugins bijwerken"
+
+#, fuzzy
+msgid "Starting update"
+msgstr "Update voorbereiden"
+
+msgid "Connect to Wi-Fi before downloading the player update"
+msgstr ""
+
+msgid "Starting download"
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update check"
+msgstr "Kan de updatecontrole niet starten."
+
+#, fuzzy
+msgid "Checking for player updates"
+msgstr "Controleren op updates"
+
+msgid "Check for online update"
+msgstr "Online-update controleren"
+
+msgid "Install from SD card"
+msgstr "Installeren vanaf SD-kaart"
+
+#, fuzzy
+msgid "Download & Install"
+msgstr "Download mislukt"
+
+#, fuzzy
+msgid "Install & Restart"
+msgstr "Installeren en opnieuw starten"
+
+#, fuzzy
+msgid "Downloading player update"
+msgstr "Update downloaden"
+
+#, fuzzy
+msgid "Installing player update"
+msgstr "Plugin installeren"
+
+#, fuzzy
+msgid "Checking the latest release"
+msgstr "Bestand op SD-kaart controleren"
+
+msgid "Replacing the player and preparing to restart"
+msgstr ""
+
+#, c-format
+msgid ""
+"Available player release: %s.\n"
+"Installed: %s\n"
+"\n"
+"Download and install? This updates the player and restarts the device. Firmware, fonts, and artwork are unchanged."
+msgstr ""
+
+msgid "Player updated successfully"
+msgstr ""
+
+#, fuzzy
+msgid "Player update failed"
+msgstr "Afspeelfout: audio-uitvoer mislukt"
+
 #, c-format
 msgid ""
 "Firmware release %s is downloaded and verified.\n"
@@ -2097,12 +2250,6 @@ msgstr "Update downloaden"
 
 msgid "Update saved. Connect to Wi-Fi, then install from Firmware Update > Install from SD card."
 msgstr "Update opgeslagen. Maak verbinding met wifi en installeer deze via Firmware-update > Installeren vanaf SD-kaart."
-
-msgid "Check for online update"
-msgstr "Online-update controleren"
-
-msgid "Install from SD card"
-msgstr "Installeren vanaf SD-kaart"
 
 msgid "Download"
 msgstr "Downloaden"
@@ -2200,8 +2347,8 @@ msgstr "Schermafbeeldingen (Aan/uit + Volume omlaag)"
 msgid "Enable debug logging"
 msgstr "Foutopsporingslogboek inschakelen"
 
-msgid "Load covers during playback (Experimental)"
-msgstr "Covers laden tijdens afspelen (experimenteel)"
+msgid "Reboot to bootloader"
+msgstr ""
 
 msgid "Custom color"
 msgstr "Aangepaste kleur"
@@ -2220,6 +2367,12 @@ msgstr "Albumhoes volgen"
 
 msgid "Takes its color from the cover of the playing track"
 msgstr "Neemt de kleur over van de cover van het nummer dat wordt afgespeeld"
+
+msgid "Tint startup image"
+msgstr "Opstartafbeelding kleuren"
+
+msgid "Uses the accent color for the default splash."
+msgstr "Gebruikt de accentkleur voor de standaard opstartafbeelding."
 
 msgid "Presets"
 msgstr "Voorinstellingen"
@@ -2275,9 +2428,6 @@ msgstr "Maximaal volume"
 msgid "Limits the player volume, including buttons, remote controls and plugins."
 msgstr "Beperkt het volume van de speler, inclusief knoppen, afstandsbedieningen en plugins."
 
-msgid "Car Mode"
-msgstr "Automodus"
-
 msgid "Car Mode is disabled."
 msgstr "Automodus is uitgeschakeld."
 
@@ -2319,9 +2469,6 @@ msgstr "Resterende tijd: %d:%02d:%02d"
 #, c-format
 msgid "Time remaining: %d:%02d"
 msgstr "Resterende tijd: %d:%02d"
-
-msgid "Sleep Timer"
-msgstr "Slaaptimer"
 
 msgid "Enable Sleep Timer"
 msgstr "Slaaptimer inschakelen"
@@ -2396,12 +2543,6 @@ msgstr "Geluidseffecten"
 msgid "Download Profiles"
 msgstr "Profielen downloaden"
 
-msgid "Crossfade"
-msgstr "Overlappend afspelen"
-
-msgid "Gapless"
-msgstr "Naadloos"
-
 msgid "Buttons & Remote"
 msgstr "Knoppen en afstandsbediening"
 
@@ -2411,8 +2552,9 @@ msgstr "Afspelen en bediening"
 msgid "Equalizer"
 msgstr "Equalizer"
 
-msgid "Sound"
-msgstr "Geluid"
+#, fuzzy
+msgid "Crossfeed"
+msgstr "Crossfeed: uit"
 
 msgid "Power"
 msgstr "Voeding"
@@ -2522,9 +2664,6 @@ msgstr "Nieuwst gewijzigd"
 msgid "Release Year (oldest first)"
 msgstr "Uitgavejaar (oudste eerst)"
 
-msgid "Albums (main list)"
-msgstr "Albums (hoofdlijst)"
-
 msgid "Files use modification dates. Albums use the newest track added; missing release years sort last. Update Music Database once to read years from existing files."
 msgstr "Bestanden gebruiken wijzigingsdatums. Albums gebruiken de nieuwste toegevoegde track; ontbrekende uitgavejaren komen als laatste. Werk de muziekdatabase eenmalig bij om jaren uit bestaande bestanden te lezen."
 
@@ -2536,9 +2675,6 @@ msgstr "Alle metadata vernieuwen"
 
 msgid "Refresh All Covers"
 msgstr "Alle covers vernieuwen"
-
-msgid "Library"
-msgstr "Bibliotheek"
 
 msgid "Animation Speed"
 msgstr "Animatiesnelheid"
@@ -2552,14 +2688,75 @@ msgstr "QWERTY"
 msgid "Keyboard"
 msgstr "Toetsenbord"
 
-msgid "Drawer Volume Slider"
-msgstr "Volumeschuifregelaar in lade"
+msgid "Plugins can override these saved preferences."
+msgstr "Plugins kunnen deze opgeslagen voorkeuren overschrijven."
+
+msgid "Quick Drawer"
+msgstr "Snelpaneel"
+
+msgid "Enabled"
+msgstr "Ingeschakeld"
+
+msgid "Volume Slider"
+msgstr "Volumeschuifregelaar"
+
+msgid "Reorder Items"
+msgstr "Items herschikken"
+
+#, fuzzy
+msgid "Volume"
+msgstr "Volume omhoog"
+
+msgid "Clock"
+msgstr "Klok"
+
+msgid "Wired Headphones"
+msgstr ""
+
+#, fuzzy
+msgid "Bluetooth Audio (A2DP)"
+msgstr "Bluetooth is uitgeschakeld"
+
+#, fuzzy
+msgid "USB Audio"
+msgstr "Audio"
+
+#, fuzzy
+msgid "Playback Status"
+msgstr "Afspelen"
+
+#, fuzzy
+msgid "Bluetooth Codec"
+msgstr "Bluetooth-DAC-modus"
+
+#, fuzzy
+msgid "Battery Icon"
+msgstr "Batterijpercentage"
+
+msgid "Left"
+msgstr ""
+
+msgid "Center"
+msgstr ""
+
+msgid "Right"
+msgstr ""
+
+#, fuzzy
+msgid "Clock Position"
+msgstr "Positie"
 
 msgid "Battery Percentage"
 msgstr "Batterijpercentage"
 
+msgid "Top Bar"
+msgstr ""
+
 msgid "Artist Images"
 msgstr "Artiestenafbeeldingen"
+
+msgid "Themes"
+msgstr "Thema's"
 
 msgid "Appearance"
 msgstr "Weergave"
@@ -2600,6 +2797,11 @@ msgstr "Veilig opladen (500 mA)"
 msgid "LED charge indicator"
 msgstr "Led-laadindicator"
 
+msgid ""
+"Disable charging\n"
+"in USB DAC mode"
+msgstr ""
+
 msgid "Charging"
 msgstr "Opladen"
 
@@ -2618,9 +2820,6 @@ msgstr "Tijd instellen"
 msgid "24-Hour Clock"
 msgstr "24-uursklok"
 
-msgid "Clock"
-msgstr "Klok"
-
 msgid "Save"
 msgstr "Opslaan"
 
@@ -2635,6 +2834,10 @@ msgstr "Onderhoud"
 
 msgid "Firmware Update"
 msgstr "Firmware-update"
+
+#, fuzzy
+msgid "Player Update"
+msgstr "Spelerindeling"
 
 msgid "Plugins & Layouts"
 msgstr "Plugins en indelingen"
@@ -2654,17 +2857,14 @@ msgstr "Instellingen"
 msgid "Turn off ADB first (Settings > System > USB Mode), then enable USB DAC from here."
 msgstr "Schakel ADB eerst uit (Instellingen > Systeem > USB-modus) en schakel daarna hier USB-DAC in."
 
-msgid "Plugins"
-msgstr "Plugins"
-
-msgid "Themes"
-msgstr "Thema's"
-
 msgid "Now Playing layouts"
 msgstr "Nu aan het afspelen-indelingen"
 
 msgid "More"
 msgstr "Meer"
+
+msgid "0 dB"
+msgstr "0 dB"
 
 msgid "Combined response (dB) · EQ off"
 msgstr "Gecombineerde respons (dB) · EQ uit"
@@ -2771,14 +2971,32 @@ msgstr ""
 msgid "Enable band"
 msgstr "Band inschakelen"
 
-msgid "Reset to defaults"
-msgstr "Herstellen naar standaardwaarden"
+#, fuzzy
+msgid "Crossfeed angle"
+msgstr "Crossfeed: uit"
 
-msgid "Parametric EQ"
-msgstr "Parametrische equalizer"
+msgid ""
+"No delay\n"
+"30°\n"
+"45°\n"
+"60°\n"
+"90°"
+msgstr ""
+
+msgid "Crossfeed blends a filtered signal from the opposite channel and works independently of PEQ. With No delay, identical left and right signals are affected very little."
+msgstr ""
+
+msgid "PEQ"
+msgstr "PEQ"
 
 msgid "Frequency"
 msgstr "Frequentie"
+
+msgid "Pre-Amp"
+msgstr "Voorversterking"
+
+msgid "Reset to defaults"
+msgstr "Herstellen naar standaardwaarden"
 
 msgid "48 kHz reference"
 msgstr "Referentie 48 kHz"
@@ -3242,6 +3460,46 @@ msgstr "Voedingsbediening"
 
 msgid "Playback and device actions"
 msgstr "Afspelen en apparaatacties"
+
+#~ msgid "Parametric EQ"
+#~ msgstr "Parametrische equalizer"
+
+#~ msgid "Library migration pending. Favourites and play history will be kept"
+#~ msgstr "Bibliotheekmigratie in afwachting. Favorieten en afspeelgeschiedenis blijven behouden"
+
+#~ msgid ""
+#~ "Migrating\n"
+#~ "music database..."
+#~ msgstr ""
+#~ "Bezig met migreren van\n"
+#~ "muziekdatabase..."
+
+#~ msgid "Preparing database migration..."
+#~ msgstr "Database migratie voorbereiden..."
+
+#~ msgid "Library migration failed. Old library intact. Use Settings > Update Music Database to retry"
+#~ msgstr "Bibliotheekmigratie mislukt. Oude bibliotheek is intact. Probeer opnieuw via Instellingen > Muziekdatabase bijwerken"
+
+#~ msgid "Library migrated. Old database cleanup will retry"
+#~ msgstr "Bibliotheek gemigreerd. Opruimen van oude database wordt opnieuw geprobeerd"
+
+#~ msgid "Library migrated. Favourites and play history kept"
+#~ msgstr "Bibliotheek gemigreerd. Favorieten en afspeelgeschiedenis zijn behouden"
+
+#~ msgid "Load covers during playback (Experimental)"
+#~ msgstr "Covers laden tijdens afspelen (experimenteel)"
+
+#~ msgid "Albums (main list)"
+#~ msgstr "Albums (hoofdlijst)"
+
+#~ msgid "Visible"
+#~ msgstr "Zichtbaar"
+
+#~ msgid "Move Up"
+#~ msgstr "Omhoog verplaatsen"
+
+#~ msgid "Move Down"
+#~ msgstr "Omlaag verplaatsen"
 
 #~ msgid "Back"
 #~ msgstr "Terug"

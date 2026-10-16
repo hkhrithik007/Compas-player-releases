@@ -67,10 +67,10 @@ static bool write_all(FILE * f, const void * data, size_t len) {
     return fwrite(data, 1, len, f) == len;
 }
 
-bool image_thumb_write_bin(const uint8_t * data, size_t size, int max_w, int max_h,
-                           const char * dest_path, artwork_priority_t prio,
-                           artwork_cancel_fn cancel_cb, void * cancel_user,
-                           const char ** reason) {
+static bool image_write_bin(const uint8_t * data, size_t size, int max_w, int max_h,
+                            bool cover, const char * dest_path, artwork_priority_t prio,
+                            artwork_cancel_fn cancel_cb, void * cancel_user,
+                            const char ** reason) {
     const char * dummy;
     if (!reason) reason = &dummy;
     *reason = NULL;
@@ -81,17 +81,55 @@ bool image_thumb_write_bin(const uint8_t * data, size_t size, int max_w, int max
         return false;
     }
     int w, h;
-    image_thumb_fit(native_w, native_h, max_w, max_h, &w, &h);
+    if (cover) {
+        w = max_w;
+        h = max_h;
+    } else {
+        image_thumb_fit(native_w, native_h, max_w, max_h, &w, &h);
+    }
 
-    /* The target keeps the image's own aspect ratio, so the decoder's
-     * cover-fit only scales; nothing is cropped. */
+    /* Thumbnail dimensions preserve source aspect ratio. Wallpaper dimensions
+     * use cover-fit, which center-crops to the requested screen rectangle. */
     uint16_t * pixels = NULL;
     cover_decode_result_t res = cover_decode_to_rgb565_ex(data, (uint32_t) size, w, h, prio,
                                                           cancel_cb, cancel_user, &pixels);
+    if (cover && res == COVER_DECODE_FAIL_OVERSIZED &&
+        !(cancel_cb && cancel_cb(cancel_user))) {
+        /* The shared JPEG decoder avoids scaling when either source axis
+         * would fall below the final target. For wide wallpapers that can
+         * reject a source whose short axis is smaller than the tall screen.
+         * Decode at a bounded aspect-fit intermediate, then center-cover it;
+         * this keeps thumbnail policy intact and avoids a second JPEG path. */
+        int intermediate_w = native_w, intermediate_h = native_h;
+        /* Match JPEG decoder scale steps so the requested intermediate never
+         * forces a larger, over-limit decode between powers of two. */
+        for (int scale = 0; scale < 3 &&
+             (intermediate_w > MAX_DECODED_COVER_SIDE ||
+              intermediate_h > MAX_DECODED_COVER_SIDE); scale++) {
+            intermediate_w >>= 1;
+            intermediate_h >>= 1;
+        }
+        uint16_t * intermediate = NULL;
+        res = cover_decode_to_rgb565_ex(data, (uint32_t) size, intermediate_w, intermediate_h,
+                                        prio, cancel_cb, cancel_user, &intermediate);
+        if (res == COVER_DECODE_OK && intermediate &&
+            !(cancel_cb && cancel_cb(cancel_user))) {
+            pixels = cover_resize_rgb565(intermediate, intermediate_w, intermediate_h, w, h);
+            if (!pixels) res = COVER_DECODE_FAIL_ALLOC;
+            else if (cancel_cb && cancel_cb(cancel_user)) {
+                free(pixels);
+                pixels = NULL;
+                res = COVER_DECODE_FAIL_CANCELLED;
+            }
+        }
+        free(intermediate);
+    }
     if (res != COVER_DECODE_OK || !pixels) {
         free(pixels);
         if (cancel_cb && cancel_cb(cancel_user))
             *reason = "cancelled";
+        else if (res == COVER_DECODE_FAIL_OVERSIZED)
+            *reason = "image dimensions too large";
         else if (cover_decode_result_is_temporary(res))
             *reason = "busy"; /* the decoder or memory was taken; worth trying again later */
         else
@@ -110,6 +148,7 @@ bool image_thumb_write_bin(const uint8_t * data, size_t size, int max_w, int max
     char tmp[PATH_MAX + 8];
     int n = snprintf(tmp, sizeof(tmp), "%s.tmp", dest_path);
     bool ok = n > 0 && (size_t) n < sizeof(tmp);
+    bool cancelled = false;
     FILE * f = ok ? fopen(tmp, "wb") : NULL;
     if (f) {
         ok = write_all(f, &header, sizeof(header)) &&
@@ -117,6 +156,10 @@ bool image_thumb_write_bin(const uint8_t * data, size_t size, int max_w, int max
         ok = fflush(f) == 0 && ok;
         ok = fsync(fileno(f)) == 0 && ok;
         ok = fclose(f) == 0 && ok;
+        if (ok && cancel_cb && cancel_cb(cancel_user)) {
+            ok = false;
+            cancelled = true;
+        }
         if (!ok || rename(tmp, dest_path) != 0) {
             ok = false;
             unlink(tmp);
@@ -125,6 +168,22 @@ bool image_thumb_write_bin(const uint8_t * data, size_t size, int max_w, int max
         ok = false;
     }
     free(pixels);
-    if (!ok) *reason = "could not write image";
+    if (!ok) *reason = cancelled ? "cancelled" : "could not write image";
     return ok;
+}
+
+bool image_thumb_write_bin(const uint8_t * data, size_t size, int max_w, int max_h,
+                           const char * dest_path, artwork_priority_t prio,
+                           artwork_cancel_fn cancel_cb, void * cancel_user,
+                           const char ** reason) {
+    return image_write_bin(data, size, max_w, max_h, false, dest_path, prio,
+                           cancel_cb, cancel_user, reason);
+}
+
+bool image_wallpaper_write_bin(const uint8_t * data, size_t size, int width, int height,
+                               const char * dest_path, artwork_priority_t prio,
+                               artwork_cancel_fn cancel_cb, void * cancel_user,
+                               const char ** reason) {
+    return image_write_bin(data, size, width, height, true, dest_path, prio,
+                           cancel_cb, cancel_user, reason);
 }

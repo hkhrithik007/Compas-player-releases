@@ -1380,6 +1380,7 @@ void gui_navigation_init(void) {
     nav_stack[0] = gui_shell_get_home_screen();
     nav_depth = 1;
     lv_screen_load(gui_shell_get_home_screen());
+    sync_player_topbar_visibility(gui_shell_get_home_screen());
     /* Every other transition (nav_push/nav_pop/nav_reset_to_home) syncs the
      * home indicator pill after loading a screen -- this boot-time load is
      * the one path that didn't, so the pill (visible by default in

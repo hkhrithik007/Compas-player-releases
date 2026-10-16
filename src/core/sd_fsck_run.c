@@ -335,7 +335,11 @@ static uint64_t checker_memory_estimate(const sd_mount_info_t * info) {
     return sd_fsck_memory_estimate(&geometry);
 }
 
-sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void)) {
+static sd_repair_note_t unavailable_note(bool manual) {
+    return manual ? SD_REPAIR_NOTE_NEEDS_COMPUTER : SD_REPAIR_NOTE_READONLY_NEEDS_COMPUTER;
+}
+
+static sd_repair_kick_result_t repair_kick(void (* release_handles)(void), bool manual) {
     sd_repair_kick_result_t result = { false, false };
     if (sd_repair_in_progress()) return result;
 
@@ -351,7 +355,7 @@ sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void)) 
     char cid[64];
     char key[SD_FSCK_ATTEMPT_BYTES];
     const char * marker = pending_marker();
-    if (!info.readonly) {
+    if (!info.readonly && !manual) {
         /* A damaged FAT card mounts writable again after a reboot and goes
          * read-only only when the kernel meets the damage, so a writable
          * mount does not clear the marker. A different card does. */
@@ -365,14 +369,16 @@ sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void)) 
 
     read_card_cid(cid, sizeof(cid));
     sd_repair_attempt_key(info.device, cid, key, sizeof(key));
-    if (attempt_remembered(key)) return result;
+
+    /* Preserve the automatic poll's one-attempt guard and its quiet repeats. */
+    if (!manual && attempt_remembered(key)) return result;
 
     if (sd_repair_marker_blocks(marker, key)) {
         /* The last check of this card never finished: the player exited
          * while the card was detached, and hiby_player.sh rebooted. Running
          * it again would repeat that on every boot. */
         remember_attempt(key);
-        post_note(SD_REPAIR_NOTE_READONLY_NEEDS_COMPUTER);
+        post_note(unavailable_note(manual));
         char line[320];
         snprintf(line, sizeof(line), "not checking %s (%s): the previous check of this card did not finish",
                  info.device, info.fstype);
@@ -381,10 +387,13 @@ sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void)) 
         return result;
     }
 
+    /* Automatic polling is limited to one attempt per card. A deliberate
+     * menu action may retry a completed/declined attempt, while the marker
+     * above still blocks any check whose previous run did not finish. */
     const char * tool = sd_fsck_select_tool(info.kind, tool_exists, NULL);
     if (!tool || !sd_fsck_plan(info.kind, tool, info.device, &repair_plan)) {
         remember_attempt(key);
-        post_note(SD_REPAIR_NOTE_READONLY_NEEDS_COMPUTER);
+        post_note(unavailable_note(manual));
         char line[320];
         snprintf(line, sizeof(line), "not checking %s (%s): no checker for this filesystem", info.device, info.fstype);
         log_repair_line(line);
@@ -399,10 +408,11 @@ sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void)) 
     uint64_t budget = available > SD_FSCK_MEMORY_RESERVE ? available - SD_FSCK_MEMORY_RESERVE : 0;
     if (needed == 0 || needed > budget) {
         remember_attempt(key);
-        post_note(SD_REPAIR_NOTE_READONLY_NEEDS_COMPUTER);
-        char line[320];
-        snprintf(line, sizeof(line), "not checking %s (%s, read-only): needs %llu KiB, %llu KiB available", info.device,
-                 info.fstype, (unsigned long long) (needed / 1024), (unsigned long long) (available / 1024));
+        post_note(unavailable_note(manual));
+        char line[336];
+        snprintf(line, sizeof(line), "not checking %s (%s, %s): needs %llu KiB, %llu KiB available", info.device,
+                 info.fstype, info.readonly ? "read-only" : "read-write", (unsigned long long) (needed / 1024),
+                 (unsigned long long) (available / 1024));
         log_repair_line(line);
         boot_checkpoint("sd repair skipped, not enough memory");
         return result;
@@ -413,8 +423,8 @@ sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void)) 
      * before sd_repair_complete(), the next boot finds this marker. */
     if (!write_marker(key)) {
         remember_attempt(key);
-        post_note(SD_REPAIR_NOTE_READONLY_NEEDS_COMPUTER);
-        log_repair_line("not checking read-only card: could not persist interrupted-check marker");
+        post_note(unavailable_note(manual));
+        log_repair_line("not checking card: could not persist interrupted-check marker");
         boot_checkpoint("sd repair skipped, loop guard unavailable");
         return result;
     }
@@ -434,6 +444,8 @@ sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void)) 
             remember_attempt(key);
             post_note(SD_REPAIR_NOTE_FAILED);
             boot_checkpoint("sd repair unmount failed");
+        } else if (manual) {
+            post_note(SD_REPAIR_NOTE_FAILED);
         }
         return result;
     }
@@ -456,11 +468,20 @@ sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void)) 
     post_note(SD_REPAIR_NOTE_STARTED);
     boot_checkpoint("sd repair started");
     char line[400];
-    snprintf(line, sizeof(line), "checking %s (%s, read-only) with %s, limit %llu KiB", repair_plan.device, info.fstype,
+    snprintf(line, sizeof(line), "checking %s (%s, %s) with %s, limit %llu KiB", repair_plan.device, info.fstype,
+             info.readonly ? "read-only" : "read-write",
              repair_plan.tool, (unsigned long long) (budget / 1024));
     log_repair_line(line);
     result.started = true;
     return result;
+}
+
+sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void)) {
+    return repair_kick(release_handles, false);
+}
+
+sd_repair_kick_result_t sd_manual_repair_kick(void (* release_handles)(void)) {
+    return repair_kick(release_handles, true);
 }
 
 #else
@@ -475,6 +496,11 @@ bool sd_repair_current_readonly(bool * readonly) {
 void sd_repair_complete(bool mounted, bool readonly) { (void) mounted; (void) readonly; }
 sd_repair_note_t sd_repair_take_note(void) { return SD_REPAIR_NOTE_NONE; }
 sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void)) {
+    (void) release_handles;
+    sd_repair_kick_result_t result = { false, false };
+    return result;
+}
+sd_repair_kick_result_t sd_manual_repair_kick(void (* release_handles)(void)) {
     (void) release_handles;
     sd_repair_kick_result_t result = { false, false };
     return result;

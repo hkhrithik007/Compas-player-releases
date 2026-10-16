@@ -212,19 +212,12 @@ void gui_theme_init(void) {
 }
 
 /* For gui_reload.c's in-process UI reload -- everything gui_theme_init()
- * does EXCEPT fallback_font_init_early(). That function is boot-only, by
- * design: it always rebuilds every app_font_* slot with include_fallbacks
- * = false (src/ui/fallback_font.c), deferring the CJK/Korean/Thai fallback
- * face load to run later, once, in the background
- * (fallback_font_schedule_deferred_load()/fallback_font_load_now()). A
- * reload re-running it would silently drop that already-loaded fallback
- * chain (breaking non-Latin glyphs for the rest of the session) AND leak
- * the fallback faces already in s_loaded_faces[], since fallback_font_init_
- * early() replaces that table without freeing what it's replacing -- real
- * memory, not just a stale pointer, since these are loaded TTF/OTF font
- * files. A theme/icon reload has no reason to touch fonts at all, so this
- * just skips that call entirely rather than trying to reconstruct
- * fallback_font.c's own s_fallback_loaded state from outside it. */
+ * does EXCEPT fallback_font_init_early(). That function is boot-only: it
+ * builds the base font slots before screens, then main.c calls
+ * fallback_font_load_now() after gui_init() has built all startup screens.
+ * Re-running init_early() on reload would discard that completed fallback
+ * chain and leak the loaded faces because it replaces s_loaded_faces[].
+ * Theme/icon reload has no reason to touch fonts, so it skips font setup. */
 void gui_theme_reload_styles(void) {
     init_style_objects();
     screen_builders_refresh_font_geometry(NULL);

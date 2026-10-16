@@ -22,7 +22,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-13 10:21-0600\n"
+"POT-Creation-Date: 2026-10-16 00:10-0600\n"
 "PO-Revision-Date: 2026-10-13 00:00+0000\n"
 "Last-Translator: Machine draft\n"
 "Language-Team: Russian\n"
@@ -148,6 +148,69 @@ msgstr "Неверный путь обновления."
 msgid "Could not start the update."
 msgstr "Не удалось запустить обновление."
 
+#, fuzzy
+msgid "Update failed."
+msgstr "Доступно обновление"
+
+msgid "Could not prepare secure update storage."
+msgstr ""
+
+msgid "Could not download the release checksums."
+msgstr "Не удалось загрузить контрольные суммы выпуска."
+
+msgid "The release does not provide a valid player checksum."
+msgstr ""
+
+#, fuzzy
+msgid "The release checksum does not match the published asset digest."
+msgstr "В релизе нет контрольной суммы для образа этого устройства."
+
+#, fuzzy
+msgid "The latest player release changed. Check again."
+msgstr "Выбранный файл обновления изменился. Выберите его снова."
+
+msgid "The player image exceeds the safe size limit."
+msgstr ""
+
+#, fuzzy
+msgid "Not enough internal storage for the player update."
+msgstr "Недостаточно свободного места на SD-карте для обновления."
+
+#, fuzzy
+msgid "The player download did not complete."
+msgstr "Загрузка не завершилась. Проверьте Wi-Fi и повторите попытку."
+
+#, fuzzy
+msgid "The downloaded player failed SHA-256 verification."
+msgstr "Проверка загруженного образа не пройдена; файл удален."
+
+msgid "Place a valid player executable at SD/.compas/compas_player."
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update check."
+msgstr "Не удалось запустить проверку обновлений."
+
+#, fuzzy
+msgid "Another update is already active."
+msgstr "Обновление уже выполняется."
+
+#, fuzzy
+msgid "Check for a player update first."
+msgstr "Проверьте наличие онлайн-обновлений"
+
+#, fuzzy
+msgid "Not enough memory."
+msgstr "Недостаточно памяти для подключения"
+
+#, fuzzy
+msgid "Could not start the player download."
+msgstr "Не удалось начать загрузку."
+
+#, fuzzy
+msgid "Could not start the SD player update."
+msgstr "Не удалось запустить обновление плагина."
+
 msgid "Screenshots unavailable"
 msgstr "Скриншоты недоступны"
 
@@ -162,6 +225,66 @@ msgstr "Не удалось сделать снимок экрана (кадро
 
 msgid "Screenshot failed (worker)"
 msgstr "Не удалось сделать снимок экрана: сбой фонового процесса."
+
+msgid "Files"
+msgstr "Файлы"
+
+msgid "Artists"
+msgstr "Художники"
+
+msgid "Albums"
+msgstr "Альбомы"
+
+msgid "Album Artist"
+msgstr "Художник альбома"
+
+msgid "Genres"
+msgstr "Жанры"
+
+msgid "All Songs"
+msgstr "Все песни"
+
+msgid "Playlists"
+msgstr "Плейлисты"
+
+msgid "Sound"
+msgstr "Звук"
+
+msgid "Playback"
+msgstr "Воспроизведение"
+
+msgid "Library"
+msgstr "Библиотека"
+
+msgid "Wi-Fi"
+msgstr "Wi-Fi"
+
+msgid "Bluetooth"
+msgstr "Bluetooth"
+
+msgid "Sleep Timer"
+msgstr "Таймер сна"
+
+msgid "Crossfade"
+msgstr "Кроссфейд"
+
+msgid "AirPlay"
+msgstr "AirPlay"
+
+msgid "DLNA"
+msgstr "DLNA"
+
+msgid "Gapless"
+msgstr "без пробелов"
+
+msgid "Remote Control"
+msgstr "Пульт дистанционного управления"
+
+msgid "Car Mode"
+msgstr "Режим автомобиля"
+
+msgid "Plugins"
+msgstr "Плагины"
 
 #, c-format
 msgid "Page %d of %d"
@@ -234,9 +357,6 @@ msgstr "Доступна более новая или измененная ве�
 
 msgid "Insert an SD card to download the update."
 msgstr "Вставьте SD-карту, чтобы загрузить обновление."
-
-msgid "Could not download the release checksums."
-msgstr "Не удалось загрузить контрольные суммы выпуска."
 
 msgid "The release has no checksum for this device's image."
 msgstr "В релизе нет контрольной суммы для образа этого устройства."
@@ -671,9 +791,6 @@ msgstr "Добавить в плейлист"
 msgid "+ New Playlist"
 msgstr "+ Новый плейлист"
 
-msgid "Files"
-msgstr "Файлы"
-
 msgid "Audio"
 msgstr "Аудио"
 
@@ -692,9 +809,6 @@ msgid_plural "%lld tracks"
 msgstr[0] "%lld трек"
 msgstr[1] "%lld трека"
 msgstr[2] "%lld треков"
-
-msgid "All Songs"
-msgstr "Все песни"
 
 msgid "Recently Added"
 msgstr "Недавно добавлено"
@@ -754,24 +868,12 @@ msgstr "Библиотека изменилась. Откройте альбом
 msgid "Cannot load album tracks"
 msgstr "Не могу загрузить треки альбома"
 
-msgid "Artists"
-msgstr "Художники"
-
-msgid "Albums"
-msgstr "Альбомы"
-
-msgid "Album Artist"
-msgstr "Художник альбома"
-
 #, c-format
 msgid "%d song"
 msgid_plural "%d songs"
 msgstr[0] "%d песня"
 msgstr[1] "%d песни"
 msgstr[2] "%d песен"
-
-msgid "Genres"
-msgstr "Жанры"
 
 msgid "Recently Played"
 msgstr "Недавно играл"
@@ -836,9 +938,6 @@ msgstr "Создайте список воспроизведения выше и
 msgid "SD card not available"
 msgstr "SD-карта недоступна"
 
-msgid "Playlists"
-msgstr "Плейлисты"
-
 msgid "Not enough memory to load CUE tracks"
 msgstr "Недостаточно памяти для загрузки дорожек CUE"
 
@@ -888,21 +987,11 @@ msgstr "Используйте «Настройки» > «Обновить му�
 msgid "Later"
 msgstr "Позже"
 
-msgid "Library migration pending. Favourites and play history will be kept"
-msgstr "Ожидается перенос библиотеки. Избранное и история игр будут сохранены."
-
 msgid "No SD card"
 msgstr "Нет SD-карты"
 
 msgid "Library loaded"
 msgstr "Библиотека загружена"
-
-msgid ""
-"Migrating\n"
-"music database..."
-msgstr ""
-"Миграция музыкальной базы данных\n"
-"..."
 
 msgid ""
 "Refreshing\n"
@@ -924,9 +1013,6 @@ msgid ""
 msgstr ""
 "Обновление музыкальной базы данных\n"
 "..."
-
-msgid "Preparing database migration..."
-msgstr "Подготовка миграции базы данных..."
 
 msgid "Preparing metadata refresh..."
 msgstr "Подготовка обновления метаданных..."
@@ -1044,9 +1130,6 @@ msgstr ""
 "Сохранение музыкальной базы данных\n"
 "В больших библиотеках это может занять некоторое время."
 
-msgid "Library migration failed. Old library intact. Use Settings > Update Music Database to retry"
-msgstr "Миграция библиотеки не удалась. Старая библиотека нетронута. Используйте «Настройки» > «Обновить музыкальную базу данных», чтобы повторить попытку."
-
 msgid "Library unavailable. Use Settings > Update Music Database to rebuild"
 msgstr "Библиотека недоступна. Используйте «Настройки» > «Обновить музыкальную базу данных» для восстановления."
 
@@ -1058,12 +1141,6 @@ msgstr "Некоторые песни невозможно прочитать"
 
 msgid "Metadata refreshed"
 msgstr "Метаданные обновлены."
-
-msgid "Library migrated. Old database cleanup will retry"
-msgstr "Библиотека перенесена. Очистка старой базы данных будет повторена."
-
-msgid "Library migrated. Favourites and play history kept"
-msgstr "Библиотека перенесена. Избранное и история игр сохраняются."
 
 msgid "Library recovered and saved, some folders could not be read"
 msgstr "Библиотека восстановлена и сохранена, некоторые папки не читаются"
@@ -1131,6 +1208,10 @@ msgstr "Это безвозвратно удалит все на карте. Э�
 
 msgid "Format"
 msgstr "Формат"
+
+#, fuzzy
+msgid "Could not restart into the boot selector"
+msgstr "Не удалось создать папку"
 
 msgid "An update is in progress. Please wait."
 msgstr "Обновление находится в процессе. Пожалуйста, подождите."
@@ -1379,9 +1460,6 @@ msgstr "Не установлено"
 msgid "DNS Settings"
 msgstr "Настройки DNS"
 
-msgid "Wi-Fi"
-msgstr "Wi-Fi"
-
 msgid "Manual SSID Entry"
 msgstr "Ручной ввод SSID"
 
@@ -1563,6 +1641,17 @@ msgstr "Не удалось переключиться на %s"
 msgid "USB Mode"
 msgstr "USB-режим"
 
+#, fuzzy
+msgid "Failed to update USB charging"
+msgstr "Не удалось удалить профиль"
+
+msgid "USB charging setting is busy"
+msgstr ""
+
+#, fuzzy
+msgid "Could not start USB charging update"
+msgstr "Не удалось запустить обновление плагина."
+
 msgid "Leave USB DAC mode?"
 msgstr "Выйти из режима USB DAC?"
 
@@ -1591,9 +1680,6 @@ msgstr "USB-вход: %s · %u-бит"
 #, c-format
 msgid "DAC path: %s · %u-bit"
 msgstr "Путь ЦАП: %s · %u-бит"
-
-msgid "Bluetooth"
-msgstr "Bluetooth"
 
 msgid "Bluetooth is off"
 msgstr "Bluetooth выключен"
@@ -1641,9 +1727,6 @@ msgstr "Включите Wi-Fi для доступа"
 msgid "Web Server is busy"
 msgstr "Веб-сервер занят"
 
-msgid "AirPlay"
-msgstr "AirPlay"
-
 msgid "When on, this device is visible to AirPlay senders on your Wi-Fi network -- stream audio from an iPhone, iPad, or Mac to be played through this device's own output."
 msgstr "Когда это устройство включено, оно становится видимым отправителям AirPlay в вашей сети Wi-Fi — транслируйте аудио с iPhone, iPad или Mac для воспроизведения через собственный выход этого устройства."
 
@@ -1661,9 +1744,6 @@ msgstr "Когда это устройство включено, оно дост
 
 msgid "Service is busy"
 msgstr "Служба занята"
-
-msgid "DLNA"
-msgstr "DLNA"
 
 msgid "Unavailable"
 msgstr "Недоступно"
@@ -1706,9 +1786,6 @@ msgstr "Приложениям и браузерам, использующим �
 
 msgid "Generate"
 msgstr "Генерировать"
-
-msgid "Remote Control"
-msgstr "Пульт дистанционного управления"
 
 msgid "Connection PIN"
 msgstr "ПИН-код подключения"
@@ -2044,8 +2121,8 @@ msgid "Crossfeed: %d%%"
 msgstr "Кроссфид: %d%%"
 
 #, c-format
-msgid "Pre-Amp: %+.2f dB"
-msgstr "Предварительный усилитель: %+.2f дБ"
+msgid "%+.2f dB"
+msgstr "%+.2f дБ"
 
 #, c-format
 msgid "%.0f Hz"
@@ -2096,6 +2173,82 @@ msgstr ""
 "Установить обновление %s?\n"
 "Устройство перезагрузится в режим восстановления."
 
+msgid ""
+"Install the player update from the SD card?\n"
+"\n"
+"Updates the player and restarts the device. Firmware, fonts, and artwork are unchanged."
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update"
+msgstr "Не удалось запустить обновление."
+
+#, fuzzy
+msgid "Updating player"
+msgstr "Обновление плагинов"
+
+#, fuzzy
+msgid "Starting update"
+msgstr "Подготовка обновления"
+
+msgid "Connect to Wi-Fi before downloading the player update"
+msgstr ""
+
+msgid "Starting download"
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update check"
+msgstr "Не удалось запустить проверку обновлений."
+
+#, fuzzy
+msgid "Checking for player updates"
+msgstr "Проверка обновлений"
+
+msgid "Check for online update"
+msgstr "Проверьте наличие онлайн-обновлений"
+
+msgid "Install from SD card"
+msgstr "Установить с SD-карты"
+
+#, fuzzy
+msgid "Download & Install"
+msgstr "Загрузка не удалась"
+
+#, fuzzy
+msgid "Install & Restart"
+msgstr "Установить и перезагрузить"
+
+#, fuzzy
+msgid "Downloading player update"
+msgstr "Загрузка обновления"
+
+#, fuzzy
+msgid "Installing player update"
+msgstr "Установка плагина"
+
+#, fuzzy
+msgid "Checking the latest release"
+msgstr "Проверка файла на SD-карте"
+
+msgid "Replacing the player and preparing to restart"
+msgstr ""
+
+#, c-format
+msgid ""
+"Available player release: %s.\n"
+"Installed: %s\n"
+"\n"
+"Download and install? This updates the player and restarts the device. Firmware, fonts, and artwork are unchanged."
+msgstr ""
+
+msgid "Player updated successfully"
+msgstr ""
+
+#, fuzzy
+msgid "Player update failed"
+msgstr "Ошибка воспроизведения: сбой вывода звука"
+
 #, c-format
 msgid ""
 "Firmware release %s is downloaded and verified.\n"
@@ -2123,12 +2276,6 @@ msgstr "Загрузка обновления"
 
 msgid "Update saved. Connect to Wi-Fi, then install from Firmware Update > Install from SD card."
 msgstr "Обновление сохранено. Подключитесь к Wi-Fi, затем установите его через «Обновление прошивки» > «Установить с SD-карты»."
-
-msgid "Check for online update"
-msgstr "Проверьте наличие онлайн-обновлений"
-
-msgid "Install from SD card"
-msgstr "Установить с SD-карты"
 
 msgid "Download"
 msgstr "Скачать"
@@ -2226,8 +2373,8 @@ msgstr "Скриншоты (Питание + Громкость вниз)"
 msgid "Enable debug logging"
 msgstr "Включить ведение журнала отладки"
 
-msgid "Load covers during playback (Experimental)"
-msgstr "Загрузка обложек во время воспроизведения (экспериментально)"
+msgid "Reboot to bootloader"
+msgstr ""
 
 msgid "Custom color"
 msgstr "Пользовательский цвет"
@@ -2246,6 +2393,12 @@ msgstr "Сопоставить обложку альбома"
 
 msgid "Takes its color from the cover of the playing track"
 msgstr "Берет цвет обложки воспроизводимого трека"
+
+msgid "Tint startup image"
+msgstr "Окрасить заставку"
+
+msgid "Uses the accent color for the default splash."
+msgstr "Использует цвет акцента для стандартной заставки."
 
 msgid "Presets"
 msgstr "Пресеты"
@@ -2301,9 +2454,6 @@ msgstr "Макс. громкость"
 msgid "Limits the player volume, including buttons, remote controls and plugins."
 msgstr "Ограничивает громкость плеера, включая кнопки, пульты дистанционного управления и плагины."
 
-msgid "Car Mode"
-msgstr "Режим автомобиля"
-
 msgid "Car Mode is disabled."
 msgstr "Режим автомобиля отключен."
 
@@ -2345,9 +2495,6 @@ msgstr "Оставшееся время: %d:%02d:%02d"
 #, c-format
 msgid "Time remaining: %d:%02d"
 msgstr "Оставшееся время: %d:%02d"
-
-msgid "Sleep Timer"
-msgstr "Таймер сна"
 
 msgid "Enable Sleep Timer"
 msgstr "Включить таймер сна"
@@ -2422,12 +2569,6 @@ msgstr "Звуковые эффекты"
 msgid "Download Profiles"
 msgstr "Скачать профили"
 
-msgid "Crossfade"
-msgstr "Кроссфейд"
-
-msgid "Gapless"
-msgstr "без пробелов"
-
 msgid "Buttons & Remote"
 msgstr "Кнопки и пульт"
 
@@ -2437,8 +2578,9 @@ msgstr "Воспроизведение и управление"
 msgid "Equalizer"
 msgstr "Эквалайзер"
 
-msgid "Sound"
-msgstr "Звук"
+#, fuzzy
+msgid "Crossfeed"
+msgstr "Кроссфид: выкл."
 
 msgid "Power"
 msgstr "Питание"
@@ -2548,9 +2690,6 @@ msgstr "Новейшие изменения"
 msgid "Release Year (oldest first)"
 msgstr "Год выпуска (сначала самый старый)"
 
-msgid "Albums (main list)"
-msgstr "Альбомы (основной список)"
-
 msgid "Files use modification dates. Albums use the newest track added; missing release years sort last. Update Music Database once to read years from existing files."
 msgstr "В файлах используются даты изменения. В альбомах используется самая новая добавленная дорожка; недостающие годы выпуска сортируются последними. Обновите музыкальную базу данных один раз, чтобы считать годы из существующих файлов."
 
@@ -2562,9 +2701,6 @@ msgstr "Обновить все метаданные"
 
 msgid "Refresh All Covers"
 msgstr "Обновить все обложки"
-
-msgid "Library"
-msgstr "Библиотека"
 
 msgid "Animation Speed"
 msgstr "Скорость анимации"
@@ -2578,14 +2714,75 @@ msgstr "QWERTY"
 msgid "Keyboard"
 msgstr "Клавиатура"
 
-msgid "Drawer Volume Slider"
-msgstr "Ползунок объема ящика"
+msgid "Plugins can override these saved preferences."
+msgstr "Плагины могут переопределить сохранённые настройки."
+
+msgid "Quick Drawer"
+msgstr "Быстрая панель"
+
+msgid "Enabled"
+msgstr "Включено"
+
+msgid "Volume Slider"
+msgstr "Ползунок громкости"
+
+msgid "Reorder Items"
+msgstr "Изменить порядок"
+
+#, fuzzy
+msgid "Volume"
+msgstr "Увеличение громкости"
+
+msgid "Clock"
+msgstr "Часы"
+
+msgid "Wired Headphones"
+msgstr ""
+
+#, fuzzy
+msgid "Bluetooth Audio (A2DP)"
+msgstr "Bluetooth выключен"
+
+#, fuzzy
+msgid "USB Audio"
+msgstr "Аудио"
+
+#, fuzzy
+msgid "Playback Status"
+msgstr "Воспроизведение"
+
+#, fuzzy
+msgid "Bluetooth Codec"
+msgstr "Режим Bluetooth-ЦАП"
+
+#, fuzzy
+msgid "Battery Icon"
+msgstr "Процент заряда батареи"
+
+msgid "Left"
+msgstr ""
+
+msgid "Center"
+msgstr ""
+
+msgid "Right"
+msgstr ""
+
+#, fuzzy
+msgid "Clock Position"
+msgstr "Позиция"
 
 msgid "Battery Percentage"
 msgstr "Процент заряда батареи"
 
+msgid "Top Bar"
+msgstr ""
+
 msgid "Artist Images"
 msgstr "Изображения исполнителей"
+
+msgid "Themes"
+msgstr "Темы"
 
 msgid "Appearance"
 msgstr "Внешний вид"
@@ -2626,6 +2823,11 @@ msgstr "Безопасная зарядка (500 мА)"
 msgid "LED charge indicator"
 msgstr "Светодиодный индикатор заряда"
 
+msgid ""
+"Disable charging\n"
+"in USB DAC mode"
+msgstr ""
+
 msgid "Charging"
 msgstr "Зарядка"
 
@@ -2644,9 +2846,6 @@ msgstr "Установить время"
 msgid "24-Hour Clock"
 msgstr "24-часовой формат"
 
-msgid "Clock"
-msgstr "Часы"
-
 msgid "Save"
 msgstr "Сохранить"
 
@@ -2661,6 +2860,10 @@ msgstr "Техническое обслуживание"
 
 msgid "Firmware Update"
 msgstr "Обновление прошивки"
+
+#, fuzzy
+msgid "Player Update"
+msgstr "Расположение проигрывателя"
 
 msgid "Plugins & Layouts"
 msgstr "Плагины и макеты"
@@ -2680,17 +2883,14 @@ msgstr "Настройки"
 msgid "Turn off ADB first (Settings > System > USB Mode), then enable USB DAC from here."
 msgstr "Сначала отключите ADB («Настройки» > «Система» > «Режим USB»), затем включите USB DAC отсюда."
 
-msgid "Plugins"
-msgstr "Плагины"
-
-msgid "Themes"
-msgstr "Темы"
-
 msgid "Now Playing layouts"
 msgstr "Сейчас воспроизводятся макеты"
 
 msgid "More"
 msgstr "Ещё"
+
+msgid "0 dB"
+msgstr "0 дБ"
 
 msgid "Combined response (dB) · EQ off"
 msgstr "Комбинированный отклик (дБ) · Эквалайзер выключен"
@@ -2797,14 +2997,32 @@ msgstr ""
 msgid "Enable band"
 msgstr "Включить группу"
 
-msgid "Reset to defaults"
-msgstr "Сбросить настройки по умолчанию"
+#, fuzzy
+msgid "Crossfeed angle"
+msgstr "Кроссфид: выкл."
 
-msgid "Parametric EQ"
-msgstr "Параметрический эквалайзер"
+msgid ""
+"No delay\n"
+"30°\n"
+"45°\n"
+"60°\n"
+"90°"
+msgstr ""
+
+msgid "Crossfeed blends a filtered signal from the opposite channel and works independently of PEQ. With No delay, identical left and right signals are affected very little."
+msgstr ""
+
+msgid "PEQ"
+msgstr "PEQ"
 
 msgid "Frequency"
 msgstr "Частота"
+
+msgid "Pre-Amp"
+msgstr "Предварительный усилитель"
+
+msgid "Reset to defaults"
+msgstr "Сбросить настройки по умолчанию"
 
 msgid "48 kHz reference"
 msgstr "опорная частота 48 кГц"
@@ -3268,6 +3486,46 @@ msgstr "Управление питанием"
 
 msgid "Playback and device actions"
 msgstr "Воспроизведение и действия устройства"
+
+#~ msgid "Parametric EQ"
+#~ msgstr "Параметрический эквалайзер"
+
+#~ msgid "Library migration pending. Favourites and play history will be kept"
+#~ msgstr "Ожидается перенос библиотеки. Избранное и история игр будут сохранены."
+
+#~ msgid ""
+#~ "Migrating\n"
+#~ "music database..."
+#~ msgstr ""
+#~ "Миграция музыкальной базы данных\n"
+#~ "..."
+
+#~ msgid "Preparing database migration..."
+#~ msgstr "Подготовка миграции базы данных..."
+
+#~ msgid "Library migration failed. Old library intact. Use Settings > Update Music Database to retry"
+#~ msgstr "Миграция библиотеки не удалась. Старая библиотека нетронута. Используйте «Настройки» > «Обновить музыкальную базу данных», чтобы повторить попытку."
+
+#~ msgid "Library migrated. Old database cleanup will retry"
+#~ msgstr "Библиотека перенесена. Очистка старой базы данных будет повторена."
+
+#~ msgid "Library migrated. Favourites and play history kept"
+#~ msgstr "Библиотека перенесена. Избранное и история игр сохраняются."
+
+#~ msgid "Load covers during playback (Experimental)"
+#~ msgstr "Загрузка обложек во время воспроизведения (экспериментально)"
+
+#~ msgid "Albums (main list)"
+#~ msgstr "Альбомы (основной список)"
+
+#~ msgid "Visible"
+#~ msgstr "Показывать"
+
+#~ msgid "Move Up"
+#~ msgstr "Переместить вверх"
+
+#~ msgid "Move Down"
+#~ msgstr "Переместить вниз"
 
 #~ msgid "Back"
 #~ msgstr "Назад"

@@ -198,7 +198,7 @@ text = "".join(lines)
 if re.search(r"(?:read_ahead_kb|vfs_cache_pressure)", text):
     raise SystemExit("Unsupported inline boot-tuning reference in hiby_player.sh")
 
-launch_re = re.compile(r"^[ \t]*(?:exec[ \t]+)?/usr/bin/(?:hiby_player|open_hiby_bootloader|compas_bootloader)[ \t]*(?:\r?\n)?$")
+launch_re = re.compile(r"^[ \t]*(?:exec[ \t]+)?/usr/bin/(?:hiby_player|open_hiby_bootloader|compas_bootloader|compas_loader)[ \t]*(?:\r?\n)?$")
 launches = [i for i, line in enumerate(lines) if launch_re.match(line)]
 if len(launches) != 1:
     raise SystemExit("Expected exactly one supported standalone launcher in hiby_player.sh")
@@ -216,6 +216,111 @@ PY
 chmod --reference="$wrapper" "$scratch/hiby_player.sh"
 sh -n "$scratch/hiby_player.sh"
 
+# The vendor mount_ubifs.sh erases userdata when ubiattach or the UBIFS mount
+# fails, and a failed attach or mount is not proof that the flash is blank.
+# Stage the no-erase failure paths in scratch storage; any unknown layout is
+# rejected before the root is changed.
+mount_ubifs="$root/usr/bin/mount_ubifs.sh"
+[[ -f $mount_ubifs && ! -L $mount_ubifs ]] || {
+    echo "Missing or non-regular userdata mount script: $mount_ubifs" >&2
+    exit 1
+}
+python3 - "$mount_ubifs" "$scratch/mount_ubifs.sh" <<'PY'
+import pathlib, re, sys
+
+source, destination = map(pathlib.Path, sys.argv[1:])
+text = source.read_text(encoding="utf-8")
+lines = text.splitlines(keepends=True)
+marker = "# COMPAS_USERDATA_NO_ERASE"
+ubimkvol = "\tubimkvol /dev/$ubi_name -N user_data -m"
+opts = ("noatime", "sync")
+vendor_comment_1 = "\t# ubi的分区能识别但是mount不了的情况\n"
+vendor_comment_2 = "\t# 擦除分区,重试一次\n"
+attach_vendor = [
+    "\tubiattach -m $num -d $ubi\n",
+    "\tif [ $? != 0 ]; then\n",
+    "\t\tflash_erase /dev/mtd$num 0 0\n",
+    "\t\tubiattach -m $num -d $ubi\n",
+    "\tfi\n",
+]
+attach_safe = [
+    "\tubiattach -m $num -d $ubi\n",
+    "\tif [ $? != 0 ]; then\n",
+    "\t\t# COMPAS_USERDATA_NO_ERASE: an attach failure does not prove the flash is blank.\n",
+    '\t\techo "<3>compas: userdata ubiattach failed for mtd$num; data not erased" 2>/dev/null >/dev/kmsg\n',
+    '\t\terror_exit "error: ubiattach failed for mtd$num; userdata was not erased"\n',
+    "\tfi\n",
+]
+
+
+def mount_vendor(opt):
+    return [
+        f"mount -o {opt} -t ubifs /dev/${{ubi_name}}_0 $mount_path\n",
+        "if [ $? != 0 ]; then\n",
+        '\tif [ "$try_count" != "" ]; then\n',
+        '\t\terror_exit "mount ubi error again"\n',
+        "\tfi\n",
+        vendor_comment_1,
+        vendor_comment_2,
+        "\tflash_erase /dev/mtd$num 0 0\n",
+        "\tubidetach -m $num\n",
+        "\t$prg_name $partition_name $mount_path 1\n",
+        "fi\n",
+    ]
+
+
+def mount_safe(opt):
+    return [
+        f"mount -o {opt} -t ubifs /dev/${{ubi_name}}_0 $mount_path\n",
+        "if [ $? != 0 ]; then\n",
+        "\t# COMPAS_USERDATA_NO_ERASE: a mount failure must never erase or detach user data.\n",
+        '\techo "<3>compas: userdata mount failed for /dev/${ubi_name}_0; data not erased" 2>/dev/null >/dev/kmsg\n',
+        '\terror_exit "error: ubifs mount failed for /dev/${ubi_name}_0; userdata was not erased"\n',
+        "fi\n",
+    ]
+
+
+def find_all(block):
+    n = len(block)
+    return [i for i in range(len(lines) - n + 1) if lines[i:i + n] == block]
+
+
+attach_v = find_all(attach_vendor)
+attach_s = find_all(attach_safe)
+mount_v = [(opt, i) for opt in opts for i in find_all(mount_vendor(opt))]
+mount_s = [(opt, i) for opt in opts for i in find_all(mount_safe(opt))]
+
+if len(attach_v) == 1 and len(mount_v) == 1 and not attach_s and not mount_s:
+    # The safe mount block keeps the OPT already present in the vendor line.
+    opt, mi = mount_v[0]
+    pairs = [
+        (attach_v[0], attach_vendor, attach_safe),
+        (mi, mount_vendor(opt), mount_safe(opt)),
+    ]
+    out = lines[:]
+    # Replace the later block first so the earlier index stays valid.
+    for start, old, new in sorted(pairs, key=lambda p: p[0], reverse=True):
+        out[start:start + len(old)] = new
+elif len(attach_s) == 1 and len(mount_s) == 1 and not attach_v and not mount_v:
+    out = lines[:]
+else:
+    raise SystemExit("Unrecognized userdata mount_ubifs.sh layout; expected only the vendor or only the Compás no-erase blocks")
+
+if any(re.match(r"^[ \t]*flash_erase[ \t]", line) for line in out):
+    raise SystemExit("flash_erase remains in mount_ubifs.sh")
+if any(re.match(r"^[ \t]*ubidetach[ \t]", line) for line in out):
+    raise SystemExit("ubidetach remains in mount_ubifs.sh")
+if any("$prg_name $partition_name" in line for line in out):
+    raise SystemExit("Recursive mount retry remains in mount_ubifs.sh")
+if sum(line.count(marker) for line in out) != 2:
+    raise SystemExit("Expected exactly two Compás no-erase markers in mount_ubifs.sh")
+if sum(line.rstrip("\r\n") == ubimkvol for line in out) != 1:
+    raise SystemExit("Expected exactly one userdata ubimkvol provisioning line")
+destination.write_text("".join(out), encoding="utf-8")
+PY
+chmod --reference="$mount_ubifs" "$scratch/mount_ubifs.sh"
+sh -n "$scratch/mount_ubifs.sh"
+
 # All checks have passed; apply the prepared files, including the idempotently
 # guarded vendor script staged above.
 for rel in "${shared_paths[@]:0:2}"; do
@@ -228,9 +333,10 @@ if [[ $radio_backend == 0 ]]; then
     install -D -m 0755 "$canonical_wifi" "$wifi"
 fi
 install -m 0755 "$scratch/hiby_player.sh" "$wrapper"
+install -m 0755 "$scratch/mount_ubifs.sh" "$mount_ubifs"
 
 # Sanity-check the installed payload as a final packaging guard.
-for rel in "${shared_paths[@]}" usr/bin/wifi_on.sh; do
+for rel in "${shared_paths[@]}" usr/bin/wifi_on.sh usr/bin/mount_ubifs.sh; do
     sh -n "$root/$rel"
 done
 sh -n "$wrapper"

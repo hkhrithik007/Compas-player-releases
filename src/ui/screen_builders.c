@@ -909,9 +909,13 @@ lv_obj_t * build_icon_grid_screen(const char * title, lv_event_cb_t back_btn_cb,
             lv_obj_set_style_bg_image_src(tile, asset_path(item->bg_image), 0);
             lv_obj_set_style_bg_image_opa(tile, LV_OPA_COVER, 0);
         }
-        /* Visual press feedback using GUI_COLOR_PRESSED with full opacity. */
-        lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, LV_STATE_PRESSED);
-        lv_obj_set_style_bg_color(tile, lv_color_hex(GUI_COLOR_PRESSED), LV_STATE_PRESSED);
+        /* Apply a 25% press tint, preserving opaque custom tile backgrounds. */
+        const lv_opa_t press_opa = 64; /* 25% of 255 */
+        lv_color_t press_color = lv_color_hex(GUI_COLOR_PRESSED);
+        if (item->has_bg_color)
+            press_color = lv_color_mix(press_color, lv_color_hex(item->bg_color), press_opa);
+        lv_obj_set_style_bg_opa(tile, item->has_bg_color ? LV_OPA_COVER : press_opa, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(tile, press_color, LV_STATE_PRESSED);
         /* Zero default card border so only grid-level divider lines are drawn. */
         lv_obj_set_style_border_width(tile, 0, 0);
         lv_obj_set_style_pad_all(tile, ICON_GRID_TILE_PAD, 0);

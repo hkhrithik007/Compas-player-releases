@@ -23,6 +23,13 @@ bool image_thumb_write_bin(const uint8_t * data, size_t size, int max_w, int max
                            artwork_cancel_fn cancel_cb, void * cancel_user,
                            const char ** reason);
 
+/* Center-cover image to exact dimensions and write the same atomic LVGL
+ * RGB565 binary format. */
+bool image_wallpaper_write_bin(const uint8_t * data, size_t size, int width, int height,
+                              const char * dest_path, artwork_priority_t prio,
+                              artwork_cancel_fn cancel_cb, void * cancel_user,
+                              const char ** reason);
+
 /* Native size of a JPEG, PNG or BMP from its header, without decoding. */
 bool image_thumb_native_size(const uint8_t * data, size_t size, int * out_w, int * out_h);
 

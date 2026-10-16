@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-13 10:21-0600\n"
+"POT-Creation-Date: 2026-10-16 00:10-0600\n"
 "PO-Revision-Date: 2026-10-13 00:00+0000\n"
 "Last-Translator: Codex machine draft\n"
 "Language-Team: Ukrainian\n"
@@ -131,6 +131,69 @@ msgstr "Неприпустимий шлях до оновлення."
 msgid "Could not start the update."
 msgstr "Не вдалося розпочати оновлення."
 
+#, fuzzy
+msgid "Update failed."
+msgstr "Доступне оновлення"
+
+msgid "Could not prepare secure update storage."
+msgstr ""
+
+msgid "Could not download the release checksums."
+msgstr "Не вдалося завантажити контрольні суми випуску."
+
+msgid "The release does not provide a valid player checksum."
+msgstr ""
+
+#, fuzzy
+msgid "The release checksum does not match the published asset digest."
+msgstr "Для образу цього пристрою у випуску немає контрольної суми."
+
+#, fuzzy
+msgid "The latest player release changed. Check again."
+msgstr "Вибраний файл оновлення змінився. Виберіть його ще раз."
+
+msgid "The player image exceeds the safe size limit."
+msgstr ""
+
+#, fuzzy
+msgid "Not enough internal storage for the player update."
+msgstr "На SD-картці недостатньо вільного місця для оновлення."
+
+#, fuzzy
+msgid "The player download did not complete."
+msgstr "Завантаження не завершено. Перевірте Wi-Fi та спробуйте ще раз."
+
+#, fuzzy
+msgid "The downloaded player failed SHA-256 verification."
+msgstr "Завантажений образ не пройшов перевірку й був видалений."
+
+msgid "Place a valid player executable at SD/.compas/compas_player."
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update check."
+msgstr "Не вдалося розпочати перевірку оновлень."
+
+#, fuzzy
+msgid "Another update is already active."
+msgstr "Оновлення вже виконується."
+
+#, fuzzy
+msgid "Check for a player update first."
+msgstr "Перевірити оновлення онлайн"
+
+#, fuzzy
+msgid "Not enough memory."
+msgstr "Недостатньо пам’яті для з’єднання"
+
+#, fuzzy
+msgid "Could not start the player download."
+msgstr "Не вдалося розпочати завантаження."
+
+#, fuzzy
+msgid "Could not start the SD player update."
+msgstr "Не вдалося розпочати оновлення плагіна."
+
 msgid "Screenshots unavailable"
 msgstr "Знімки екрана недоступні"
 
@@ -145,6 +208,66 @@ msgstr "Не вдалося зробити знімок екрана (буфер
 
 msgid "Screenshot failed (worker)"
 msgstr "Не вдалося зробити знімок екрана (службовий процес)"
+
+msgid "Files"
+msgstr "Файли"
+
+msgid "Artists"
+msgstr "Виконавці"
+
+msgid "Albums"
+msgstr "Альбоми"
+
+msgid "Album Artist"
+msgstr "Виконавець альбому"
+
+msgid "Genres"
+msgstr "Жанри"
+
+msgid "All Songs"
+msgstr "Усі композиції"
+
+msgid "Playlists"
+msgstr "Списки"
+
+msgid "Sound"
+msgstr "Звук"
+
+msgid "Playback"
+msgstr "Відтворення"
+
+msgid "Library"
+msgstr "Бібліотека"
+
+msgid "Wi-Fi"
+msgstr "Wi-Fi"
+
+msgid "Bluetooth"
+msgstr "Bluetooth"
+
+msgid "Sleep Timer"
+msgstr "Таймер сну"
+
+msgid "Crossfade"
+msgstr "Плавний перехід"
+
+msgid "AirPlay"
+msgstr "AirPlay"
+
+msgid "DLNA"
+msgstr "DLNA"
+
+msgid "Gapless"
+msgstr "Без пауз"
+
+msgid "Remote Control"
+msgstr "Дистанційне керування"
+
+msgid "Car Mode"
+msgstr "Режим автомобіля"
+
+msgid "Plugins"
+msgstr "Плагіни"
 
 #, c-format
 msgid "Page %d of %d"
@@ -217,9 +340,6 @@ msgstr "Доступний новіший випуск або випуск зм�
 
 msgid "Insert an SD card to download the update."
 msgstr "Вставте SD-картку, щоб завантажити оновлення."
-
-msgid "Could not download the release checksums."
-msgstr "Не вдалося завантажити контрольні суми випуску."
 
 msgid "The release has no checksum for this device's image."
 msgstr "Для образу цього пристрою у випуску немає контрольної суми."
@@ -654,9 +774,6 @@ msgstr "Додати до списку"
 msgid "+ New Playlist"
 msgstr "+ Новий список"
 
-msgid "Files"
-msgstr "Файли"
-
 msgid "Audio"
 msgstr "Аудіо"
 
@@ -675,9 +792,6 @@ msgid_plural "%lld tracks"
 msgstr[0] "%lld композиція"
 msgstr[1] "%lld композиції"
 msgstr[2] "%lld композицій"
-
-msgid "All Songs"
-msgstr "Усі композиції"
 
 msgid "Recently Added"
 msgstr "Нещодавно додані"
@@ -737,24 +851,12 @@ msgstr "Бібліотека змінилася. Відкрийте альбом
 msgid "Cannot load album tracks"
 msgstr "Не вдалося завантажити композиції альбому"
 
-msgid "Artists"
-msgstr "Виконавці"
-
-msgid "Albums"
-msgstr "Альбоми"
-
-msgid "Album Artist"
-msgstr "Виконавець альбому"
-
 #, c-format
 msgid "%d song"
 msgid_plural "%d songs"
 msgstr[0] "%d композиція"
 msgstr[1] "%d композиції"
 msgstr[2] "%d композицій"
-
-msgid "Genres"
-msgstr "Жанри"
 
 msgid "Recently Played"
 msgstr "Нещодавно відтворені"
@@ -819,9 +921,6 @@ msgstr "Створіть список вище або скопіюйте йог�
 msgid "SD card not available"
 msgstr "SD-картка недоступна"
 
-msgid "Playlists"
-msgstr "Списки"
-
 msgid "Not enough memory to load CUE tracks"
 msgstr "Недостатньо пам’яті для завантаження композицій CUE"
 
@@ -871,21 +970,11 @@ msgstr "Виберіть Налаштування > Оновити музичн�
 msgid "Later"
 msgstr "Пізніше"
 
-msgid "Library migration pending. Favourites and play history will be kept"
-msgstr "Очікується перенесення бібліотеки. Обране та історію відтворення буде збережено"
-
 msgid "No SD card"
 msgstr "Немає SD-картки"
 
 msgid "Library loaded"
 msgstr "Бібліотеку завантажено"
-
-msgid ""
-"Migrating\n"
-"music database..."
-msgstr ""
-"Перенесення\n"
-"музичної бази даних..."
 
 msgid ""
 "Refreshing\n"
@@ -907,9 +996,6 @@ msgid ""
 msgstr ""
 "Оновлення\n"
 "музичної бази даних..."
-
-msgid "Preparing database migration..."
-msgstr "Підготовка до перенесення бази даних..."
 
 msgid "Preparing metadata refresh..."
 msgstr "Підготовка до оновлення метаданих..."
@@ -1027,9 +1113,6 @@ msgstr ""
 "Збереження музичної бази даних\n"
 "У великих бібліотеках це може тривати довго"
 
-msgid "Library migration failed. Old library intact. Use Settings > Update Music Database to retry"
-msgstr "Не вдалося перенести бібліотеку. Стара бібліотека збережена. Щоб повторити, виберіть Налаштування > Оновити музичну базу даних"
-
 msgid "Library unavailable. Use Settings > Update Music Database to rebuild"
 msgstr "Бібліотека недоступна. Виберіть Налаштування > Оновити музичну базу даних, щоб створити її заново"
 
@@ -1041,12 +1124,6 @@ msgstr "Не вдалося прочитати деякі композиції"
 
 msgid "Metadata refreshed"
 msgstr "Метадані оновлено"
-
-msgid "Library migrated. Old database cleanup will retry"
-msgstr "Бібліотеку перенесено. Очищення старої бази буде повторено"
-
-msgid "Library migrated. Favourites and play history kept"
-msgstr "Бібліотеку перенесено. Обране та історію відтворення збережено"
 
 msgid "Library recovered and saved, some folders could not be read"
 msgstr "Бібліотеку відновлено й збережено, але деякі папки не вдалося прочитати"
@@ -1114,6 +1191,10 @@ msgstr "Усі дані на картці буде видалено без мо�
 
 msgid "Format"
 msgstr "Форматувати"
+
+#, fuzzy
+msgid "Could not restart into the boot selector"
+msgstr "Не вдалося створити папку"
 
 msgid "An update is in progress. Please wait."
 msgstr "Виконується оновлення. Зачекайте."
@@ -1362,9 +1443,6 @@ msgstr "Не задано"
 msgid "DNS Settings"
 msgstr "Налаштування DNS"
 
-msgid "Wi-Fi"
-msgstr "Wi-Fi"
-
 msgid "Manual SSID Entry"
 msgstr "Введення SSID вручну"
 
@@ -1546,6 +1624,17 @@ msgstr "Не вдалося перемкнутися на %s"
 msgid "USB Mode"
 msgstr "Режим USB"
 
+#, fuzzy
+msgid "Failed to update USB charging"
+msgstr "Не вдалося видалити профіль"
+
+msgid "USB charging setting is busy"
+msgstr ""
+
+#, fuzzy
+msgid "Could not start USB charging update"
+msgstr "Не вдалося розпочати оновлення плагіна."
+
 msgid "Leave USB DAC mode?"
 msgstr "Вийти з режиму USB DAC?"
 
@@ -1574,9 +1663,6 @@ msgstr "Вхід USB: %s · %u біт"
 #, c-format
 msgid "DAC path: %s · %u-bit"
 msgstr "Шлях ЦАП: %s · %u біт"
-
-msgid "Bluetooth"
-msgstr "Bluetooth"
 
 msgid "Bluetooth is off"
 msgstr "Bluetooth вимкнено"
@@ -1624,9 +1710,6 @@ msgstr "Увімкніть Wi-Fi для доступу"
 msgid "Web Server is busy"
 msgstr "Вебсервер зайнятий"
 
-msgid "AirPlay"
-msgstr "AirPlay"
-
 msgid "When on, this device is visible to AirPlay senders on your Wi-Fi network -- stream audio from an iPhone, iPad, or Mac to be played through this device's own output."
 msgstr "Коли цю функцію ввімкнено, пристрій видимий відправникам AirPlay у вашій мережі Wi-Fi. Передавайте аудіо з iPhone, iPad або Mac для відтворення через вихід цього пристрою."
 
@@ -1644,9 +1727,6 @@ msgstr "Коли цю функцію ввімкнено, пристрій вид
 
 msgid "Service is busy"
 msgstr "Служба зайнята"
-
-msgid "DLNA"
-msgstr "DLNA"
 
 msgid "Unavailable"
 msgstr "Недоступно"
@@ -1689,9 +1769,6 @@ msgstr "Для повторного з’єднання програмам і б
 
 msgid "Generate"
 msgstr "Створити"
-
-msgid "Remote Control"
-msgstr "Дистанційне керування"
 
 msgid "Connection PIN"
 msgstr "PIN-код з’єднання"
@@ -2027,8 +2104,8 @@ msgid "Crossfeed: %d%%"
 msgstr "Кросфід: %d%%"
 
 #, c-format
-msgid "Pre-Amp: %+.2f dB"
-msgstr "Передпідсилення: %+.2f дБ"
+msgid "%+.2f dB"
+msgstr "%+.2f дБ"
 
 #, c-format
 msgid "%.0f Hz"
@@ -2079,6 +2156,82 @@ msgstr ""
 "Оновити за допомогою %s?\n"
 "Пристрій перезавантажиться в режим відновлення."
 
+msgid ""
+"Install the player update from the SD card?\n"
+"\n"
+"Updates the player and restarts the device. Firmware, fonts, and artwork are unchanged."
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update"
+msgstr "Не вдалося розпочати оновлення."
+
+#, fuzzy
+msgid "Updating player"
+msgstr "Оновлення плагінів"
+
+#, fuzzy
+msgid "Starting update"
+msgstr "Підготовка оновлення"
+
+msgid "Connect to Wi-Fi before downloading the player update"
+msgstr ""
+
+msgid "Starting download"
+msgstr ""
+
+#, fuzzy
+msgid "Could not start the player update check"
+msgstr "Не вдалося розпочати перевірку оновлень."
+
+#, fuzzy
+msgid "Checking for player updates"
+msgstr "Перевірка оновлень"
+
+msgid "Check for online update"
+msgstr "Перевірити оновлення онлайн"
+
+msgid "Install from SD card"
+msgstr "Установити із SD-картки"
+
+#, fuzzy
+msgid "Download & Install"
+msgstr "Помилка завантаження"
+
+#, fuzzy
+msgid "Install & Restart"
+msgstr "Установити й перезавантажити"
+
+#, fuzzy
+msgid "Downloading player update"
+msgstr "Завантаження оновлення"
+
+#, fuzzy
+msgid "Installing player update"
+msgstr "Встановлення плагіна"
+
+#, fuzzy
+msgid "Checking the latest release"
+msgstr "Перевірка файла на SD-картці"
+
+msgid "Replacing the player and preparing to restart"
+msgstr ""
+
+#, c-format
+msgid ""
+"Available player release: %s.\n"
+"Installed: %s\n"
+"\n"
+"Download and install? This updates the player and restarts the device. Firmware, fonts, and artwork are unchanged."
+msgstr ""
+
+msgid "Player updated successfully"
+msgstr ""
+
+#, fuzzy
+msgid "Player update failed"
+msgstr "Помилка відтворення: не вдалося вивести звук"
+
 #, c-format
 msgid ""
 "Firmware release %s is downloaded and verified.\n"
@@ -2106,12 +2259,6 @@ msgstr "Завантаження оновлення"
 
 msgid "Update saved. Connect to Wi-Fi, then install from Firmware Update > Install from SD card."
 msgstr "Оновлення збережено. Під’єднайтеся до Wi-Fi, а потім виберіть Оновлення прошивки > Установити із SD-картки."
-
-msgid "Check for online update"
-msgstr "Перевірити оновлення онлайн"
-
-msgid "Install from SD card"
-msgstr "Установити із SD-картки"
 
 msgid "Download"
 msgstr "Завантажити"
@@ -2209,8 +2356,8 @@ msgstr "Знімок екрана (Живлення + зменшення гуч�
 msgid "Enable debug logging"
 msgstr "Увімкнути журнал налагодження"
 
-msgid "Load covers during playback (Experimental)"
-msgstr "Завантажувати обкладинки під час відтворення (експериментально)"
+msgid "Reboot to bootloader"
+msgstr ""
 
 msgid "Custom color"
 msgstr "Власний колір"
@@ -2229,6 +2376,12 @@ msgstr "Підібрати до обкладинки альбому"
 
 msgid "Takes its color from the cover of the playing track"
 msgstr "Колір береться з обкладинки композиції, що відтворюється"
+
+msgid "Tint startup image"
+msgstr "Забарвити заставку"
+
+msgid "Uses the accent color for the default splash."
+msgstr "Використовує колір акценту для стандартної заставки."
 
 msgid "Presets"
 msgstr "Попередні налаштування"
@@ -2284,9 +2437,6 @@ msgstr "Максимальна гучність"
 msgid "Limits the player volume, including buttons, remote controls and plugins."
 msgstr "Обмежує гучність плеєра, зокрема під час керування кнопками, пультом і плагінами."
 
-msgid "Car Mode"
-msgstr "Режим автомобіля"
-
 msgid "Car Mode is disabled."
 msgstr "Режим автомобіля вимкнено."
 
@@ -2328,9 +2478,6 @@ msgstr "Залишилося: %d:%02d:%02d"
 #, c-format
 msgid "Time remaining: %d:%02d"
 msgstr "Залишилося: %d:%02d"
-
-msgid "Sleep Timer"
-msgstr "Таймер сну"
 
 msgid "Enable Sleep Timer"
 msgstr "Увімкнути таймер сну"
@@ -2405,12 +2552,6 @@ msgstr "Звукові ефекти"
 msgid "Download Profiles"
 msgstr "Завантажити профілі"
 
-msgid "Crossfade"
-msgstr "Плавний перехід"
-
-msgid "Gapless"
-msgstr "Без пауз"
-
 msgid "Buttons & Remote"
 msgstr "Кнопки та пульт"
 
@@ -2420,8 +2561,9 @@ msgstr "Відтворення та керування"
 msgid "Equalizer"
 msgstr "Еквалайзер"
 
-msgid "Sound"
-msgstr "Звук"
+#, fuzzy
+msgid "Crossfeed"
+msgstr "Кросфід: вимкнено"
 
 msgid "Power"
 msgstr "Живлення"
@@ -2531,9 +2673,6 @@ msgstr "Найновіші за датою зміни"
 msgid "Release Year (oldest first)"
 msgstr "Рік випуску (від найстарішого)"
 
-msgid "Albums (main list)"
-msgstr "Альбоми (основний список)"
-
 msgid "Files use modification dates. Albums use the newest track added; missing release years sort last. Update Music Database once to read years from existing files."
 msgstr "Для файлів використовується дата зміни. Для альбомів — дата додавання найновішої композиції; альбоми без року випуску виводяться останніми. Оновіть музичну базу даних, щоб зчитати роки з наявних файлів."
 
@@ -2545,9 +2684,6 @@ msgstr "Оновити всі метадані"
 
 msgid "Refresh All Covers"
 msgstr "Оновити всі обкладинки"
-
-msgid "Library"
-msgstr "Бібліотека"
 
 msgid "Animation Speed"
 msgstr "Швидкість анімації"
@@ -2561,14 +2697,75 @@ msgstr "QWERTY"
 msgid "Keyboard"
 msgstr "Клавіатура"
 
-msgid "Drawer Volume Slider"
-msgstr "Повзунок гучності в панелі"
+msgid "Plugins can override these saved preferences."
+msgstr "Плагіни можуть перевизначити ці збережені налаштування."
+
+msgid "Quick Drawer"
+msgstr "Швидка панель"
+
+msgid "Enabled"
+msgstr "Увімкнено"
+
+msgid "Volume Slider"
+msgstr "Повзунок гучності"
+
+msgid "Reorder Items"
+msgstr "Змінити порядок"
+
+#, fuzzy
+msgid "Volume"
+msgstr "Збільшити гучність"
+
+msgid "Clock"
+msgstr "Годинник"
+
+msgid "Wired Headphones"
+msgstr ""
+
+#, fuzzy
+msgid "Bluetooth Audio (A2DP)"
+msgstr "Bluetooth вимкнено"
+
+#, fuzzy
+msgid "USB Audio"
+msgstr "Аудіо"
+
+#, fuzzy
+msgid "Playback Status"
+msgstr "Відтворення"
+
+#, fuzzy
+msgid "Bluetooth Codec"
+msgstr "Режим Bluetooth DAC"
+
+#, fuzzy
+msgid "Battery Icon"
+msgstr "Відсоток заряду"
+
+msgid "Left"
+msgstr ""
+
+msgid "Center"
+msgstr ""
+
+msgid "Right"
+msgstr ""
+
+#, fuzzy
+msgid "Clock Position"
+msgstr "Позиція"
 
 msgid "Battery Percentage"
 msgstr "Відсоток заряду"
 
+msgid "Top Bar"
+msgstr ""
+
 msgid "Artist Images"
 msgstr "Зображення виконавців"
+
+msgid "Themes"
+msgstr "Теми"
 
 msgid "Appearance"
 msgstr "Вигляд"
@@ -2609,6 +2806,11 @@ msgstr "Безпечне заряджання (500 мА)"
 msgid "LED charge indicator"
 msgstr "Світлодіод заряджання"
 
+msgid ""
+"Disable charging\n"
+"in USB DAC mode"
+msgstr ""
+
 msgid "Charging"
 msgstr "Заряджання"
 
@@ -2627,9 +2829,6 @@ msgstr "Установити час"
 msgid "24-Hour Clock"
 msgstr "24-годинний формат"
 
-msgid "Clock"
-msgstr "Годинник"
-
 msgid "Save"
 msgstr "Зберегти"
 
@@ -2644,6 +2843,10 @@ msgstr "Обслуговування"
 
 msgid "Firmware Update"
 msgstr "Оновлення прошивки"
+
+#, fuzzy
+msgid "Player Update"
+msgstr "Макет плеєра"
 
 msgid "Plugins & Layouts"
 msgstr "Плагіни та макети"
@@ -2663,17 +2866,14 @@ msgstr "Налаштування"
 msgid "Turn off ADB first (Settings > System > USB Mode), then enable USB DAC from here."
 msgstr "Спочатку вимкніть ADB (Налаштування > Система > Режим USB), а потім увімкніть тут USB DAC."
 
-msgid "Plugins"
-msgstr "Плагіни"
-
-msgid "Themes"
-msgstr "Теми"
-
 msgid "Now Playing layouts"
 msgstr "Макети екрана відтворення"
 
 msgid "More"
 msgstr "Більше"
+
+msgid "0 dB"
+msgstr "0 дБ"
 
 msgid "Combined response (dB) · EQ off"
 msgstr "Сумарна характеристика (дБ) · еквалайзер вимкнено"
@@ -2780,14 +2980,32 @@ msgstr ""
 msgid "Enable band"
 msgstr "Увімкнути смугу"
 
-msgid "Reset to defaults"
-msgstr "Скинути до типових налаштувань"
+#, fuzzy
+msgid "Crossfeed angle"
+msgstr "Кросфід: вимкнено"
 
-msgid "Parametric EQ"
-msgstr "Параметричний еквалайзер"
+msgid ""
+"No delay\n"
+"30°\n"
+"45°\n"
+"60°\n"
+"90°"
+msgstr ""
+
+msgid "Crossfeed blends a filtered signal from the opposite channel and works independently of PEQ. With No delay, identical left and right signals are affected very little."
+msgstr ""
+
+msgid "PEQ"
+msgstr "PEQ"
 
 msgid "Frequency"
 msgstr "Частота"
+
+msgid "Pre-Amp"
+msgstr "Передпідсилення"
+
+msgid "Reset to defaults"
+msgstr "Скинути до типових налаштувань"
 
 msgid "48 kHz reference"
 msgstr "Еталон 48 кГц"
@@ -3251,6 +3469,46 @@ msgstr "Керування живленням"
 
 msgid "Playback and device actions"
 msgstr "Відтворення та дії пристрою"
+
+#~ msgid "Parametric EQ"
+#~ msgstr "Параметричний еквалайзер"
+
+#~ msgid "Library migration pending. Favourites and play history will be kept"
+#~ msgstr "Очікується перенесення бібліотеки. Обране та історію відтворення буде збережено"
+
+#~ msgid ""
+#~ "Migrating\n"
+#~ "music database..."
+#~ msgstr ""
+#~ "Перенесення\n"
+#~ "музичної бази даних..."
+
+#~ msgid "Preparing database migration..."
+#~ msgstr "Підготовка до перенесення бази даних..."
+
+#~ msgid "Library migration failed. Old library intact. Use Settings > Update Music Database to retry"
+#~ msgstr "Не вдалося перенести бібліотеку. Стара бібліотека збережена. Щоб повторити, виберіть Налаштування > Оновити музичну базу даних"
+
+#~ msgid "Library migrated. Old database cleanup will retry"
+#~ msgstr "Бібліотеку перенесено. Очищення старої бази буде повторено"
+
+#~ msgid "Library migrated. Favourites and play history kept"
+#~ msgstr "Бібліотеку перенесено. Обране та історію відтворення збережено"
+
+#~ msgid "Load covers during playback (Experimental)"
+#~ msgstr "Завантажувати обкладинки під час відтворення (експериментально)"
+
+#~ msgid "Albums (main list)"
+#~ msgstr "Альбоми (основний список)"
+
+#~ msgid "Visible"
+#~ msgstr "Показувати"
+
+#~ msgid "Move Up"
+#~ msgstr "Перемістити вгору"
+
+#~ msgid "Move Down"
+#~ msgstr "Перемістити вниз"
 
 #~ msgid "Back"
 #~ msgstr "Назад"

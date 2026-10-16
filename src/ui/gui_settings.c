@@ -10,6 +10,8 @@
 #include "app_clock.h"
 #include "app_version.h"
 #include <math.h>
+#include <fcntl.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include "gui_subsonic.h"
 #include "gui_books.h"
@@ -31,6 +33,7 @@
 #include "timezone_data.h"
 #include "firmware_update.h"
 #include "firmware_ota.h"
+#include "player_update.h"
 #include "plugin_manager.h"
 #include "gui_plugin_manage.h"
 #include "gui_plugin_store.h"
@@ -39,12 +42,15 @@
 #include "gui_navigation.h"
 #include "gui_player.h"
 #include "gui_reload.h"
+#include "src/library/cover_decode.h"
+#include "src/misc/cache/instance/lv_image_cache.h"
 #include "player_layouts.h"
 #include "db_log.h"
 #include "usb_dac_bridge.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include "backlight.h"
 #include "gui_file_manager.h"
@@ -63,10 +69,60 @@ static lv_obj_t * settings_gapless_toggle_img = NULL;
 static lv_obj_t * settings_screen;
 static lv_obj_t * settings_library_screen;
 static lv_obj_t * settings_sorting_screen;
-static lv_obj_t * settings_sorting_options[5];
+enum { SORTING_FILE_OPTION_COUNT = 2, SORTING_ALBUM_CONTEXT_COUNT = 3,
+       SORTING_ALBUM_MODE_COUNT = 3,
+       SORTING_OPTION_COUNT = SORTING_FILE_OPTION_COUNT +
+           SORTING_ALBUM_CONTEXT_COUNT * SORTING_ALBUM_MODE_COUNT };
+static lv_obj_t * settings_sorting_options[SORTING_OPTION_COUNT];
 static lv_obj_t * settings_sound_effects_screen;
 static lv_obj_t * settings_eq_profiles_menu_screen;
+static lv_obj_t * settings_crossfeed_screen;
 static lv_obj_t * settings_appearance_screen;
+static lv_obj_t * ui_order_screen;
+static lv_obj_t * ui_order_list;
+static lv_obj_t * ui_order_rows[UI_DRAWER_COUNT];
+static lv_obj_t * ui_order_drag_handles[UI_DRAWER_COUNT];
+static lv_obj_t * ui_order_visible_buttons[UI_DRAWER_COUNT];
+static lv_timer_t * ui_order_drag_timer;
+static bool ui_order_drag_active;
+static int ui_order_drag_id = -1;
+static int ui_order_drag_ids[UI_DRAWER_COUNT];
+static int ui_order_drag_count;
+static int32_t ui_order_drag_y;
+static lv_indev_t * ui_order_drag_indev;
+static bool ui_order_drag_list_was_scrollable;
+static bool ui_order_drag_changed;
+static void ui_order_row_translate_anim_cb(void * var, int32_t value) {
+    lv_obj_t * row = var;
+    if (row) lv_obj_set_style_translate_y(row, value, 0);
+}
+static void ui_order_row_stop_translate(lv_obj_t * row) {
+    if (!row) return;
+    lv_anim_delete(row, ui_order_row_translate_anim_cb);
+    lv_obj_set_style_translate_y(row, 0, 0);
+}
+static void ui_order_rows_animate_to_layout(void) {
+    for (int id = 0; id < UI_DRAWER_COUNT; ++id) {
+        lv_obj_t * row = ui_order_rows[id];
+        if (!row) continue;
+        lv_anim_delete(row, ui_order_row_translate_anim_cb);
+        int32_t offset = lv_obj_get_style_translate_y(row, LV_PART_MAIN);
+        if (!offset) continue;
+        lv_anim_t anim;
+        lv_anim_init(&anim);
+        lv_anim_set_var(&anim, row);
+        lv_anim_set_values(&anim, offset, 0);
+        lv_anim_set_duration(&anim, 150);
+        lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+        lv_anim_set_exec_cb(&anim, ui_order_row_translate_anim_cb);
+        lv_anim_start(&anim);
+    }
+}
+static lv_obj_t * quick_drawer_settings_screen;
+static lv_obj_t * quick_drawer_settings_list;
+static void populate_quick_drawer_settings(void);
+extern void gui_shell_apply_customization(void);
+static void topbar_set_clicked_row_switch(lv_event_t * e, bool checked);
 static lv_obj_t * settings_topbar_screen;
 static lv_obj_t * settings_topbar_list;
 static lv_obj_t * settings_topbar_clock_position_screen;
@@ -132,6 +188,7 @@ static lv_obj_t * clock_set_time_row;
 static lv_obj_t * clock_timezone_row;
 static lv_obj_t * clock_timezone_value_label;
 static lv_obj_t * eq_screen;
+static lv_obj_t * eq_reset_row;
 static lv_obj_t * eq_profiles_screen;
 static char eq_current_profile_name[256];
 static void eq_profile_display_name(const char * name, char * out, size_t size) {
@@ -283,15 +340,20 @@ static lv_obj_t * eq_title_label;
 static bool eq_graph_visible;
 static lv_obj_t * eq_graph_panel, *eq_graph_chart, *eq_graph_caption;
 static lv_chart_series_t * eq_graph_series;
-static lv_obj_t * eq_graph_min_label, *eq_graph_zero_label, *eq_graph_max_label;
-static lv_obj_t * eq_band_options_row, *eq_freq_card, *eq_gain_card, *eq_q_card;
+static lv_obj_t * eq_graph_min_label, *eq_graph_low_label, *eq_graph_zero_label;
+static lv_obj_t * eq_graph_high_label, *eq_graph_max_label;
+static lv_obj_t * eq_band_options_row, *eq_preamp_card, *eq_freq_card, *eq_gain_card, *eq_q_card;
 static void refresh_all_eq_widgets(void);
+static void eq_refresh_graph(void);
 
 void gui_settings_refresh_font_geometry(void) {
     if (eq_profile_button_label)
         lv_obj_set_height(eq_profile_button_label, lv_font_get_line_height(lv_obj_get_style_text_font(eq_profile_button_label, 0)));
+    if (eq_graph_chart) lv_obj_set_style_pad_ver(eq_graph_chart,
+        lv_font_get_line_height(gui_theme_font(GUI_FONT_ROLE_SUBTEXT)) / 2, 0);
     if (eq_screen) lv_obj_update_layout(eq_screen);
     if (eq_band_options_screen) lv_obj_update_layout(eq_band_options_screen);
+    if (settings_crossfeed_screen) lv_obj_update_layout(settings_crossfeed_screen);
     if (eq_title_label) lv_obj_set_style_text_font(eq_title_label, gui_theme_font(GUI_FONT_ROLE_ROW), 0);
 }
 
@@ -352,7 +414,8 @@ static void eq_numeric_entry_done_cb(const char * text, void * user_data) {
             if (val > 12.0) val = 12.0;
             peq_set_preamp_db(val);
             if (eq_preamp_slider) lv_slider_set_value(eq_preamp_slider, (int32_t) (val * 10.0), LV_ANIM_OFF);
-            if (eq_preamp_value_label) lv_label_set_text_fmt(eq_preamp_value_label, TR("Pre-Amp: %+.2f dB"), val);
+            if (eq_preamp_value_label) lv_label_set_text_fmt(eq_preamp_value_label, TR("%+.2f dB"), val);
+            if (eq_graph_visible) eq_refresh_graph();
             peq_save();
             break;
         case EQ_FIELD_CROSSFEED:
@@ -400,7 +463,7 @@ static void eq_numeric_entry_done_cb(const char * text, void * user_data) {
 }
 
 /* Tap-to-edit: attached to each slider card's value label (see
- * create_eq_slider_card()) -- opens the shared numeric keypad pre-filled
+ * create_eq_slider_card() / eq_make_slider_card()) -- opens the shared numeric keypad pre-filled
  * with the field's current exact value, for typing a precise number
  * instead of only dragging a slider. */
 static void eq_field_label_click_cb(lv_event_t * e) {
@@ -444,9 +507,18 @@ static void eq_screen_loaded_cb(lv_event_t * e) {
     if (lv_event_get_code(e) == LV_EVENT_SCREEN_LOADED) refresh_all_eq_widgets();
 }
 
+static void crossfeed_screen_loaded_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_SCREEN_LOADED) refresh_all_eq_widgets();
+}
+
 static void eq_screen_btn_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     nav_push(eq_screen);
+}
+
+static void crossfeed_screen_btn_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    if (settings_crossfeed_screen) nav_push(settings_crossfeed_screen);
 }
 
 static void eq_bypass_switch_event_cb(lv_event_t * e) {
@@ -494,7 +566,7 @@ static void eq_band_step_cb(lv_event_t * e) {
     if (stop > PEQ_NUM_BANDS) stop = 0;
     eq_graph_visible = (stop == PEQ_NUM_BANDS);
     if (!eq_graph_visible) current_eq_band = stop;
-    lv_obj_t * band_widgets[] = {eq_band_options_row, eq_freq_card, eq_gain_card, eq_q_card};
+    lv_obj_t * band_widgets[] = {eq_band_options_row, eq_preamp_card, eq_reset_row, eq_freq_card, eq_gain_card, eq_q_card};
     for (size_t i = 0; i < sizeof(band_widgets) / sizeof(band_widgets[0]); ++i) {
         if (!band_widgets[i]) continue;
         if (eq_graph_visible) lv_obj_add_flag(band_widgets[i], LV_OBJ_FLAG_HIDDEN);
@@ -523,8 +595,9 @@ static void eq_preamp_slider_event_cb(lv_event_t * e) {
 
     if (code == LV_EVENT_VALUE_CHANGED) {
         peq_set_preamp_db(db);
-        lv_label_set_text_fmt(eq_preamp_value_label, TR("Pre-Amp: %+.2f dB"), db);
-    } else if (code == LV_EVENT_RELEASED) {
+        lv_label_set_text_fmt(eq_preamp_value_label, TR("%+.2f dB"), db);
+        if (eq_graph_visible) eq_refresh_graph();
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         peq_save();
     }
 }
@@ -537,7 +610,7 @@ static void eq_crossfeed_slider_event_cb(lv_event_t * e) {
         peq_set_crossfeed(strength);
         eq_format_crossfeed(formatted, sizeof(formatted), strength);
         lv_label_set_text(eq_crossfeed_value_label, formatted);
-    } else if (code == LV_EVENT_RELEASED) {
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         peq_save();
     }
 }
@@ -559,7 +632,7 @@ static void eq_freq_slider_event_cb(lv_event_t * e) {
     if (code == LV_EVENT_VALUE_CHANGED) {
         peq_set_band(current_eq_band, freq, band->gain_db, band->q);
         lv_label_set_text_fmt(eq_freq_value_label, TR("%.0f Hz"), freq);
-    } else if (code == LV_EVENT_RELEASED) {
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         peq_save();
     }
 }
@@ -575,7 +648,7 @@ static void eq_gain_slider_event_cb(lv_event_t * e) {
         peq_set_band(current_eq_band, band->freq_hz, gain, band->q);
         eq_format_gain(formatted, sizeof(formatted), gain);
         lv_label_set_text(eq_gain_value_label, formatted);
-    } else if (code == LV_EVENT_RELEASED) {
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         peq_save();
     }
 }
@@ -591,7 +664,7 @@ static void eq_q_slider_event_cb(lv_event_t * e) {
         peq_set_band(current_eq_band, band->freq_hz, band->gain_db, q);
         eq_format_q(formatted, sizeof(formatted), q);
         lv_label_set_text(eq_q_value_label, formatted);
-    } else if (code == LV_EVENT_RELEASED) {
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         peq_save();
     }
 }
@@ -672,6 +745,193 @@ static gui_popup_t ota_install_popup;
 static lv_obj_t * ota_install_title;
 static gui_busy_handle_t ota_busy;
 static bool ota_ui_active;
+
+/* Player-only update shares the settings screen's main-loop polling and busy
+ * overlay. The worker's state survives an in-process UI rebuild; teardown
+ * drops only the LVGL handle, and polling recreates the overlay if needed. */
+static lv_obj_t * player_update_menu;
+static lv_obj_t * player_update_backdrop;
+static gui_popup_t player_update_offer_popup;
+static lv_obj_t * player_update_offer_title;
+static gui_popup_t player_update_confirm_popup;
+static lv_obj_t * player_update_confirm_title;
+static gui_busy_handle_t player_update_busy;
+static bool player_update_ui_active;
+static player_update_state_t player_update_ui_last_state = PLAYER_UPDATE_IDLE;
+
+static bool player_update_worker_active(void) {
+    player_update_status_t status;
+    player_update_get_status(&status);
+    return status.state == PLAYER_UPDATE_CHECKING || status.state == PLAYER_UPDATE_DOWNLOADING ||
+           status.state == PLAYER_UPDATE_INSTALLING;
+}
+
+static bool player_update_can_start(void) {
+    if (!firmware_usb_ready()) return false;
+    if (firmware_ota_busy() || firmware_update_busy() || player_update_worker_active()) {
+        show_error_toast(TR("An update is already in progress"));
+        return false;
+    }
+    return true;
+}
+
+static void hide_player_update_menu(void) {
+    if (player_update_menu) lv_obj_add_flag(player_update_menu, LV_OBJ_FLAG_HIDDEN);
+    if (player_update_backdrop) lv_obj_add_flag(player_update_backdrop, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void player_update_backdrop_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    hide_player_update_menu();
+}
+
+static void player_update_cancel_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    gui_popup_hide(&player_update_offer_popup);
+    gui_popup_hide(&player_update_confirm_popup);
+    player_update_reset();
+}
+
+static void player_update_show_sd_confirm(void) {
+    lv_label_set_text(player_update_confirm_title,
+                      TR("Install the player update from the SD card?\n\nUpdates the player and restarts the device. Firmware, fonts, and artwork are unchanged."));
+    gui_popup_show(&player_update_confirm_popup);
+}
+
+static void player_update_install_confirm_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    gui_popup_hide(&player_update_confirm_popup);
+    if (!player_update_can_start()) return;
+    char error[160] = {0};
+    bool started = player_update_start_sd_install(error, sizeof(error));
+    if (!started) {
+        show_error_toast(error[0] ? error : TR("Could not start the player update"));
+        return;
+    }
+    player_update_ui_active = true;
+    player_update_ui_last_state = PLAYER_UPDATE_IDLE;
+    player_update_busy = gui_busy_show(TR("Updating player"), TR("Starting update"));
+    gui_busy_set_progress(player_update_busy, 0);
+}
+
+static void player_update_online_offer_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    gui_popup_hide(&player_update_offer_popup);
+    if (!player_update_can_start()) return;
+    if (!gui_shell_wifi_effective_enabled()) {
+        show_error_toast(TR("Connect to Wi-Fi before downloading the player update"));
+        return;
+    }
+    char error[160] = {0};
+    if (!player_update_start_online_install(error, sizeof(error))) {
+        show_error_toast(error[0] ? error : TR("Could not start the player update"));
+        return;
+    }
+    player_update_ui_active = true;
+    player_update_ui_last_state = PLAYER_UPDATE_IDLE;
+    player_update_busy = gui_busy_show(TR("Updating player"), TR("Starting download"));
+    gui_busy_set_progress(player_update_busy, 0);
+}
+
+static void player_update_online_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    hide_player_update_menu();
+    if (!player_update_can_start()) return;
+    if (!gui_shell_wifi_effective_enabled()) {
+        show_error_toast(TR("Turn on Wi-Fi and connect first"));
+        return;
+    }
+    if (!player_update_start_check()) {
+        show_error_toast(TR("Could not start the player update check"));
+        return;
+    }
+    player_update_ui_active = true;
+    player_update_ui_last_state = PLAYER_UPDATE_IDLE;
+    player_update_busy = gui_busy_show(TR("Checking for player updates"), "");
+}
+
+static void player_update_sd_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    hide_player_update_menu();
+    if (!player_update_can_start()) return;
+    player_update_show_sd_confirm();
+}
+
+static void build_player_update_popups(void) {
+    const menu_popup_row_t rows[] = {
+        { TR("Check for online update"), player_update_online_cb, false },
+        { TR("Install from SD card"), player_update_sd_cb, false },
+        { TR("Cancel"), player_update_backdrop_cb, false, true },
+    };
+    player_update_menu = build_menu_popup(rows, (int)(sizeof(rows) / sizeof(rows[0])),
+                                          player_update_backdrop_cb, &player_update_backdrop);
+    player_update_offer_popup.popup = build_confirm_popup(
+        "", LV_LABEL_LONG_WRAP, &player_update_offer_title, NULL, TR("Download & Install"), accent_lv_color(),
+        player_update_online_offer_cb, NULL, TR("Cancel"), accent_lv_color(), player_update_cancel_cb, NULL,
+        player_update_cancel_cb, &player_update_offer_popup.backdrop);
+    player_update_confirm_popup.popup = build_confirm_popup(
+        "", LV_LABEL_LONG_WRAP, &player_update_confirm_title, NULL, TR("Install & Restart"),
+        lv_color_make(255, 120, 120), player_update_install_confirm_cb, NULL,
+        TR("Cancel"), accent_lv_color(), player_update_cancel_cb, NULL,
+        player_update_cancel_cb, &player_update_confirm_popup.backdrop);
+}
+
+static void player_update_row_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    if (player_update_menu) lv_obj_remove_flag(player_update_menu, LV_OBJ_FLAG_HIDDEN);
+    if (player_update_backdrop) lv_obj_remove_flag(player_update_backdrop, LV_OBJ_FLAG_HIDDEN);
+    if (player_update_backdrop) lv_obj_move_foreground(player_update_backdrop);
+    if (player_update_menu) lv_obj_move_foreground(player_update_menu);
+}
+
+static void poll_player_update(void) {
+    if (!player_update_ui_active) return;
+    player_update_status_t status;
+    player_update_get_status(&status);
+    if (status.state == PLAYER_UPDATE_CHECKING || status.state == PLAYER_UPDATE_DOWNLOADING ||
+        status.state == PLAYER_UPDATE_INSTALLING) {
+        bool recreated = !player_update_busy;
+        if (recreated)
+            player_update_busy = gui_busy_show(status.state == PLAYER_UPDATE_CHECKING ? TR("Checking for player updates") :
+                status.state == PLAYER_UPDATE_DOWNLOADING ? TR("Downloading player update") : TR("Installing player update"), "");
+        if (recreated || player_update_ui_last_state != status.state) {
+            const char * detail = status.state == PLAYER_UPDATE_CHECKING ? TR("Checking the latest release") :
+                status.state == PLAYER_UPDATE_DOWNLOADING ? TR("Downloading player update") :
+                TR("Replacing the player and preparing to restart");
+            gui_busy_set_detail(player_update_busy, detail);
+            player_update_ui_last_state = status.state;
+        }
+        if (status.state == PLAYER_UPDATE_DOWNLOADING)
+            gui_busy_set_progress(player_update_busy, status.percent);
+        return;
+    }
+
+    if (player_update_busy) {
+        gui_busy_hide(player_update_busy);
+        player_update_busy = 0;
+    }
+    player_update_ui_active = false;
+    if (status.state == PLAYER_UPDATE_CHECKED) {
+        lv_label_set_text_fmt(player_update_offer_title,
+                              TR("Available player release: %s.\nInstalled: %s\n\nDownload and install? This updates the player and restarts the device. Firmware, fonts, and artwork are unchanged."),
+                              status.release.label, app_version_label());
+        gui_popup_show(&player_update_offer_popup);
+        return;
+    }
+    if (status.state == PLAYER_UPDATE_DONE) {
+        player_update_reset();
+#ifdef HOST_BUILD
+        show_info_toast(TR("Player updated successfully"));
+#else
+        idle_shutdown_reboot_now();
+#endif
+        return;
+    }
+    if (status.state == PLAYER_UPDATE_FAILED) {
+        show_error_toast(status.error[0] ? status.error : TR("Player update failed"));
+        player_update_reset();
+    }
+}
 
 static void hide_firmware_source_menu(void) {
     if (firmware_source_menu) lv_obj_add_flag(firmware_source_menu, LV_OBJ_FLAG_HIDDEN);
@@ -799,6 +1059,9 @@ void firmware_update_row_cb(lv_event_t * e) {
 }
 
 void poll_firmware_ota(void) {
+    /* Keep player update progress advancing even when firmware OTA owns its
+     * worker, or when the existing firmware poll is otherwise idle. */
+    poll_player_update();
     if (manual_update_ui_active || ota_ui_active) {
         firmware_update_status_t recovery;
         firmware_update_get_status(&recovery);
@@ -1054,13 +1317,20 @@ static void screenshot_combo_switch_event_cb(lv_event_t * e) {
     hw_buttons_set_screenshot_combo_enabled(current_settings.screenshot_combo_enabled);
 }
 
+static void reboot_to_boot_selector_row_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    char error[128] = {0};
+    if (!idle_shutdown_reboot_to_bootloader(error, sizeof(error)))
+        show_error_toast(error[0] ? error : TR("Could not restart into the boot selector"));
+}
+
 #if defined(BOARD_R3II_2025)
   #define SCREENSHOT_ROW_LABEL TR("Screenshots (Power + Previous)")
 #else
   #define SCREENSHOT_ROW_LABEL TR("Screenshots (Power + Vol Down)")
 #endif
 static lv_obj_t * build_dev_options_screen(void) {
-    static pill_list_item_t items[3];
+    static pill_list_item_t items[4];
     /* ADB lives here rather than on the USB Mode screen: it overrides
      * Storage/DAC while on and persists across a reboot, so it sits behind
      * Developer Options as the explicit opt-in that makes re-applying it on
@@ -1073,7 +1343,9 @@ static lv_obj_t * build_dev_options_screen(void) {
     items[2] = (pill_list_item_t){ SCREENSHOT_ROW_LABEL, PILL_ACCESSORY_TOGGLE,
                                     current_settings.screenshot_combo_enabled, NULL,
                                     screenshot_combo_switch_event_cb, NULL };
-    lv_obj_t * scr = build_pill_list_screen(TR("Developer Options"), generic_back_cb, items, 3, gui_theme_accent_style(), GUI_ROW_GAP, 100);
+    items[3] = (pill_list_item_t){ TR("Reboot to bootloader"), PILL_ACCESSORY_NONE, false,
+                                    reboot_to_boot_selector_row_cb, NULL, NULL };
+    lv_obj_t * scr = build_pill_list_screen(TR("Developer Options"), generic_back_cb, items, 4, gui_theme_accent_style(), GUI_ROW_GAP, 100);
     finalize_screen_navigation(scr);
     return scr;
 }
@@ -1230,6 +1502,12 @@ static void accent_dynamic_event_cb(lv_event_t * e) {
     gui_theme_set_accent_dynamic(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
+static void accent_startup_tint_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+    current_settings.startup_splash_tint = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    settings_save_async(&current_settings);
+}
+
 static lv_obj_t * accent_card(lv_obj_t * parent, int32_t width) {
     lv_obj_t * card = lv_obj_create(parent);
     lv_obj_set_size(card, width, LV_SIZE_CONTENT);
@@ -1340,6 +1618,28 @@ static lv_obj_t * build_accent_color_screen(void) {
     accent_dynamic_switch = lv_switch_create(dyn);
     lv_obj_add_style(accent_dynamic_switch, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_add_event_cb(accent_dynamic_switch, accent_dynamic_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* Built-in splash tint is an independent choice from album-art matching.
+     * Custom startup images keep their original colors. */
+    lv_obj_t * splash_tint = accent_card(body, card_w);
+    lv_obj_set_flex_flow(splash_tint, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(splash_tint, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(splash_tint, BOARD_SCALE_PX(12), 0);
+    lv_obj_t * splash_tint_text = accent_plain_obj(splash_tint);
+    lv_obj_set_flex_grow(splash_tint_text, 1);
+    lv_obj_set_height(splash_tint_text, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(splash_tint_text, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(splash_tint_text, BOARD_SCALE_PX(4), 0);
+    accent_text(splash_tint_text, TR("Tint startup image"), GUI_FONT_ROLE_ROW, false);
+    lv_obj_t * splash_tint_hint = accent_text(splash_tint_text,
+        TR("Uses the accent color for the default splash."), GUI_FONT_ROLE_SUBTEXT, true);
+    lv_obj_set_width(splash_tint_hint, lv_pct(100));
+    lv_label_set_long_mode(splash_tint_hint, LV_LABEL_LONG_WRAP);
+    lv_obj_t * startup_tint_switch = lv_switch_create(splash_tint);
+    lv_obj_add_style(startup_tint_switch, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(startup_tint_switch, accent_startup_tint_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    if (current_settings.startup_splash_tint)
+        lv_obj_add_state(startup_tint_switch, LV_STATE_CHECKED);
 
     /* Custom color picker */
     accent_picker_card = accent_card(body, card_w);
@@ -2815,11 +3115,12 @@ static lv_obj_t * build_music_playback_screen(void) {
 }
 
 static lv_obj_t * build_music_audio_screen(void) {
-    static pill_list_item_t items[5 + PLUGIN_MAX_MUSIC_AUDIO_LIST_ITEMS];
+    static pill_list_item_t items[6 + PLUGIN_MAX_MUSIC_AUDIO_LIST_ITEMS];
     lv_obj_t * eq_row = NULL;
     items[0] = (pill_list_item_t){ TR("Equalizer"), PILL_ACCESSORY_CHEVRON, false, eq_screen_btn_event_cb, NULL, NULL };
+    items[1] = (pill_list_item_t){ TR("Crossfeed"), PILL_ACCESSORY_CHEVRON, false, crossfeed_screen_btn_event_cb, NULL, NULL };
     items[0].out_row = &eq_row;
-    int count = append_grouped_plugin_rows(items, 1, PLUGIN_MAX_MUSIC_AUDIO_LIST_ITEMS,
+    int count = append_grouped_plugin_rows(items, 2, PLUGIN_MAX_MUSIC_AUDIO_LIST_ITEMS,
                                        "music_audio", NULL,
                                        plugin_manager_get_music_audio_list_item_count,
                                        plugin_manager_get_music_audio_list_item_label,
@@ -3176,8 +3477,19 @@ static void refresh_all_covers_row_cb(lv_event_t * e) {
 static void refresh_sorting_options(void) {
     int album_sort = current_settings.album_sort_mode;
     if (!metadata_db_album_sort_available((metadata_db_album_sort_t) album_sort)) album_sort = 0;
-    for (int i = 0; i < 5; i++) {
-        bool selected = i < 2 ? current_settings.file_sort_mode == i : album_sort == i - 2;
+    int selected_sorts[] = { album_sort, current_settings.artist_albums_sort_mode,
+                             current_settings.album_artist_albums_sort_mode };
+    for (int i = 0; i < SORTING_OPTION_COUNT; i++) {
+        int selected_sort;
+        bool selected;
+        if (i < SORTING_FILE_OPTION_COUNT) selected = current_settings.file_sort_mode == i;
+        else {
+            int context = (i - SORTING_FILE_OPTION_COUNT) / SORTING_ALBUM_MODE_COUNT;
+            int sort = (i - SORTING_FILE_OPTION_COUNT) % SORTING_ALBUM_MODE_COUNT;
+            selected_sort = selected_sorts[context];
+            if (!metadata_db_album_sort_available((metadata_db_album_sort_t) selected_sort)) selected_sort = 0;
+            selected = selected_sort == sort;
+        }
         if (settings_sorting_options[i])
             lv_obj_set_style_border_width(settings_sorting_options[i], selected ? BOARD_SCALE_PX(3) : 0, 0);
     }
@@ -3186,18 +3498,36 @@ static void refresh_sorting_options(void) {
 static void sorting_option_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     int option = (int) (intptr_t) lv_event_get_user_data(e);
-    if (option < 0 || option >= 5) return;
-    if (option < 2) current_settings.file_sort_mode = option;
-    else {
-        metadata_db_album_sort_t sort = (metadata_db_album_sort_t) (option - 2);
+    if (option < 0 || option >= SORTING_OPTION_COUNT) return;
+    gui_library_sort_scope_t scope;
+    if (option < SORTING_FILE_OPTION_COUNT) {
+        if (current_settings.file_sort_mode == option) return;
+        current_settings.file_sort_mode = option;
+        scope = GUI_LIBRARY_SORT_FILES;
+    } else {
+        int context = (option - SORTING_FILE_OPTION_COUNT) / SORTING_ALBUM_MODE_COUNT;
+        int sort_value = (option - SORTING_FILE_OPTION_COUNT) % SORTING_ALBUM_MODE_COUNT;
+        metadata_db_album_sort_t sort = (metadata_db_album_sort_t) sort_value;
         if (sort != METADATA_DB_ALBUM_SORT_NAME && !metadata_db_album_sort_available(sort)) {
             show_error_toast(TR("Update Music Database to enable this album order"));
             return;
         }
-        current_settings.album_sort_mode = option - 2;
+        if (context == 0) {
+            if (current_settings.album_sort_mode == sort_value) return;
+            current_settings.album_sort_mode = sort_value;
+            scope = GUI_LIBRARY_SORT_ALBUMS;
+        } else if (context == 1) {
+            if (current_settings.artist_albums_sort_mode == sort_value) return;
+            current_settings.artist_albums_sort_mode = sort_value;
+            scope = GUI_LIBRARY_SORT_ARTIST_ALBUMS;
+        } else {
+            if (current_settings.album_artist_albums_sort_mode == sort_value) return;
+            current_settings.album_artist_albums_sort_mode = sort_value;
+            scope = GUI_LIBRARY_SORT_ALBUM_ARTIST_ALBUMS;
+        }
     }
     settings_save_async(&current_settings);
-    gui_library_apply_sorting();
+    gui_library_apply_sorting(scope);
     refresh_sorting_options();
 }
 
@@ -3206,13 +3536,22 @@ static lv_obj_t * build_sorting_screen(void) {
     lv_obj_t * screen = build_subsonic_list_screen(TR("Sorting"), &title, &list);
     (void) title;
     add_section_header(list, TR("Files (folders stay first)"));
-    static const char * labels[] = { N_("Name (A–Z)"), N_("Newest Modified"), N_("Name (A–Z)"),
-                                     N_("Recently Added"), N_("Release Year (oldest first)") };
-    for (int i = 0; i < 5; i++) {
-        if (i == 2) add_section_header(list, TR("Albums"));
+    static const char * labels[] = { N_("Name (A–Z)"), N_("Newest Modified") };
+    static const char * group_titles[] = { N_("Albums"), N_("Artists"), N_("Album Artist") };
+    static const char * album_labels[] = { N_("Name (A–Z)"), N_("Recently Added"), N_("Release Year (oldest first)") };
+    for (int i = 0; i < SORTING_FILE_OPTION_COUNT; i++) {
         settings_sorting_options[i] = add_pill_option_row(list, TR(labels[i]), false,
                                             sorting_option_cb, (void *) (intptr_t) i);
         lv_obj_add_style(settings_sorting_options[i], gui_theme_accent_outline_style(), 0);
+    }
+    for (int context = 0; context < SORTING_ALBUM_CONTEXT_COUNT; context++) {
+        add_section_header(list, TR(group_titles[context]));
+        for (int sort = 0; sort < SORTING_ALBUM_MODE_COUNT; sort++) {
+            int option = SORTING_FILE_OPTION_COUNT + context * SORTING_ALBUM_MODE_COUNT + sort;
+            settings_sorting_options[option] = add_pill_option_row(list, TR(album_labels[sort]), false,
+                                                sorting_option_cb, (void *) (intptr_t) option);
+            lv_obj_add_style(settings_sorting_options[option], gui_theme_accent_outline_style(), 0);
+        }
     }
     lv_obj_t * help = add_section_header(list,
         TR("Files use modification dates. Albums use the newest track added; missing release years sort last. Update Music Database once to read years from existing files."));
@@ -3370,12 +3709,330 @@ static void upside_down_screen_switch_event_cb(lv_event_t * e) {
     gui_display_apply_rotation(current_settings.screen_upside_down);
 }
 
-static void quick_drawer_volume_visible_switch_event_cb(lv_event_t * e) {
+static ui_item_order_t * ui_saved_order(void) {
+    return &current_settings.ui_customization.drawer;
+}
+static void populate_ui_order_screen(void);
+static void ui_order_drag_finish(bool commit);
+static void ui_order_control_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
-    current_settings.quick_drawer_volume_visible =
-        lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    if (ui_order_drag_active) ui_order_drag_finish(false);
+    int id = (int)(intptr_t)lv_event_get_user_data(e);
+    if (id < 0 || id >= UI_DRAWER_COUNT) return;
+    ui_item_order_t * order = ui_saved_order();
+    int at = -1;
+    for (unsigned i = 0; i < order->count; ++i)
+        if (order->ids[i] == id) { at = (int)i; break; }
+    if (at < 0 && order->count < UI_ORDER_MAX) order->ids[order->count++] = (uint8_t)id;
+    else if (at >= 0) {
+        for (unsigned i = (unsigned)at + 1; i < order->count; ++i) order->ids[i - 1] = order->ids[i];
+        --order->count;
+    } else return;
     settings_save_async(&current_settings);
-    gui_shell_refresh_quick_drawer_volume_visibility();
+    populate_ui_order_screen();
+    gui_shell_apply_customization();
+}
+static int ui_order_drag_index(int id) {
+    for (int i = 0; i < ui_order_drag_count; ++i)
+        if (ui_order_drag_ids[i] == id) return i;
+    return -1;
+}
+static void ui_order_drag_reorder(void) {
+    if (!ui_order_drag_active || ui_order_drag_id < 0 || !ui_order_list) return;
+    int from = ui_order_drag_index(ui_order_drag_id);
+    if (from < 0) return;
+    lv_obj_update_layout(ui_order_list);
+    int32_t visual_y[UI_DRAWER_COUNT];
+    for (int i = 0; i < ui_order_drag_count; ++i) {
+        lv_obj_t * row = ui_order_rows[ui_order_drag_ids[i]];
+        lv_area_t row_area;
+        lv_obj_get_coords(row, &row_area);
+        /* Flex layout includes translate_y in the current rendered coordinates. */
+        visual_y[ui_order_drag_ids[i]] = row_area.y1;
+    }
+    int to = from;
+    while (to + 1 < ui_order_drag_count) {
+        lv_area_t next_area;
+        lv_obj_get_coords(ui_order_rows[ui_order_drag_ids[to + 1]], &next_area);
+        int32_t next_center = (next_area.y1 + next_area.y2) / 2 -
+            lv_obj_get_style_translate_y(ui_order_rows[ui_order_drag_ids[to + 1]], LV_PART_MAIN);
+        if (ui_order_drag_y <= next_center) break;
+        ++to;
+    }
+    while (to > 0) {
+        lv_area_t previous_area;
+        lv_obj_get_coords(ui_order_rows[ui_order_drag_ids[to - 1]], &previous_area);
+        int32_t previous_center = (previous_area.y1 + previous_area.y2) / 2 -
+            lv_obj_get_style_translate_y(ui_order_rows[ui_order_drag_ids[to - 1]], LV_PART_MAIN);
+        if (ui_order_drag_y >= previous_center) break;
+        --to;
+    }
+    if (to == from) return;
+    int id = ui_order_drag_ids[from];
+    if (to > from) memmove(&ui_order_drag_ids[from], &ui_order_drag_ids[from + 1], (size_t)(to - from) * sizeof(int));
+    else memmove(&ui_order_drag_ids[to + 1], &ui_order_drag_ids[to], (size_t)(from - to) * sizeof(int));
+    ui_order_drag_ids[to] = id;
+    for (int i = 0; i < ui_order_drag_count; ++i)
+        lv_obj_move_to_index(ui_order_rows[ui_order_drag_ids[i]], i);
+    lv_obj_update_layout(ui_order_list);
+    for (int i = 0; i < ui_order_drag_count; ++i) {
+        int row_id = ui_order_drag_ids[i];
+        lv_obj_t * row = ui_order_rows[row_id];
+        lv_anim_delete(row, ui_order_row_translate_anim_cb);
+        lv_area_t row_area;
+        lv_obj_get_coords(row, &row_area);
+        int32_t offset = visual_y[row_id] - row_area.y1 +
+            lv_obj_get_style_translate_y(row, LV_PART_MAIN);
+        lv_obj_set_style_translate_y(row, offset, 0);
+    }
+    ui_order_rows_animate_to_layout();
+    ui_order_drag_changed = true;
+}
+static void ui_order_drag_finish(bool commit) {
+    if (ui_order_drag_timer) { lv_timer_delete(ui_order_drag_timer); ui_order_drag_timer = NULL; }
+    bool restore_ui = !commit || !ui_order_drag_changed;
+    if (ui_order_drag_active && ui_order_drag_list_was_scrollable && ui_order_list)
+        lv_obj_add_flag(ui_order_list, LV_OBJ_FLAG_SCROLLABLE);
+    if (ui_order_drag_active && commit && ui_order_drag_changed) {
+        ui_item_order_t * order = ui_saved_order();
+        bool final_order_changed = order->count != (unsigned)ui_order_drag_count;
+        for (int i = 0; !final_order_changed && i < ui_order_drag_count; ++i)
+            if (order->ids[i] != (uint8_t)ui_order_drag_ids[i]) final_order_changed = true;
+        if (final_order_changed) {
+            order->count = (uint8_t)ui_order_drag_count;
+            for (int i = 0; i < ui_order_drag_count; ++i) order->ids[i] = (uint8_t)ui_order_drag_ids[i];
+            settings_save_async(&current_settings);
+            gui_shell_apply_customization();
+        }
+    }
+    if (ui_order_drag_id >= 0 && ui_order_rows[ui_order_drag_id])
+        lv_obj_clear_state(ui_order_rows[ui_order_drag_id], LV_STATE_USER_1);
+    if (restore_ui) {
+        for (int id = 0; id < UI_DRAWER_COUNT; ++id)
+            ui_order_row_stop_translate(ui_order_rows[id]);
+    } else {
+        /* The committed order already matches the displayed child order. Let
+         * any in-flight row motion finish without repopulating and snapping it. */
+        ui_order_rows_animate_to_layout();
+    }
+    ui_order_drag_active = false;
+    ui_order_drag_id = -1;
+    ui_order_drag_indev = NULL;
+    ui_order_drag_list_was_scrollable = false;
+    ui_order_drag_changed = false;
+    if (restore_ui && ui_order_screen && ui_order_list)
+        populate_ui_order_screen();
+}
+static void ui_order_screen_unloaded_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_SCREEN_UNLOAD_START &&
+        lv_event_get_code(e) != LV_EVENT_SCREEN_UNLOADED) return;
+    if (ui_order_drag_active) ui_order_drag_finish(false);
+    else for (int id = 0; id < UI_DRAWER_COUNT; ++id)
+        ui_order_row_stop_translate(ui_order_rows[id]);
+}
+static void ui_order_drag_timer_cb(lv_timer_t * timer) {
+    (void)timer;
+    if (!ui_order_drag_active || !ui_order_list) return;
+    if (lv_obj_get_screen(ui_order_list) != lv_screen_active() || !ui_order_drag_indev ||
+        lv_indev_get_state(ui_order_drag_indev) != LV_INDEV_STATE_PRESSED) {
+        ui_order_drag_finish(false); return;
+    }
+    lv_point_t p; lv_indev_get_point(ui_order_drag_indev, &p); ui_order_drag_y = p.y;
+    lv_area_t list_area; lv_obj_get_coords(ui_order_list, &list_area);
+    int32_t edge = BOARD_SCALE_PX(36);
+    if (p.y < list_area.y1 + edge) {
+        int32_t scroll = list_area.y1 + edge - p.y;
+        if (scroll > BOARD_SCALE_PX(24)) scroll = BOARD_SCALE_PX(24);
+        lv_obj_scroll_by_bounded(ui_order_list, 0, scroll, LV_ANIM_OFF);
+    } else if (p.y > list_area.y2 - edge) {
+        int32_t scroll = p.y - (list_area.y2 - edge);
+        if (scroll > BOARD_SCALE_PX(24)) scroll = BOARD_SCALE_PX(24);
+        lv_obj_scroll_by_bounded(ui_order_list, 0, -scroll, LV_ANIM_OFF);
+    }
+    ui_order_drag_reorder();
+}
+static void ui_order_drag_handle_cb(lv_event_t * e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    int id = (int)(intptr_t)lv_event_get_user_data(e);
+    if (code == LV_EVENT_LONG_PRESSED) {
+        if (ui_order_drag_active) return;
+        ui_item_order_t * order = ui_saved_order();
+        ui_order_drag_count = 0;
+        for (unsigned i = 0; i < order->count; ++i)
+            if (order->ids[i] < UI_DRAWER_COUNT) ui_order_drag_ids[ui_order_drag_count++] = order->ids[i];
+        if (ui_order_drag_index(id) < 0) return;
+        ui_order_drag_active = true; ui_order_drag_id = id;
+        ui_order_drag_indev = lv_indev_active();
+        if (!ui_order_drag_indev) { ui_order_drag_finish(false); return; }
+        lv_point_t p; lv_indev_get_point(ui_order_drag_indev, &p); ui_order_drag_y = p.y;
+        ui_order_drag_list_was_scrollable = lv_obj_has_flag(ui_order_list, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_stop_scroll_anim(ui_order_list);
+        lv_obj_remove_flag(ui_order_list, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_state(ui_order_rows[id], LV_STATE_USER_1);
+        ui_order_drag_timer = lv_timer_create(ui_order_drag_timer_cb, 50, NULL);
+    } else if (code == LV_EVENT_PRESSING && ui_order_drag_active && ui_order_drag_id == id) {
+        if (ui_order_drag_indev) { lv_point_t p; lv_indev_get_point(ui_order_drag_indev, &p); ui_order_drag_y = p.y; }
+        ui_order_drag_reorder();
+    } else if ((code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) &&
+               ui_order_drag_active && ui_order_drag_id == id) {
+        ui_order_drag_finish(code == LV_EVENT_RELEASED);
+    }
+}
+static void add_customization_help(lv_obj_t *list) {
+    lv_obj_t *help = add_section_header(list, TR("Plugins can override these saved preferences."));
+    lv_obj_set_width(help, lv_pct(100));
+    lv_label_set_long_mode(help, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_LEFT, 0);
+}
+
+static void populate_ui_order_screen(void) {
+    if (!ui_order_list) return;
+    for (int id = 0; id < UI_DRAWER_COUNT; ++id)
+        ui_order_row_stop_translate(ui_order_rows[id]);
+    ui_item_order_t * order = ui_saved_order();
+    bool listed[UI_DRAWER_COUNT] = { false };
+    int visual_index = 0;
+    for (unsigned pos = 0; pos < order->count; ++pos) {
+        int id = order->ids[pos];
+        if (id >= UI_DRAWER_COUNT || listed[id] || !ui_order_rows[id]) continue;
+        listed[id] = true;
+        lv_obj_move_to_index(ui_order_rows[id], visual_index++);
+    }
+    for (int id = 0; id < UI_DRAWER_COUNT; ++id) {
+        if (listed[id] || !ui_order_rows[id]) continue;
+        listed[id] = true;
+        lv_obj_move_to_index(ui_order_rows[id], visual_index++);
+    }
+    lv_obj_update_layout(ui_order_list);
+    for (int id = 0; id < UI_DRAWER_COUNT; ++id) {
+        lv_obj_t * row = ui_order_rows[id];
+        if (!row) continue;
+        lv_obj_t * text = lv_obj_get_child(row, 0);
+        int32_t height = lv_obj_get_height(text) + BOARD_SCALE_PX(18);
+        if (height < ui_list_row_height()) height = ui_list_row_height();
+        lv_obj_set_height(row, height);
+        lv_obj_set_height(ui_order_drag_handles[id], height);
+        bool visible = false;
+        for (unsigned i = 0; i < order->count; ++i) if (order->ids[i] == id) { visible = true; break; }
+        lv_obj_t * handle = ui_order_drag_handles[id];
+        if (visible) lv_obj_clear_state(handle, LV_STATE_DISABLED);
+        else lv_obj_add_state(handle, LV_STATE_DISABLED);
+        if (visible) lv_obj_add_state(ui_order_visible_buttons[id], LV_STATE_CHECKED);
+        else lv_obj_clear_state(ui_order_visible_buttons[id], LV_STATE_CHECKED);
+    }
+}
+static lv_obj_t * build_ui_order_screen(void) {
+    lv_obj_t * title_label;
+    ui_order_screen = build_subsonic_list_screen(TR("Quick Drawer"), &title_label, &ui_order_list);
+    memset(ui_order_rows, 0, sizeof(ui_order_rows));
+    memset(ui_order_drag_handles, 0, sizeof(ui_order_drag_handles));
+    memset(ui_order_visible_buttons, 0, sizeof(ui_order_visible_buttons));
+    for (int id = 0; id < UI_DRAWER_COUNT; ++id) {
+        const char * label = ui_order_label(UI_ORDER_DRAWER, id);
+        if (!label) continue;
+        lv_obj_t * row = add_pill_row_base(ui_order_list, TR(label));
+        ui_order_rows[id] = row;
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_style(row, &list_row_pressed_style, LV_STATE_USER_1);
+        int32_t handle_px = BOARD_SCALE_PX(72);
+        if (handle_px < 48) handle_px = 48;
+        int32_t switch_width = BOARD_SCALE_PX(50);
+        int32_t text_width = LIST_ROW_WIDTH - handle_px - switch_width - GUI_TEXT_INSET - BOARD_SCALE_PX(20);
+        lv_obj_t * text = lv_obj_get_child(row, 0);
+        lv_obj_set_width(text, text_width);
+        lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
+        lv_obj_remove_flag(text, LV_OBJ_FLAG_USER_3);
+        lv_obj_set_height(text, LV_SIZE_CONTENT);
+        lv_obj_set_style_pad_top(text, 0, 0);
+        lv_obj_align(text, LV_ALIGN_LEFT_MID, GUI_TEXT_INSET + handle_px, 0);
+
+        lv_obj_t * handle = lv_button_create(row);
+        ui_order_drag_handles[id] = handle;
+        lv_obj_set_size(handle, handle_px, ui_list_row_height());
+        lv_obj_align(handle, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_add_flag(handle, LV_OBJ_FLAG_PRESS_LOCK);
+        lv_obj_remove_flag(handle, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_style(handle, &list_row_pressed_style, LV_STATE_PRESSED);
+        lv_obj_add_style(handle, &list_row_pressed_style, LV_STATE_USER_1);
+        lv_obj_set_style_radius(handle, BOARD_SCALE_PX(8), 0);
+        lv_obj_set_style_bg_opa(handle, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(handle, 0, 0);
+        lv_obj_set_style_shadow_width(handle, 0, 0);
+        lv_obj_set_style_opa(handle, LV_OPA_30, LV_STATE_DISABLED);
+        lv_obj_set_style_pad_all(handle, 0, 0);
+        lv_obj_t * grip = lv_image_create(handle);
+        lv_obj_set_size(grip, BOARD_SCALE_PX(32), BOARD_SCALE_PX(32));
+        lv_image_set_src(grip, asset_path("navigation/reorder.png"));
+        lv_image_set_inner_align(grip, LV_IMAGE_ALIGN_CONTAIN);
+        lv_obj_add_style(grip, &style_theme_text_primary, 0);
+        lv_obj_center(grip);
+        lv_obj_remove_flag(grip, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(handle, ui_order_drag_handle_cb, LV_EVENT_ALL, (void *)(intptr_t)id);
+        register_swipe_dead_zone(handle);
+
+        lv_obj_t * visible_switch = lv_switch_create(row);
+        ui_order_visible_buttons[id] = visible_switch;
+        lv_obj_add_style(visible_switch, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+        lv_obj_set_size(visible_switch, switch_width, BOARD_SCALE_PX(28));
+        lv_obj_align(visible_switch, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(6), 0);
+        lv_obj_add_event_cb(visible_switch, ui_order_control_cb, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)id);
+    }
+    populate_ui_order_screen();
+    add_customization_help(ui_order_list);
+    lv_obj_add_event_cb(ui_order_screen, ui_order_screen_unloaded_cb, LV_EVENT_SCREEN_UNLOAD_START, NULL);
+    lv_obj_add_event_cb(ui_order_screen, ui_order_screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
+    enable_gesture_bubble_recursive(ui_order_screen);
+    return ui_order_screen;
+}
+static void ui_order_settings_row_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    if (!ui_order_screen) build_ui_order_screen();
+    else populate_ui_order_screen();
+    nav_push(ui_order_screen);
+}
+static void quick_drawer_setting_toggle_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    int which = (int)(intptr_t)lv_event_get_user_data(e);
+    if (which == 0) current_settings.ui_customization.drawer_enabled = !current_settings.ui_customization.drawer_enabled;
+    else if (which == 1) current_settings.ui_customization.drawer_eq_visible = !current_settings.ui_customization.drawer_eq_visible;
+    else current_settings.quick_drawer_volume_visible = !current_settings.quick_drawer_volume_visible;
+    settings_save_async(&current_settings);
+    bool value = which == 0 ? current_settings.ui_customization.drawer_enabled :
+                 which == 1 ? current_settings.ui_customization.drawer_eq_visible :
+                              current_settings.quick_drawer_volume_visible;
+    topbar_set_clicked_row_switch(e, value);
+    if (which == 2) gui_shell_refresh_quick_drawer_volume_visibility();
+    else gui_shell_apply_customization();
+}
+static void populate_quick_drawer_settings(void) {
+    if (!quick_drawer_settings_list) return;
+    lv_obj_clean(quick_drawer_settings_list);
+    struct { const char * label; bool value; intptr_t which; } toggles[] = {
+        { N_("Enabled"), current_settings.ui_customization.drawer_enabled, 0 },
+        { N_("Equalizer"), current_settings.ui_customization.drawer_eq_visible, 1 },
+        { N_("Volume Slider"), current_settings.quick_drawer_volume_visible, 2 },
+    };
+    for (size_t i = 0; i < sizeof(toggles) / sizeof(toggles[0]); ++i) {
+        lv_obj_t * row = add_pill_toggle_row(quick_drawer_settings_list, TR(toggles[i].label), toggles[i].value, NULL);
+        lv_obj_add_event_cb(row, quick_drawer_setting_toggle_cb, LV_EVENT_CLICKED, (void *)toggles[i].which);
+    }
+    lv_obj_t * reorder = add_pill_chevron_row(quick_drawer_settings_list, TR("Reorder Items"), NULL);
+    lv_obj_add_event_cb(reorder, ui_order_settings_row_cb, LV_EVENT_CLICKED, NULL);
+    add_customization_help(quick_drawer_settings_list);
+    if (quick_drawer_settings_screen) enable_gesture_bubble_recursive(quick_drawer_settings_screen);
+}
+static lv_obj_t * build_quick_drawer_settings_screen(void) {
+    lv_obj_t * title_label;
+    quick_drawer_settings_screen = build_subsonic_list_screen(TR("Quick Drawer"), &title_label, &quick_drawer_settings_list);
+    populate_quick_drawer_settings();
+    enable_gesture_bubble_recursive(quick_drawer_settings_screen);
+    return quick_drawer_settings_screen;
+}
+static void quick_drawer_settings_row_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    if (!quick_drawer_settings_screen) build_quick_drawer_settings_screen();
+    else populate_quick_drawer_settings();
+    nav_push(quick_drawer_settings_screen);
 }
 
 static void artist_images_switch_event_cb(lv_event_t * e) {
@@ -3545,9 +4202,7 @@ static lv_obj_t * build_settings_appearance_screen(void) {
     items[1] = (pill_list_item_t){ TR("Font"), PILL_ACCESSORY_CHEVRON, false, custom_font_row_cb, NULL, NULL };
     items[2] = (pill_list_item_t){ TR("Font Size"), PILL_ACCESSORY_CHEVRON, false, font_size_settings_row_cb, NULL, NULL };
     items[3] = (pill_list_item_t){ TR("Keyboard"), PILL_ACCESSORY_CHEVRON, false, keyboard_layout_settings_row_cb, NULL, NULL };
-    items[4] = (pill_list_item_t){ TR("Drawer Volume Slider"), PILL_ACCESSORY_TOGGLE,
-                                    current_settings.quick_drawer_volume_visible, NULL,
-                                    quick_drawer_volume_visible_switch_event_cb, NULL };
+    items[4] = (pill_list_item_t){ TR("Quick Drawer"), PILL_ACCESSORY_CHEVRON, false, quick_drawer_settings_row_cb, NULL, NULL };
     items[5] = (pill_list_item_t){ TR("Top Bar"), PILL_ACCESSORY_CHEVRON, false,
                                     topbar_settings_row_cb, NULL, NULL };
     items[6] = (pill_list_item_t){ TR("Artist Images"), PILL_ACCESSORY_TOGGLE,
@@ -4029,6 +4684,7 @@ static void settings_plugins_layouts_updates_row_cb(lv_event_t * e) {
 static lv_obj_t * build_settings_updates_screen(void) {
     pill_list_item_t items[] = {
         { TR("Firmware Update"), PILL_ACCESSORY_CHEVRON, false, firmware_update_row_cb, NULL, NULL },
+        { TR("Player Update"), PILL_ACCESSORY_CHEVRON, false, player_update_row_cb, NULL, NULL },
         { TR("Plugins & Layouts"), PILL_ACCESSORY_CHEVRON, false, settings_plugins_layouts_updates_row_cb, NULL, NULL },
     };
     lv_obj_t * scr = build_pill_list_screen(TR("Updates"), generic_back_cb, items,
@@ -4375,6 +5031,117 @@ static int resolve_home_tiles(resolved_home_tile_t * out) {
     return count;
 }
 
+enum { HOME_JPEG_CACHE_MAX_BYTES = 4 * 1024 * 1024 };
+
+typedef struct {
+    lv_image_dsc_t descriptor;
+    uint16_t * pixels;
+} home_background_jpeg_t;
+
+typedef struct {
+    struct timespec deadline;
+} home_background_decode_cancel_t;
+
+static bool home_background_decode_should_cancel(void * user_data) {
+    const home_background_decode_cancel_t * cancel = user_data;
+    struct timespec now;
+    if (!cancel || clock_gettime(CLOCK_MONOTONIC, &now) != 0) return true;
+    return now.tv_sec > cancel->deadline.tv_sec ||
+           (now.tv_sec == cancel->deadline.tv_sec && now.tv_nsec >= cancel->deadline.tv_nsec);
+}
+
+/* Read only small, native-display-sized JPEGs into a single RGB565
+ * framebuffer. PNGs retain LVGL's decoder path so alpha remains intact. */
+static home_background_jpeg_t * home_background_decode_jpeg(const char * relative_path) {
+    const char * ext = strrchr(relative_path, '.');
+    if (!ext || (strcasecmp(ext, ".jpg") != 0 && strcasecmp(ext, ".jpeg") != 0)) return NULL;
+    const char * path = asset_path_plain(relative_path);
+    if (!path) return NULL;
+
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    struct stat st;
+    bool valid = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+                 st.st_size > 0 && st.st_size <= HOME_JPEG_CACHE_MAX_BYTES;
+    uint8_t * bytes = valid ? malloc((size_t)st.st_size) : NULL;
+    if (!bytes) valid = false;
+    size_t offset = 0;
+    while (valid && offset < (size_t)st.st_size) {
+        ssize_t n = read(fd, bytes + offset, (size_t)st.st_size - offset);
+        if (n <= 0) valid = false;
+        else offset += (size_t)n;
+    }
+    close(fd);
+    if (!valid) { free(bytes); return NULL; }
+
+    jpeg_probe_t probe;
+    lv_display_t * display = lv_display_get_default();
+    int32_t display_width = display ? lv_display_get_horizontal_resolution(display) : BOARD_SCREEN_WIDTH;
+    int32_t display_height = display ? lv_display_get_vertical_resolution(display) : BOARD_SCREEN_HEIGHT;
+    if (!jpeg_probe(bytes, (uint32_t)offset, &probe) || !probe.supported ||
+        probe.native_w <= 0 || probe.native_h <= 0 ||
+        probe.native_w > display_width || probe.native_h > display_height) {
+        free(bytes);
+        return NULL;
+    }
+
+    /* Avoid starting a UI-thread decode while another artwork request owns
+     * the coordinator. The decoder then performs its normal memory admission. */
+    if (artwork_coordinator_acquire(ARTWORK_PRIO_THUMBNAIL, 0, 0, NULL, NULL) !=
+        ARTWORK_ACQUIRE_OK) {
+        free(bytes);
+        return NULL;
+    }
+    artwork_coordinator_release(ARTWORK_PRIO_THUMBNAIL);
+
+    home_background_decode_cancel_t cancel;
+    if (clock_gettime(CLOCK_MONOTONIC, &cancel.deadline) != 0) {
+        free(bytes);
+        return NULL;
+    }
+    cancel.deadline.tv_nsec += 100000000L;
+    if (cancel.deadline.tv_nsec >= 1000000000L) {
+        cancel.deadline.tv_sec++;
+        cancel.deadline.tv_nsec -= 1000000000L;
+    }
+
+    home_background_jpeg_t * cache = calloc(1, sizeof(*cache));
+    if (!cache) {
+        free(bytes);
+        return NULL;
+    }
+    cover_decode_result_t result = cover_decode_to_rgb565_ex(
+        bytes, (uint32_t)offset, probe.native_w, probe.native_h,
+        ARTWORK_PRIO_THUMBNAIL, home_background_decode_should_cancel, &cancel,
+        &cache->pixels);
+    if (result != COVER_DECODE_OK || !cache->pixels) {
+        free(cache->pixels);
+        free(cache);
+        free(bytes);
+        return NULL;
+    }
+    free(bytes);
+    cache->descriptor.header.magic = LV_IMAGE_HEADER_MAGIC;
+    cache->descriptor.header.cf = LV_COLOR_FORMAT_RGB565;
+    cache->descriptor.header.w = probe.native_w;
+    cache->descriptor.header.h = probe.native_h;
+    cache->descriptor.header.stride = probe.native_w * 2;
+    cache->descriptor.data = (const uint8_t *)cache->pixels;
+    cache->descriptor.data_size = (uint32_t)probe.native_w * (uint32_t)probe.native_h * 2;
+    return cache;
+}
+
+static void home_background_jpeg_delete_cb(lv_event_t * event) {
+    if (lv_event_get_code(event) != LV_EVENT_DELETE) return;
+    lv_obj_t * scr = lv_event_get_target(event);
+    home_background_jpeg_t * cache = lv_event_get_user_data(event);
+    if (!scr || !cache) return;
+    lv_obj_set_style_bg_image_src(scr, NULL, 0);
+    lv_image_cache_drop(&cache->descriptor);
+    free(cache->pixels);
+    free(cache);
+}
+
 /* options.background_image (PLUGINS.md, plugin.set_home_layout()) -- sets
  * Home's OWN root object's bg_image_src directly, not style_theme_screen_bg
  * (shared by every screen in the app, mutated by plugin.set_background_
@@ -4386,7 +5153,13 @@ static int resolve_home_tiles(resolved_home_tile_t * out) {
  * so a plugin-set background applies whether Home is tile or list mode. */
 static void apply_home_background_image(lv_obj_t * scr) {
     if (!home_layout_config.configured || !home_layout_config.has_background_image) return;
-    lv_obj_set_style_bg_image_src(scr, asset_path(home_layout_config.background_image), 0);
+    home_background_jpeg_t * cache = home_background_decode_jpeg(home_layout_config.background_image);
+    if (cache) {
+        lv_obj_add_event_cb(scr, home_background_jpeg_delete_cb, LV_EVENT_DELETE, cache);
+        lv_obj_set_style_bg_image_src(scr, &cache->descriptor, 0);
+    } else {
+        lv_obj_set_style_bg_image_src(scr, asset_path(home_layout_config.background_image), 0);
+    }
 }
 
 /* Home .theme measurements use the 480px R1 as their reference. Keep this
@@ -4545,34 +5318,46 @@ static lv_obj_t * create_eq_slider_card(lv_obj_t * parent, eq_field_t field, lv_
     lv_obj_set_height(card, LV_SIZE_CONTENT);
     lv_obj_add_style(card, &style_theme_card_bg, 0);
     lv_obj_set_style_border_width(card, 0, 0);
-    lv_obj_set_style_radius(card, 12, 0);
-    lv_obj_set_style_pad_all(card, 14, 0);
-    lv_obj_set_style_pad_row(card, 10, 0);
+    lv_obj_set_style_radius(card, BOARD_SCALE_PX(12), 0);
+    lv_obj_set_style_pad_all(card, BOARD_SCALE_PX(16), 0);
+    lv_obj_set_style_pad_row(card, BOARD_SCALE_PX(8), 0);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     /* Clickable (tap-to-edit, see eq_field_label_click_cb()) -- the whole
      * label area is the tap target, not just the text glyphs, via
      * lv_obj_set_ext_click_area() below. */
     lv_obj_t * value_label = lv_label_create(card);
+    lv_obj_set_width(value_label, lv_pct(100));
+    lv_obj_set_style_text_align(value_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(value_label, LV_LABEL_LONG_WRAP);
     lv_obj_add_style(value_label, &style_theme_text_primary, 0);
-    lv_obj_set_style_text_font(value_label, gui_theme_font(GUI_FONT_ROLE_ROW), 0);
+    lv_obj_set_style_text_font(value_label, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
     lv_obj_add_flag(value_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(value_label, 16);
     lv_obj_add_event_cb(value_label, eq_field_label_click_cb, LV_EVENT_CLICKED, (void *) (intptr_t) field);
 
-    /* Inset track width so the knob radius stays within the card at slider extremes. */
-    lv_obj_t * slider = lv_slider_create(card);
-    lv_obj_set_width(slider, lv_pct(88));
+    /* Size the rail from the knob diameter, so its outer edges line up
+     * with the text inset at both ends, at every display resolution. */
+    lv_obj_t * slider_row = lv_obj_create(card);
+    lv_obj_set_size(slider_row, lv_pct(100), SLIDER_KNOB_SIZE + BOARD_SCALE_PX(8));
+    lv_obj_set_style_bg_opa(slider_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(slider_row, 0, 0);
+    lv_obj_set_style_pad_all(slider_row, 0, 0);
+    /* LVGL places the knob on the indicator end, one pixel left of the rail. */
+    lv_obj_set_style_pad_left(slider_row, SLIDER_TRACK_HEIGHT / 2 + SLIDER_KNOB_PAD + 1, 0);
+    lv_obj_set_style_pad_right(slider_row, SLIDER_TRACK_HEIGHT - 1 - SLIDER_TRACK_HEIGHT / 2 + SLIDER_KNOB_PAD, 0);
+    lv_obj_remove_flag(slider_row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t * slider = lv_slider_create(slider_row);
+    lv_obj_set_width(slider, lv_pct(100));
+    lv_obj_center(slider);
     lv_obj_set_height(slider, SLIDER_TRACK_HEIGHT);
     lv_slider_set_range(slider, range_min, range_max);
     lv_obj_add_style(slider, gui_theme_accent_style(), LV_PART_INDICATOR);
     lv_obj_add_style(slider, gui_theme_accent_knob_style(), LV_PART_KNOB);
-    lv_obj_set_style_width(slider, SLIDER_KNOB_SIZE, LV_PART_KNOB);
-    lv_obj_set_style_height(slider, SLIDER_KNOB_SIZE, LV_PART_KNOB);
     lv_obj_remove_flag(slider, LV_OBJ_FLAG_ADV_HITTEST);
-    lv_obj_set_ext_click_area(slider, BOARD_SCALE_PX(30));
+    lv_obj_set_ext_click_area(slider, SLIDER_KNOB_PAD + BOARD_SCALE_PX(4));
 
     *out_value_label = value_label;
     *out_slider = slider;
@@ -4611,7 +5396,7 @@ static void refresh_all_eq_widgets(void) {
     }
     if (eq_bypass_state_label) lv_label_set_text(eq_bypass_state_label, peq_get_bypass() ? TR("OFF") : TR("ON"));
     if (eq_preamp_slider) lv_slider_set_value(eq_preamp_slider, (int32_t) (peq_get_preamp_db() * 10.0), LV_ANIM_OFF);
-    if (eq_preamp_value_label) lv_label_set_text_fmt(eq_preamp_value_label, TR("Pre-Amp: %+.2f dB"), peq_get_preamp_db());
+    if (eq_preamp_value_label) lv_label_set_text_fmt(eq_preamp_value_label, TR("%+.2f dB"), peq_get_preamp_db());
     if (eq_crossfeed_slider) lv_slider_set_value(eq_crossfeed_slider, (int32_t) lround(peq_get_crossfeed() * 100.0), LV_ANIM_OFF);
     if (eq_crossfeed_value_label) {
         char formatted[32];
@@ -4633,6 +5418,10 @@ static void refresh_all_eq_widgets(void) {
         eq_profile_display_name(eq_current_profile_name, name, sizeof(name));
         lv_label_set_text(eq_profile_button_label, name);
     }
+    eq_refresh_graph();
+}
+
+static void eq_refresh_graph(void) {
     if (eq_graph_visible && eq_graph_chart && eq_graph_series) {
         double f[128], db[128], peak = 0.0;
         for (size_t i = 0; i < 128; ++i) f[i] = EQ_FREQ_MIN_HZ * pow(EQ_FREQ_MAX_HZ / EQ_FREQ_MIN_HZ, (double)i / 127.0);
@@ -4642,7 +5431,9 @@ static void refresh_all_eq_widgets(void) {
         if (range < 12) range = 12;
         if (range > 144) range = 144;
         if (eq_graph_min_label) lv_label_set_text_fmt(eq_graph_min_label, "-%d", range);
-        if (eq_graph_zero_label) lv_label_set_text(eq_graph_zero_label, "0");
+        if (eq_graph_low_label) lv_label_set_text_fmt(eq_graph_low_label, "-%d", range / 2);
+        if (eq_graph_zero_label) lv_label_set_text(eq_graph_zero_label, TR("0 dB"));
+        if (eq_graph_high_label) lv_label_set_text_fmt(eq_graph_high_label, "+%d", range / 2);
         if (eq_graph_max_label) lv_label_set_text_fmt(eq_graph_max_label, "+%d", range);
         lv_chart_set_range(eq_graph_chart, LV_CHART_AXIS_PRIMARY_Y, -range * 100, range * 100);
         for (size_t i = 0; i < 128; ++i) {
@@ -4680,7 +5471,7 @@ static void eq_reset_cancel_cb(lv_event_t * e) {
 static void eq_reset_confirm_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     hide_eq_reset_popup();
-    peq_reset_to_defaults();
+    peq_reset_equalizer();
     eq_current_profile_name[0] = '\0';
     refresh_all_eq_widgets();
     peq_save();
@@ -5218,7 +6009,7 @@ static void eq_save_profile_btn_cb(lv_event_t * e) {
 
 static lv_obj_t * eq_make_slider_card(lv_obj_t * parent, eq_field_t field, const char * title,
                                        lv_obj_t ** value_out, lv_obj_t ** slider_out,
-                                       int32_t minimum, int32_t maximum, const char * low, const char * high) {
+                                       int32_t minimum, int32_t maximum) {
     lv_obj_t * card = lv_obj_create(parent);
     lv_obj_set_width(card, lv_pct(96));
     lv_obj_set_height(card, LV_SIZE_CONTENT);
@@ -5226,31 +6017,37 @@ static lv_obj_t * eq_make_slider_card(lv_obj_t * parent, eq_field_t field, const
     lv_obj_set_style_border_width(card, BOARD_SCALE_PX(1), 0);
     lv_obj_set_style_radius(card, BOARD_SCALE_PX(14), 0);
     lv_obj_set_style_pad_hor(card, BOARD_SCALE_PX(14), 0);
-    lv_obj_set_style_pad_ver(card, BOARD_SCALE_PX(8), 0);
+    lv_obj_set_style_pad_ver(card, BOARD_SCALE_PX(3), 0);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(card, BOARD_SCALE_PX(3), 0);
+    lv_obj_set_style_pad_row(card, BOARD_SCALE_PX(1), 0);
     lv_obj_t * top_row = lv_obj_create(card);
-    lv_obj_set_width(top_row, lv_pct(100));
+    lv_obj_set_width(top_row, lv_pct(96));
     lv_obj_set_height(top_row, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(top_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(top_row, 0, 0);
     lv_obj_set_style_pad_all(top_row, 0, 0);
-    lv_obj_remove_flag(top_row, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_column(top_row, BOARD_SCALE_PX(8), 0);
+    lv_obj_remove_flag(top_row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(top_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_t * heading = lv_label_create(top_row);
     lv_label_set_text(heading, title);
+    lv_obj_set_width(heading, 0);
+    lv_obj_set_flex_grow(heading, 1);
+    lv_label_set_long_mode(heading, LV_LABEL_LONG_WRAP);
     lv_obj_add_style(heading, &style_theme_text_muted, 0);
     lv_obj_set_style_text_font(heading, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
     lv_obj_t * value = lv_label_create(top_row);
     lv_obj_add_style(value, &style_theme_text_primary, 0);
-    lv_obj_set_style_text_font(value, gui_theme_font(GUI_FONT_ROLE_TITLE), 0);
-    lv_obj_set_style_margin_bottom(top_row, BOARD_SCALE_PX(48), 0);
-    lv_obj_add_flag(value, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_ext_click_area(value, 14);
-    lv_obj_add_event_cb(value, eq_field_label_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)field);
+    lv_obj_set_style_text_font(value, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
+    /* Leave room between the value's tap target and the slider's expanded
+     * touch target so numeric entry remains independently tappable. */
+    lv_obj_set_style_margin_bottom(top_row, BOARD_SCALE_PX(16), 0);
+    lv_obj_add_flag(top_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_style(top_row, &list_row_pressed_style, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(top_row, eq_field_label_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)field);
     lv_obj_t * slider = lv_slider_create(card);
     lv_obj_set_width(slider, lv_pct(96));
     lv_obj_set_height(slider, BOARD_SCALE_PX(6));
@@ -5265,31 +6062,11 @@ static lv_obj_t * eq_make_slider_card(lv_obj_t * parent, eq_field_t field, const
     lv_obj_set_style_border_width(slider, BOARD_SCALE_PX(2), LV_PART_KNOB);
     lv_obj_set_style_pad_all(slider, BOARD_SCALE_PX(9), LV_PART_KNOB);
     lv_obj_set_style_radius(slider, LV_RADIUS_CIRCLE, LV_PART_KNOB);
-    /* Keep the thin rail while accepting touches across a 66 px tall area.
+    /* Keep the thin rail while accepting touches above and below it.
      * Disable knob-only hit testing so any point along the rail can drag. */
     lv_obj_remove_flag(slider, LV_OBJ_FLAG_ADV_HITTEST);
-    lv_obj_set_ext_click_area(slider, BOARD_SCALE_PX(30));
-    lv_obj_t * captions = lv_obj_create(card);
-    lv_obj_set_width(captions, lv_pct(94));
-    lv_obj_set_height(captions, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(captions, 0, 0);
-    lv_obj_set_style_border_width(captions, 0, 0);
-    lv_obj_set_style_pad_all(captions, 0, 0);
-    lv_obj_set_style_margin_top(captions, BOARD_SCALE_PX(10), 0);
-    lv_obj_remove_flag(captions, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(captions, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(captions, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t * min_label = lv_label_create(captions);
-    lv_label_set_text(min_label, low);
-    lv_obj_add_style(min_label, &style_theme_text_muted, 0);
-    lv_obj_set_style_text_font(min_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
-    lv_obj_t * max_label = lv_label_create(captions);
-    lv_label_set_text(max_label, high);
-    lv_obj_add_style(max_label, &style_theme_text_muted, 0);
-    lv_obj_set_style_text_font(max_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
-    /* Keep captions from intercepting the lower portion of the expanded
-     * slider click area (hit testing visits later children first). */
-    lv_obj_remove_flag(captions, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(slider, BOARD_SCALE_PX(14));
+    lv_obj_set_style_margin_bottom(slider, BOARD_SCALE_PX(10), 0);
     *value_out = value;
     *slider_out = slider;
     lv_obj_set_flex_grow(card, 1);
@@ -5298,7 +6075,7 @@ static lv_obj_t * eq_make_slider_card(lv_obj_t * parent, eq_field_t field, const
 
 static void eq_flat_btn_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    peq_reset_to_defaults();
+    peq_reset_equalizer();
     eq_current_profile_name[0] = '\0';
     refresh_all_eq_widgets();
     peq_save();
@@ -5326,37 +6103,27 @@ static lv_obj_t * build_eq_band_options_screen(void) {
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, BOARD_SCALE_PX(12), 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_gap(content, 16, 0);
+    lv_obj_set_style_pad_gap(content, BOARD_SCALE_PY(16), 0);
     lv_obj_set_scroll_dir(content, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_t * preamp = create_eq_slider_card(content, EQ_FIELD_PREAMP, &eq_preamp_value_label, &eq_preamp_slider, -120, 120);
-    lv_obj_t * crossfeed = create_eq_slider_card(content, EQ_FIELD_CROSSFEED, &eq_crossfeed_value_label, &eq_crossfeed_slider, 0, 100);
-    lv_obj_t * angle_title = lv_label_create(content);
-    lv_label_set_text(angle_title, TR("Crossfeed angle"));
-    lv_obj_add_style(angle_title, &style_theme_text_primary, 0);
-    lv_obj_set_style_text_font(angle_title, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
-    eq_crossfeed_angle_dropdown = lv_dropdown_create(content);
-    lv_dropdown_set_options(eq_crossfeed_angle_dropdown, TR("No delay\n30°\n45°\n60°\n90°"));
-    lv_obj_set_width(eq_crossfeed_angle_dropdown, lv_pct(95));
-    style_settings_dropdown(eq_crossfeed_angle_dropdown);
-    lv_obj_t * angle_help = lv_label_create(content);
-    lv_label_set_text(angle_help, TR("Crossfeed reduces stereo separation with a filtered copy from the opposite channel. This global setting requires EQ On. With No delay, identical left and right signals such as pink noise are affected very little."));
-    lv_obj_set_width(angle_help, lv_pct(95));
-    lv_label_set_long_mode(angle_help, LV_LABEL_LONG_WRAP);
-    lv_obj_add_style(angle_help, &style_theme_text_muted, 0);
-    lv_obj_set_style_text_font(angle_help, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_AUTO);
+    /* Keep the last action clear of the bottom swipe gesture area. */
+    lv_obj_set_style_pad_bottom(content, BOARD_SCALE_PY(64), 0);
     lv_obj_t * title = lv_label_create(content);
     lv_label_set_text(title, TR("Filter type"));
     lv_obj_add_style(title, &style_theme_text_primary, 0);
     lv_obj_set_style_text_font(title, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
     eq_type_dropdown = lv_dropdown_create(content);
     lv_dropdown_set_options(eq_type_dropdown, TR("Peaking\nLow Shelf\nHigh Shelf"));
-    lv_obj_set_width(eq_type_dropdown, lv_pct(95));
+    lv_obj_set_width(eq_type_dropdown, lv_pct(100));
     style_settings_dropdown(eq_type_dropdown);
+    lv_obj_set_height(eq_type_dropdown, GUI_SETTINGS_ROW_HEIGHT);
     lv_obj_t * enable_row = lv_obj_create(content);
-    lv_obj_set_width(enable_row, lv_pct(95));
-    lv_obj_set_height(enable_row, LV_SIZE_CONTENT);
+    lv_obj_set_width(enable_row, lv_pct(100));
+    lv_obj_set_height(enable_row, GUI_SETTINGS_ROW_HEIGHT);
     lv_obj_add_style(enable_row, &style_theme_card_bg, 0);
+    lv_obj_set_style_border_width(enable_row, 0, 0);
+    lv_obj_set_style_radius(enable_row, BOARD_SCALE_PX(12), 0);
+    lv_obj_set_style_pad_all(enable_row, BOARD_SCALE_PX(16), 0);
     lv_obj_set_flex_flow(enable_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(enable_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_t * enable = lv_label_create(enable_row);
@@ -5365,31 +6132,93 @@ static lv_obj_t * build_eq_band_options_screen(void) {
     lv_obj_set_style_text_font(enable, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
     eq_band_enabled_switch = lv_switch_create(enable_row);
     lv_obj_add_style(eq_band_enabled_switch, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-    lv_obj_t * reset = lv_label_create(content);
-    lv_label_set_text(reset, TR("Reset to defaults"));
-    lv_obj_add_style(reset, &style_theme_text_primary, 0);
-    lv_obj_set_style_text_font(reset, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
-    lv_obj_set_style_text_color(reset, lv_color_make(255, 120, 120), 0);
-    lv_obj_add_flag(reset, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(reset, eq_reset_btn_cb, LV_EVENT_CLICKED, NULL);
     refresh_all_eq_widgets();
-    lv_obj_add_event_cb(eq_preamp_slider, eq_preamp_slider_event_cb, LV_EVENT_ALL, NULL);
-    lv_obj_add_event_cb(eq_crossfeed_slider, eq_crossfeed_slider_event_cb, LV_EVENT_ALL, NULL);
-    lv_obj_add_event_cb(eq_crossfeed_angle_dropdown, eq_crossfeed_angle_dropdown_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(eq_band_enabled_switch, eq_band_enabled_switch_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(eq_type_dropdown, eq_type_dropdown_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
     finalize_screen_navigation(scr);
-    lv_obj_remove_flag(preamp, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    return scr;
+}
+
+static lv_obj_t * build_crossfeed_screen(void) {
+    lv_obj_t * scr = lv_obj_create(NULL);
+    lv_obj_add_style(scr, &style_theme_screen_bg, 0);
+    build_screen_header(scr, TR("Crossfeed"), generic_back_cb, NULL, NULL);
+    lv_obj_t * content = lv_obj_create(scr);
+    int32_t screen_h = lv_display_get_vertical_resolution(lv_display_get_default());
+    int32_t content_top = STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT;
+    lv_obj_set_size(content, lv_pct(100), screen_h - content_top);
+    lv_obj_align(content, LV_ALIGN_TOP_MID, 0, content_top);
+    lv_obj_add_style(content, &style_theme_screen_bg, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
+    lv_obj_set_style_pad_all(content, BOARD_SCALE_PX(12), 0);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(content, BOARD_SCALE_PY(16), 0);
+    lv_obj_set_scroll_dir(content, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_pad_bottom(content, BOARD_SCALE_PY(64), 0);
+    lv_obj_t * crossfeed = create_eq_slider_card(content, EQ_FIELD_CROSSFEED, &eq_crossfeed_value_label, &eq_crossfeed_slider, 0, 100);
+    lv_obj_set_width(crossfeed, lv_pct(100));
+    lv_obj_t * angle_title = lv_label_create(content);
+    lv_label_set_text(angle_title, TR("Crossfeed angle"));
+    lv_obj_add_style(angle_title, &style_theme_text_primary, 0);
+    lv_obj_set_style_text_font(angle_title, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
+    eq_crossfeed_angle_dropdown = lv_dropdown_create(content);
+    lv_dropdown_set_options(eq_crossfeed_angle_dropdown, TR("No delay\n30°\n45°\n60°\n90°"));
+    lv_obj_set_width(eq_crossfeed_angle_dropdown, lv_pct(100));
+    style_settings_dropdown(eq_crossfeed_angle_dropdown);
+    lv_obj_set_height(eq_crossfeed_angle_dropdown, GUI_SETTINGS_ROW_HEIGHT);
+    lv_obj_t * help = lv_label_create(content);
+    lv_label_set_text(help, TR("Crossfeed blends a filtered signal from the opposite channel and works independently of PEQ. With No delay, identical left and right signals are affected very little."));
+    lv_obj_set_width(help, lv_pct(100));
+    lv_label_set_long_mode(help, LV_LABEL_LONG_WRAP);
+    lv_obj_add_style(help, &style_theme_text_muted, 0);
+    lv_obj_set_style_text_font(help, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_obj_add_event_cb(eq_crossfeed_slider, eq_crossfeed_slider_event_cb, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(eq_crossfeed_angle_dropdown, eq_crossfeed_angle_dropdown_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(scr, crossfeed_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
+    finalize_screen_navigation(scr);
     lv_obj_remove_flag(crossfeed, LV_OBJ_FLAG_GESTURE_BUBBLE);
-    register_swipe_dead_zone(preamp);
     register_swipe_dead_zone(crossfeed);
     return scr;
+}
+
+/* Use the same logarithmic mapping as the response samples. Drawing before
+ * the chart keeps the neutral reference visible without hiding a flat EQ. */
+static void eq_graph_grid_draw_cb(lv_event_t * e) {
+    lv_obj_t * chart = lv_event_get_target(e);
+    lv_area_t area;
+    lv_obj_get_content_coords(chart, &area);
+    int32_t width = lv_area_get_width(&area);
+    int32_t height = lv_area_get_height(&area);
+    if (width <= 0 || height <= 0) return;
+    lv_layer_t * layer = lv_event_get_layer(e);
+    lv_draw_line_dsc_t line;
+    lv_draw_line_dsc_init(&line);
+    line.color = lv_obj_get_style_line_color(chart, LV_PART_MAIN);
+    line.width = 1;
+    static const double ticks[] = {20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000};
+    line.opa = lv_obj_get_style_line_opa(chart, LV_PART_MAIN);
+    for (size_t i = 0; i < sizeof(ticks) / sizeof(ticks[0]); ++i) {
+        line.p1.x = line.p2.x = area.x1 + (int32_t)lround(width * log10(ticks[i] / EQ_FREQ_MIN_HZ) / log10(EQ_FREQ_MAX_HZ / EQ_FREQ_MIN_HZ));
+        if (line.p1.x > area.x2) line.p1.x = line.p2.x = area.x2;
+        line.p1.y = area.y1;
+        line.p2.y = area.y1 + height;
+        lv_draw_line(layer, &line);
+    }
+    for (int i = 0; i < 5; ++i) {
+        line.p1.x = area.x1;
+        line.p2.x = area.x1 + width;
+        line.p1.y = line.p2.y = area.y1 + height * i / 4;
+        line.opa = i == 2 ? LV_OPA_70 : lv_obj_get_style_line_opa(chart, LV_PART_MAIN);
+        line.width = i == 2 ? 2 : 1;
+        lv_draw_line(layer, &line);
+    }
 }
 
 static lv_obj_t * build_eq_screen(void) {
     lv_obj_t * scr = lv_obj_create(NULL);
     lv_obj_add_style(scr, &style_theme_screen_bg, 0);
-    lv_obj_t * title = build_screen_header(scr, TR("Parametric EQ"), generic_back_cb, NULL, NULL);
+    lv_obj_t * title = build_screen_header(scr, TR("PEQ"), generic_back_cb, NULL, NULL);
     eq_bypass_switch = lv_switch_create(scr);
     align_screen_header_action(eq_bypass_switch, 16);
     lv_obj_add_style(eq_bypass_switch, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
@@ -5418,7 +6247,7 @@ static lv_obj_t * build_eq_screen(void) {
     lv_obj_set_scroll_dir(content, LV_DIR_VER);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_gap(content, BOARD_SCALE_PX(7), 0);
+    lv_obj_set_style_pad_gap(content, BOARD_SCALE_PX(4), 0);
     lv_obj_t * bandnav = lv_obj_create(content);
     lv_obj_set_size(bandnav, lv_pct(96), BOARD_SCALE_PX(50));
     lv_obj_set_style_bg_opa(bandnav, LV_OPA_TRANSP, 0);
@@ -5456,9 +6285,35 @@ static lv_obj_t * build_eq_screen(void) {
     lv_obj_set_style_pad_ver(options, BOARD_SCALE_PX(2), 0);
     lv_obj_add_flag(options, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(options, eq_band_options_open_cb, LV_EVENT_CLICKED, NULL);
-    eq_freq_card = eq_make_slider_card(content, EQ_FIELD_FREQ, TR("Frequency"), &eq_freq_value_label, &eq_freq_slider, 0, EQ_FREQ_SLIDER_MAX, "20", "20K");
-    eq_gain_card = eq_make_slider_card(content, EQ_FIELD_GAIN, TR("Gain"), &eq_gain_value_label, &eq_gain_slider, -120, 120, "-12", "+12");
-    eq_q_card = eq_make_slider_card(content, EQ_FIELD_Q, "Q", &eq_q_value_label, &eq_q_slider, 1, 100, "0.1", "10");
+    eq_freq_card = eq_make_slider_card(content, EQ_FIELD_FREQ, TR("Frequency"), &eq_freq_value_label, &eq_freq_slider, 0, EQ_FREQ_SLIDER_MAX);
+    eq_gain_card = eq_make_slider_card(content, EQ_FIELD_GAIN, TR("Gain"), &eq_gain_value_label, &eq_gain_slider, -120, 120);
+    eq_q_card = eq_make_slider_card(content, EQ_FIELD_Q, "Q", &eq_q_value_label, &eq_q_slider, 1, 100);
+    lv_obj_t * below_q_spacer = lv_obj_create(content);
+    lv_obj_set_size(below_q_spacer, 1, BOARD_SCALE_PX(8));
+    lv_obj_set_style_bg_opa(below_q_spacer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(below_q_spacer, 0, 0);
+    lv_obj_remove_flag(below_q_spacer, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    eq_preamp_card = eq_make_slider_card(content, EQ_FIELD_PREAMP, TR("Pre-Amp"), &eq_preamp_value_label, &eq_preamp_slider, -120, 120);
+    lv_obj_set_flex_grow(eq_preamp_card, 0);
+    eq_reset_row = lv_obj_create(content);
+    lv_obj_set_width(eq_reset_row, lv_pct(96));
+    lv_obj_set_height(eq_reset_row, LV_SIZE_CONTENT);
+    lv_obj_add_style(eq_reset_row, &style_theme_card_bg, 0);
+    lv_obj_add_style(eq_reset_row, &list_row_pressed_style, LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(eq_reset_row, 0, 0);
+    lv_obj_set_style_radius(eq_reset_row, BOARD_SCALE_PX(14), 0);
+    lv_obj_set_style_pad_hor(eq_reset_row, BOARD_SCALE_PX(16), 0);
+    lv_obj_set_style_pad_ver(eq_reset_row, BOARD_SCALE_PY(14), 0);
+    lv_obj_add_flag(eq_reset_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(eq_reset_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * reset_label = lv_label_create(eq_reset_row);
+    lv_label_set_text(reset_label, TR("Reset to defaults"));
+    lv_obj_set_width(reset_label, lv_pct(100));
+    lv_label_set_long_mode(reset_label, LV_LABEL_LONG_WRAP);
+    lv_obj_add_style(reset_label, &style_theme_text_primary, 0);
+    lv_obj_set_style_text_font(reset_label, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
+    lv_obj_set_style_text_color(reset_label, lv_color_make(255, 120, 120), 0);
+    lv_obj_add_event_cb(eq_reset_row, eq_reset_btn_cb, LV_EVENT_CLICKED, NULL);
     eq_graph_panel = lv_obj_create(content);
     lv_obj_set_width(eq_graph_panel, lv_pct(96));
     lv_obj_set_flex_grow(eq_graph_panel, 1);
@@ -5498,30 +6353,40 @@ static lv_obj_t * build_eq_screen(void) {
     lv_obj_set_flex_flow(graph_y_axis, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(graph_y_axis, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
     eq_graph_max_label = lv_label_create(graph_y_axis);
+    eq_graph_high_label = lv_label_create(graph_y_axis);
     eq_graph_zero_label = lv_label_create(graph_y_axis);
+    eq_graph_low_label = lv_label_create(graph_y_axis);
     eq_graph_min_label = lv_label_create(graph_y_axis);
     lv_obj_set_style_text_font(eq_graph_max_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_obj_set_style_text_font(eq_graph_high_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
     lv_obj_set_style_text_font(eq_graph_zero_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_obj_set_style_text_font(eq_graph_low_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
     lv_obj_set_style_text_font(eq_graph_min_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
     lv_obj_add_style(eq_graph_max_label, &style_theme_text_muted, 0);
-    lv_obj_add_style(eq_graph_zero_label, &style_theme_text_muted, 0);
+    lv_obj_add_style(eq_graph_high_label, &style_theme_text_muted, 0);
+    lv_obj_add_style(eq_graph_zero_label, &style_theme_text_primary, 0);
+    lv_obj_add_style(eq_graph_low_label, &style_theme_text_muted, 0);
     lv_obj_add_style(eq_graph_min_label, &style_theme_text_muted, 0);
     eq_graph_chart = lv_chart_create(graph_plot_row);
     lv_obj_set_height(eq_graph_chart, lv_pct(100));
     lv_obj_set_style_pad_all(eq_graph_chart, 0, 0);
+    lv_obj_set_style_pad_ver(eq_graph_chart,
+        lv_font_get_line_height(gui_theme_font(GUI_FONT_ROLE_SUBTEXT)) / 2, 0);
     lv_obj_set_flex_grow(eq_graph_chart, 1);
     lv_chart_set_type(eq_graph_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(eq_graph_chart, 128);
-    lv_chart_set_div_line_count(eq_graph_chart, 5, 0);
+    /* Draw the frequency grid in logarithmic coordinates behind the curve. */
+    lv_chart_set_div_line_count(eq_graph_chart, 0, 0);
     lv_chart_set_range(eq_graph_chart, LV_CHART_AXIS_PRIMARY_Y, -1200, 1200);
     lv_chart_set_update_mode(eq_graph_chart, LV_CHART_UPDATE_MODE_SHIFT);
     lv_obj_set_style_bg_opa(eq_graph_chart, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(eq_graph_chart, 0, 0);
     lv_obj_set_style_line_color(eq_graph_chart, lv_color_make(128, 128, 128), LV_PART_MAIN);
-    lv_obj_set_style_line_opa(eq_graph_chart, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_line_opa(eq_graph_chart, LV_OPA_20, LV_PART_MAIN);
     lv_obj_set_style_line_color(eq_graph_chart, accent_lv_color(), LV_PART_ITEMS);
     lv_obj_set_style_line_width(eq_graph_chart, BOARD_SCALE_PX(3), LV_PART_ITEMS);
     lv_obj_set_style_size(eq_graph_chart, 0, 0, LV_PART_INDICATOR);
+    lv_obj_add_event_cb(eq_graph_chart, eq_graph_grid_draw_cb, LV_EVENT_DRAW_MAIN_BEGIN, NULL);
     eq_graph_series = lv_chart_add_series(eq_graph_chart, accent_lv_color(), LV_CHART_AXIS_PRIMARY_Y);
     lv_obj_t * graph_x_axis = lv_obj_create(eq_graph_panel);
     lv_obj_set_width(graph_x_axis, lv_pct(100));
@@ -5529,11 +6394,11 @@ static lv_obj_t * build_eq_screen(void) {
     lv_obj_set_style_bg_opa(graph_x_axis, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(graph_x_axis, 0, 0);
     lv_obj_set_style_pad_all(graph_x_axis, 0, 0);
-    lv_obj_set_style_pad_left(graph_x_axis, BOARD_SCALE_PX(64), 0);
+    lv_obj_set_style_pad_left(graph_x_axis, BOARD_SCALE_PX(60) + BOARD_SCALE_PX(4), 0);
     lv_obj_remove_flag(graph_x_axis, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_style(graph_x_axis, &style_theme_text_muted, 0);
     lv_obj_set_style_text_font(graph_x_axis, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
-    /* Positions follow log10(f / 20) / 3, matching the sampled curve. */
+    /* Tick positions follow the same logarithmic mapping as the samples. */
     lv_obj_t * xlab = lv_label_create(graph_x_axis);
     lv_label_set_text(xlab, "20");
     lv_obj_align(xlab, LV_ALIGN_TOP_LEFT, 0, 0);
@@ -5617,14 +6482,17 @@ static lv_obj_t * build_eq_screen(void) {
     refresh_all_eq_widgets();
     lv_obj_add_event_cb(scr, eq_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
     lv_obj_add_event_cb(eq_bypass_switch, eq_bypass_switch_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(eq_preamp_slider, eq_preamp_slider_event_cb, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(eq_freq_slider, eq_freq_slider_event_cb, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(eq_gain_slider, eq_gain_slider_event_cb, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(eq_q_slider, eq_q_slider_event_cb, LV_EVENT_ALL, NULL);
     finalize_screen_navigation(scr);
     lv_obj_remove_flag(content, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_remove_flag(eq_preamp_card, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_remove_flag(eq_freq_card, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_remove_flag(eq_gain_card, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_remove_flag(eq_q_card, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    register_swipe_dead_zone(eq_preamp_card);
     register_swipe_dead_zone(eq_freq_card);
     register_swipe_dead_zone(eq_gain_card);
     register_swipe_dead_zone(eq_q_card);
@@ -5661,9 +6529,11 @@ void gui_settings_init(void) {
     settings_screen = build_settings_screen();
     eq_screen = build_eq_screen();
     eq_band_options_screen = build_eq_band_options_screen();
+    settings_crossfeed_screen = build_crossfeed_screen();
     eq_profiles_screen = build_eq_profiles_screen();
     build_firmware_update_popup();
     build_firmware_ota_popups();
+    build_player_update_popups();
     build_eq_reset_popup();
     build_button_mapping_reset_popup();
     build_eq_profile_delete_popup();
@@ -5681,6 +6551,17 @@ void gui_settings_init(void) {
  * build_confirm_popup()'s own comment), not as children of any of these
  * screens, so each needs its own explicit deletion. */
 void gui_settings_teardown(void) {
+    if (player_update_busy) {
+        gui_busy_hide(player_update_busy);
+        player_update_busy = 0;
+    }
+    if (!player_update_ui_active)
+        player_update_reset(); /* discard any result whose popup is being torn down */
+    gui_popup_teardown(&player_update_offer_popup);
+    gui_popup_teardown(&player_update_confirm_popup);
+    player_update_offer_title = player_update_confirm_title = NULL;
+    if (player_update_menu) { lv_obj_delete(player_update_menu); player_update_menu = NULL; }
+    if (player_update_backdrop) { lv_obj_delete(player_update_backdrop); player_update_backdrop = NULL; }
     gui_popup_teardown(&firmware_update_popup);
     gui_popup_teardown(&ota_offer_popup);
     gui_popup_teardown(&ota_install_popup);
@@ -5726,6 +6607,16 @@ void gui_settings_teardown(void) {
     if (settings_sound_effects_screen) { lv_obj_delete(settings_sound_effects_screen); settings_sound_effects_screen = NULL; }
     if (settings_eq_profiles_menu_screen) { lv_obj_delete(settings_eq_profiles_menu_screen); settings_eq_profiles_menu_screen = NULL; }
     if (settings_appearance_screen) { lv_obj_delete(settings_appearance_screen); settings_appearance_screen = NULL; }
+    ui_order_drag_finish(false);
+    for (int id = 0; id < UI_DRAWER_COUNT; ++id)
+        if (ui_order_drag_handles[id]) unregister_swipe_dead_zone(ui_order_drag_handles[id]);
+    if (ui_order_screen) { lv_obj_delete(ui_order_screen); ui_order_screen = NULL; }
+    ui_order_list = NULL;
+    memset(ui_order_rows, 0, sizeof(ui_order_rows));
+    memset(ui_order_drag_handles, 0, sizeof(ui_order_drag_handles));
+    memset(ui_order_visible_buttons, 0, sizeof(ui_order_visible_buttons));
+    if (quick_drawer_settings_screen) { lv_obj_delete(quick_drawer_settings_screen); quick_drawer_settings_screen = NULL; }
+    quick_drawer_settings_list = NULL;
     if (settings_topbar_screen) { lv_obj_delete(settings_topbar_screen); settings_topbar_screen = NULL; }
     settings_topbar_list = NULL;
     if (settings_topbar_clock_position_screen) {
@@ -5782,6 +6673,7 @@ void gui_settings_teardown(void) {
     if (settings_screen) { lv_obj_delete(settings_screen); settings_screen = NULL; }
     if (eq_screen) { lv_obj_delete(eq_screen); eq_screen = NULL; }
     if (eq_band_options_screen) { lv_obj_delete(eq_band_options_screen); eq_band_options_screen = NULL; }
+    if (settings_crossfeed_screen) { lv_obj_delete(settings_crossfeed_screen); settings_crossfeed_screen = NULL; }
     eq_bypass_switch = eq_band_enabled_switch = NULL;
     eq_preamp_slider = eq_preamp_value_label = NULL;
     eq_crossfeed_slider = eq_crossfeed_value_label = NULL;
@@ -5789,10 +6681,12 @@ void gui_settings_teardown(void) {
     eq_freq_slider = eq_gain_slider = eq_q_slider = NULL;
     eq_type_dropdown = eq_freq_value_label = eq_gain_value_label = eq_q_value_label = NULL;
     eq_band_number_label = eq_profile_button_label = eq_main_content = eq_footer = eq_bypass_state_label = NULL;
+    eq_reset_row = NULL;
     eq_graph_panel = eq_graph_chart = eq_graph_caption = NULL;
     eq_graph_series = NULL;
-    eq_graph_min_label = eq_graph_zero_label = eq_graph_max_label = NULL;
-    eq_band_options_row = eq_freq_card = eq_gain_card = eq_q_card = NULL;
+    eq_graph_min_label = eq_graph_low_label = eq_graph_zero_label = NULL;
+    eq_graph_high_label = eq_graph_max_label = NULL;
+    eq_band_options_row = eq_preamp_card = eq_freq_card = eq_gain_card = eq_q_card = NULL;
     eq_graph_visible = false;
     eq_title_label = NULL;
     if (eq_profiles_screen) { lv_obj_delete(eq_profiles_screen); eq_profiles_screen = NULL; }

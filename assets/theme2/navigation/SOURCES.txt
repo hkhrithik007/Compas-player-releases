@@ -17,3 +17,6 @@ https://unpkg.com/@phosphor-icons/core@2.1.1/assets/regular/list.svg
 https://unpkg.com/@phosphor-icons/core@2.1.1/assets/regular/caret-left.svg
 https://unpkg.com/@phosphor-icons/core@2.1.1/assets/regular/caret-right.svg
 MIT terms: assets/theme2/submenu/LICENSE (Phosphor Icons, 2023).
+
+reorder.png is 64x64, using arrows-out-line-vertical.svg with white monochrome fill.
+https://unpkg.com/@phosphor-icons/core@2.1.1/assets/regular/arrows-out-line-vertical.svg

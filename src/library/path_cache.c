@@ -37,29 +37,12 @@ static named_list_t lists[] = {
 
 static pthread_mutex_t path_cache_mu = PTHREAD_MUTEX_INITIALIZER;
 static int cache_dirfd = -1;
-static int legacy_cache_dirfd = -1;
 
 static bool ensure_cache_dirfd(void) {
-    if (cache_dirfd >= 0 || legacy_cache_dirfd >= 0) return true;
+    if (cache_dirfd >= 0) return true;
     (void) mkdir(PATH_CACHE_DIR, 0755);
     cache_dirfd = open(PATH_CACHE_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (cache_dirfd >= 0) {
-        /* Derive the legacy sibling from the opened directory, rather than
-         * reopening the mount path. This also covers callers that load a
-         * path cache before gui_player has had a chance to bind a root fd. */
-        int rootfd = openat(cache_dirfd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (rootfd >= 0) {
-            legacy_cache_dirfd = openat(rootfd, LEGACY_STORAGE_DIR,
-                                        O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-            close(rootfd);
-        }
-        return true;
-    }
-    /* A read-only card may reject creation of .compas. Keep the legacy
-     * directory readable, while all mutation paths remain disabled because
-     * cache_dirfd stays negative. */
-    legacy_cache_dirfd = open(SD_LEGACY_ROOT, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    return legacy_cache_dirfd >= 0;
+    return cache_dirfd >= 0;
 }
 
 static int cmp_path_ptr(const void * a, const void * b) {
@@ -131,13 +114,8 @@ static void list_load_file(named_list_t * entry) {
     path_list_free(&entry->list);
     entry->loaded = false;
     if (!ensure_cache_dirfd()) return;
-    int read_dirfd = cache_dirfd >= 0 ? cache_dirfd : legacy_cache_dirfd;
-    int fd = openat(read_dirfd, entry->name, O_RDONLY | O_CLOEXEC);
+    int fd = openat(cache_dirfd, entry->name, O_RDONLY | O_CLOEXEC);
     int open_errno = fd < 0 ? errno : 0;
-    if (fd < 0 && open_errno == ENOENT && legacy_cache_dirfd >= 0 && read_dirfd != legacy_cache_dirfd) {
-        fd = openat(legacy_cache_dirfd, entry->name, O_RDONLY | O_CLOEXEC);
-        open_errno = fd < 0 ? errno : 0;
-    }
     FILE * f = fd >= 0 ? fdopen(fd, "r") : NULL;
     if (!f && fd >= 0) close(fd);
     if (!f) { if (open_errno == ENOENT) entry->loaded = true; return; }
@@ -239,7 +217,6 @@ void path_cache_drop(void) {
         lists[i].loaded = false;
     }
     if (cache_dirfd >= 0) { close(cache_dirfd); cache_dirfd = -1; }
-    if (legacy_cache_dirfd >= 0) { close(legacy_cache_dirfd); legacy_cache_dirfd = -1; }
     pthread_mutex_unlock(&path_cache_mu);
 }
 
@@ -260,15 +237,12 @@ bool path_cache_bind_directory_fd(int dirfd) {
     if (any_loaded) {
         int requested = openat(dirfd, COMPAS_STORAGE_DIR,
                                O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (requested < 0) requested = openat(dirfd, LEGACY_STORAGE_DIR,
-                                               O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (requested < 0) {
             pthread_mutex_unlock(&path_cache_mu);
             return false;
         }
         struct stat a, b;
-        int current_dirfd = cache_dirfd >= 0 ? cache_dirfd : legacy_cache_dirfd;
-        bool same = current_dirfd >= 0 && fstat(current_dirfd, &a) == 0 &&
+        bool same = cache_dirfd >= 0 && fstat(cache_dirfd, &a) == 0 &&
                     fstat(requested, &b) == 0 && a.st_dev == b.st_dev &&
                     a.st_ino == b.st_ino;
         close(requested);
@@ -281,17 +255,10 @@ bool path_cache_bind_directory_fd(int dirfd) {
     (void) mkdirat(dirfd, COMPAS_STORAGE_DIR, 0755);
     int requested = openat(dirfd, COMPAS_STORAGE_DIR,
                            O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    bool legacy_requested = false;
-    if (requested < 0) {
-        requested = openat(dirfd, LEGACY_STORAGE_DIR,
-                           O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        legacy_requested = requested >= 0;
-    }
     if (requested < 0) { pthread_mutex_unlock(&path_cache_mu); return false; }
-    int current_dirfd = cache_dirfd >= 0 ? cache_dirfd : legacy_cache_dirfd;
-    if (current_dirfd >= 0) {
+    if (cache_dirfd >= 0) {
         struct stat a, b;
-        bool same = fstat(current_dirfd, &a) == 0 && fstat(requested, &b) == 0 &&
+        bool same = fstat(cache_dirfd, &a) == 0 && fstat(requested, &b) == 0 &&
                     a.st_dev == b.st_dev && a.st_ino == b.st_ino;
         if (!same) {
             close(requested);
@@ -300,13 +267,8 @@ bool path_cache_bind_directory_fd(int dirfd) {
         }
     }
     int copy = requested;
-    int legacy_copy = openat(dirfd, LEGACY_STORAGE_DIR,
-                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (cache_dirfd >= 0) close(cache_dirfd);
-    if (legacy_cache_dirfd >= 0) close(legacy_cache_dirfd);
-    if (legacy_requested && legacy_copy >= 0) close(legacy_copy);
-    cache_dirfd = legacy_requested ? -1 : copy;
-    legacy_cache_dirfd = legacy_requested ? copy : legacy_copy;
+    cache_dirfd = copy;
     pthread_mutex_unlock(&path_cache_mu);
     return true;
 }

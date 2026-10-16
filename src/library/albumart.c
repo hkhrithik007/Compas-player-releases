@@ -23,7 +23,6 @@
 #include <errno.h>
 
 #define ALBUMART_DIR SD_COMPAS_ROOT "/albumart"
-#define ALBUMART_LEGACY_DIR SD_LEGACY_ROOT "/albumart"
 
 #ifndef MIN
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -91,26 +90,13 @@ uint64_t albumart_thumbnail_key(const albumart_info_t * info) {
     return hash;
 }
 
-/* Existing v2 artwork files used raw, case-sensitive album-artist then album
- * bytes. Keep looking for those names so an identity-key change does not
- * discard already generated thumbnail files. New shared-key files use v3. */
-static uint64_t thumbnail_key_legacy(const albumart_info_t * info) {
-    const char * fields[] = { info->albumartist[0] ? info->albumartist : info->artist, info->album };
-    uint64_t hash = UINT64_C(14695981039346656037);
-    for (int i = 0; i < 2; i++) {
-        const unsigned char * p = (const unsigned char *) fields[i];
-        do { hash = (hash ^ *p) * UINT64_C(1099511628211); } while (*p++);
-    }
-    return hash;
-}
-
 static bool under_directory(const char * path, const char * dir) {
     size_t len = strlen(dir);
     return path && strncmp(path, dir, len) == 0 && path[len] == '/';
 }
 
 static bool generated_cache_path(const char * path) {
-    return under_directory(path, ALBUMART_DIR) || under_directory(path, ALBUMART_LEGACY_DIR);
+    return under_directory(path, ALBUMART_DIR);
 }
 
 static bool try_exts(char * path, int len);
@@ -119,16 +105,11 @@ static bool try_albumart_cache(const char * dir, const albumart_info_t * id3, co
     const char * artist = id3->albumartist[0] ? id3->albumartist : id3->artist;
     if (!artist[0] || !id3->album[0]) return false;
     if (size_string[0]) {
-        uint64_t keys[2] = { albumart_thumbnail_key(id3), thumbnail_key_legacy(id3) };
-        for (size_t i = 0; i < 2; i++) {
-            const char * version = i == 0 ? "v3" : "v2";
-            int pathlen = snprintf(path, PATH_MAX, "%s/%s-%016llx%s.", dir, version,
-                                   (unsigned long long) keys[i], size_string);
-            if (pathlen < 0 || pathlen >= PATH_MAX) continue;
-            fix_path_part(path, (int) strlen(dir) + 1, PATH_MAX);
-            if (try_exts(path, pathlen)) return true;
-        }
-        return false;
+        int pathlen = snprintf(path, PATH_MAX, "%s/v3-%016llx%s.", dir,
+                               (unsigned long long) albumart_thumbnail_key(id3), size_string);
+        if (pathlen < 0 || pathlen >= PATH_MAX) return false;
+        fix_path_part(path, (int) strlen(dir) + 1, PATH_MAX);
+        return try_exts(path, pathlen);
     }
     int pathlen = snprintf(path, PATH_MAX, "%s/%s-%s%s.", dir, artist, id3->album, size_string);
     if (pathlen < 0 || pathlen >= PATH_MAX) return false;
@@ -368,9 +349,6 @@ static bool albumart_search_files_internal(const albumart_info_t * id3, const ch
 
         if (include_generated_cache) {
             if (!found) found = try_albumart_cache(ALBUMART_DIR, id3, size_string, path);
-            /* A destination directory created before the legacy cache is moved
-             * must not hide covers that are still stored under the old name. */
-            if (!found) found = try_albumart_cache(ALBUMART_LEGACY_DIR, id3, size_string, path);
         }
 
         if (!found && dirlen > 1) {
@@ -521,14 +499,9 @@ bool albumart_sized_thumb_fresh(const albumart_info_t * info, int width, int hei
 
 static bool generated_cache_file(const char * dir, const albumart_info_t * info, int width, int height,
                                  char * path, size_t path_size) {
-    uint64_t keys[2] = { albumart_thumbnail_key(info), thumbnail_key_legacy(info) };
-    const char * versions[2] = { "v3", "v2" };
-    for (size_t i = 0; i < 2; i++) {
-        int pathlen = snprintf(path, path_size, "%s/%s-%016llx.%dx%d.bmp", dir, versions[i],
-                               (unsigned long long) keys[i], width, height);
-        if (pathlen > 0 && (size_t) pathlen < path_size && file_exists(path)) return true;
-    }
-    return false;
+    int pathlen = snprintf(path, path_size, "%s/v3-%016llx.%dx%d.bmp", dir,
+                           (unsigned long long) albumart_thumbnail_key(info), width, height);
+    return pathlen > 0 && (size_t) pathlen < path_size && file_exists(path);
 }
 
 bool albumart_generated_cache_find(const albumart_info_t * info, int width, int height,
@@ -538,7 +511,6 @@ bool albumart_generated_cache_find(const albumart_info_t * info, int width, int 
         return false;
     char path[PATH_MAX];
     bool have = generated_cache_file(ALBUMART_DIR, info, width, height, path, sizeof(path));
-    if (!have) have = generated_cache_file(ALBUMART_LEGACY_DIR, info, width, height, path, sizeof(path));
     if (!have || strlen(path) >= found_size) return false;
     memcpy(found, path, strlen(path) + 1);
     return true;
@@ -552,7 +524,6 @@ bool albumart_generated_cache_fresh(const albumart_info_t * info, int width, int
 
     char path[PATH_MAX];
     bool have = generated_cache_file(ALBUMART_DIR, info, width, height, path, sizeof(path));
-    if (!have) have = generated_cache_file(ALBUMART_LEGACY_DIR, info, width, height, path, sizeof(path));
     if (!have || strlen(path) >= found_size) return false;
 
     uint32_t stored = 0;
@@ -835,7 +806,7 @@ static bool valid_generated_tail(const char * tail, bool allow_noart) {
 }
 
 static bool parse_album_cache_filename(const char * name, uint64_t * out_key) {
-    if (!name || !out_key || (strncmp(name, "v2-", 3) != 0 && strncmp(name, "v3-", 3) != 0) ||
+    if (!name || !out_key || strncmp(name, "v3-", 3) != 0 ||
         !has_hex_key(name + 3) || name[19] != '.' || !valid_generated_tail(name + 20, true))
         return false;
     uint64_t key = 0;
@@ -940,7 +911,7 @@ static bool remove_cache_files_matching(const char * root, cache_name_match_fn m
     return ok;
 }
 
-static const char * const cache_roots[] = { SD_COMPAS_ROOT, SD_LEGACY_ROOT };
+static const char * const cache_roots[] = { SD_COMPAS_ROOT };
 
 static bool match_any_generated_cache(int dir_fd, const char * name, void * context) {
     (void) dir_fd;
@@ -971,7 +942,7 @@ static bool read_artist_alias_album_key(int dir_fd, const char * name, uint64_t 
 }
 
 typedef struct {
-    uint64_t album_keys[2];
+    uint64_t album_key;
     uint64_t * artist_keys;
     size_t artist_count, artist_capacity;
     bool out_of_memory;
@@ -1000,11 +971,11 @@ static bool album_reload_first_pass(int dir_fd, const char * name, void * contex
     uint64_t key;
     bool is_alias;
     if (parse_album_cache_filename(name, &key))
-        return key == scan->album_keys[0] || key == scan->album_keys[1];
+        return key == scan->album_key;
     uint64_t album_key;
     if (parse_artist_cache_filename(name, &key, &is_alias) && is_alias &&
         read_artist_alias_album_key(dir_fd, name, &album_key) &&
-        (album_key == scan->album_keys[0] || album_key == scan->album_keys[1]))
+        album_key == scan->album_key)
         album_reload_add_artist(scan, key);
     return false;
 }
@@ -1023,7 +994,7 @@ static bool album_reload_second_pass(int dir_fd, const char * name, void * conte
 bool albumart_delete_generated_cache_for_album(const albumart_info_t * info,
                                                const uint64_t * artist_keys, size_t artist_key_count) {
     if (!info || !info->album[0]) return false;
-    album_reload_scan_t scan = { .album_keys = { albumart_thumbnail_key(info), thumbnail_key_legacy(info) } };
+    album_reload_scan_t scan = { .album_key = albumart_thumbnail_key(info) };
     /* Every artist appearing on the album too: a "no art" marker or a
      * thumbnail derived before this album had art has no alias pointing here. */
     for (size_t i = 0; i < artist_key_count; i++) album_reload_add_artist(&scan, artist_keys[i]);

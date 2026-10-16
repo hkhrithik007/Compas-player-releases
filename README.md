@@ -109,7 +109,7 @@ Download the R1 `r1.upt` from [releases](https://github.com/Starnished66/compas-
 
 ### Full firmware updates in Compás
 
-Open **Settings → System → About → Firmware Update**. Online updates use only GitHub's designated latest published weekly release, with no fallback to older releases. A saved online download requires Wi-Fi when installing so the player can check that it still matches the latest release.
+Open **Settings → Updates → Firmware Update**. Online updates use only GitHub's designated latest supported published release, with no fallback to older releases. A saved online download requires Wi-Fi when installing so the player can check that it still matches the latest release.
 
 For an offline update, place the firmware image in the SD card root using the filename for your model: `r1.upt`, `r3proii.upt`, or `r3ii_2025.upt`. Choose **Install from SD card**. Compás checks that the named file is a regular file, then moves other root `.upt` files aside so recovery sees only the selected image. Stock recovery checks the package contents and whether the image is compatible with the player; naming another model's image does not make it compatible. OTA downloads are checked for package structure and chunk checksums before they are placed on the card.
 
@@ -123,11 +123,9 @@ After the open-source bootloader is installed, use this for normal player update
 SD/.compas/compas_player
 ```
 
-Keep the existing `.compas` directory and place the binary inside it. Reboot; the bootloader copies the new player into internal storage. **A player-only binary update does not include updated assets, fonts or firmware overlay files.** If an update requires those files, install a new full firmware image.
+Keep the existing `.compas` directory and place the binary inside it. Open **Settings > Updates > Player Update > Install from SD card** to replace the player in internal storage and restart. The minimal `compas_loader` also retains automatic startup installation when an update is placed at `SD/.compas/compas_player`. You can also use **Check for online update** in that menu to download the matching binary from the latest GitHub release. **A player-only binary update does not include updated assets, fonts or firmware overlay files.** If an update requires those files, install a new full firmware image.
 
-Older bootloaders look for `SD/.open_hiby_player/open_hiby_player`. Flash a current full `.upt` once to switch to the `.compas` path. Older installations may also have `/usr/bin/open_hiby_bootloader`; the current full image installs `/usr/bin/compas_bootloader` and updates the wrapper that starts it.
-
-During the compatibility window, each mount migrates up to 256 top-level entries from `SD/.open_hiby_player` to `SD/.compas`, excluding database and bootloader entries. Remaining entries are retried on a later boot or card reinsertion. Existing destinations are preserved so retries are safe; large cache directories are renamed in constant time when the destination is absent. Archived database files and stock/update bootloader artifacts remain in the old directory. This migration is planned for removal after the compatibility window.
+SD updates require a matching device-model marker in the binary and cannot be older than the player packaged in the firmware. Rejected startup updates are preserved with a `.rejected` suffix so they are not retried on every boot.
 
 ## Build from source
 
@@ -169,6 +167,11 @@ make bootloader BOARD=r3proii
 make target BOARD=r3ii_2025
 make bootloader BOARD=r3ii_2025
 ```
+
+R1 and R3 Pro II use the combined Compás/Rockbox bootloader as their default
+`make bootloader` output. R3II 2025 keeps the standalone Compás loader because
+there is no verified Rockbox target for that board. The full-image guide
+documents these board-specific outputs.
 
 The packer requires an approved base `.upt` for the same board. Proprietary
 base images remain external and are not committed to this repository. The

@@ -30,11 +30,18 @@ void sd_repair_complete(bool mounted, bool readonly);
  * a background thread. release_handles may close library files if the
  * first unmount is busy; it may be NULL. A failed unmount with no release
  * callback is not remembered, so a later call can close files and retry.
- * One remembered attempt per card, whether it repairs the filesystem or not.
- * A skipped check warns the user. A check the player did not survive is
- * remembered across reboots and is not run again for that card. A writable
- * card is never checked, whatever its FAT dirty flag says. */
+ * Automatic polling remembers one attempt per card, whether it repairs the
+ * filesystem or not; a deliberate menu action may retry a completed attempt.
+ * A check the player did not survive is remembered across reboots and is not
+ * run again for that card. A skipped automatic check warns the user.
+ * A writable card is never checked by this automatic poll, whatever its FAT
+ * dirty flag says. */
 sd_repair_kick_result_t sd_readonly_repair_kick(void (* release_handles)(void));
+
+/* Explicit boot-selector action. Unlike the automatic path, this may check a
+ * mounted writable card, but it still requires a known supported device,
+ * checker, safe memory budget, and no unfinished-check marker. */
+sd_repair_kick_result_t sd_manual_repair_kick(void (* release_handles)(void));
 
 sd_repair_note_t sd_repair_take_note(void);
 

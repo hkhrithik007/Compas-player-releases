@@ -42,8 +42,14 @@ void gui_library_suspend_boot_prompt(void);
 void gui_library_teardown(void);
 void gui_library_refresh_music_screen(void);
 void gui_library_set_artist_images_enabled(bool enabled);
-/* Apply persisted Files/Albums display ordering without replacing playback queues. */
-void gui_library_apply_sorting(void);
+typedef enum {
+    GUI_LIBRARY_SORT_FILES,
+    GUI_LIBRARY_SORT_ALBUMS,
+    GUI_LIBRARY_SORT_ARTIST_ALBUMS,
+    GUI_LIBRARY_SORT_ALBUM_ARTIST_ALBUMS
+} gui_library_sort_scope_t;
+/* Apply one persisted ordering without disturbing unrelated library views. */
+void gui_library_apply_sorting(gui_library_sort_scope_t scope);
 
 void start_library_rescan(void);
 void start_library_auto_rescan(void);
@@ -53,8 +59,7 @@ void start_library_metadata_refresh_paths(const char * const * paths, int count)
 void start_library_metadata_refresh_album(const char * album, const char * album_artist);
 void start_library_metadata_refresh_artist(metadata_db_group_kind_t kind, const char * name);
 void show_library_refresh_all_metadata_prompt(void);
-/* Controls boot migration and background import/storage follow-up behavior.
- * Explicit Settings and plugin refresh requests remain available. */
+/* Controls automatic library rescanning on boot / SD mount. */
 bool gui_library_auto_rescan_enabled(void);
 void poll_library_rescan(void);
 void poll_sd_format(void);
