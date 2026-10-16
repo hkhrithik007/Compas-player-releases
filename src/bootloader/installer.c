@@ -1,68 +1,84 @@
-/* Copies updates from SD storage to internal storage (INSTALLED_PLAYER_PATH)
- * rather than executing directly from removable media, avoiding invalid
- * memory mappings if the SD card is removed.
- *
- * Writes to a temporary file, verifies integrity, fsyncs, and atomically
- * renames before removing the source SD file. */
-
+/* Applies the canonical SD player update and selects the installed or
+ * packaged executable. The player also provides explicit update actions. */
 #define _POSIX_C_SOURCE 200809L
-
 #include "installer.h"
 #include "scanner.h"
+#include "player_install.h"
 #include "fb_draw.h"
-
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
 #include <unistd.h>
 
-/* Target installation directory, checked for free space and fsynced after rename. */
-#define INSTALL_DIR "/usr/data"
-
-/* Temporary path used during installation before atomic rename. */
-#define INSTALL_TMP_PATH "/usr/data/.compas_player.installing"
-
-/* Table-driven CRC-32 (standard reflected 0xEDB88320 polynomial) used to
- * verify copy integrity and detect truncation or file corruption.
- * The table is lazily initialized on first use. */
-static uint32_t crc32_table[256];
-static bool crc32_table_ready = false;
-
-static void crc32_init(void) {
-    if (crc32_table_ready) return;
-    for (uint32_t i = 0; i < 256; i++) {
-        uint32_t c = i;
-        for (int k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-        crc32_table[i] = c;
+#ifdef COMPAS_LOADER_BUILD
+/* Keep a rejected SD update for inspection without retrying it every boot. */
+static void quarantine_rejected_update(const char *path, const struct stat *snapshot) {
+    char parent[512], leaf[64];
+    const char *slash = strrchr(path, '/');
+    if (!slash || !slash[1] || (size_t)(slash - path) >= sizeof(parent) ||
+        strlen(slash + 1) >= sizeof(leaf)) return;
+    size_t length = (size_t)(slash - path);
+    memcpy(parent, path, length);
+    parent[length] = '\0';
+    snprintf(leaf, sizeof(leaf), "%s", slash + 1);
+    int dir = open(length ? parent : "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dir < 0) return;
+    struct stat current;
+    if (fstatat(dir, leaf, &current, AT_SYMLINK_NOFOLLOW) != 0 ||
+        !S_ISREG(current.st_mode) || current.st_dev != snapshot->st_dev ||
+        current.st_ino != snapshot->st_ino || current.st_size != snapshot->st_size ||
+        current.st_mtim.tv_sec != snapshot->st_mtim.tv_sec ||
+        current.st_mtim.tv_nsec != snapshot->st_mtim.tv_nsec ||
+        current.st_ctim.tv_sec != snapshot->st_ctim.tv_sec ||
+        current.st_ctim.tv_nsec != snapshot->st_ctim.tv_nsec) {
+        close(dir);
+        return;
     }
-    crc32_table_ready = true;
-}
-
-static bool file_crc32_and_size(const char * path, uint32_t * out_crc, off_t * out_size) {
-    crc32_init();
-    FILE * f = fopen(path, "rb");
-    if (!f) return false;
-
-    uint32_t crc = 0xFFFFFFFFu;
-    unsigned char buf[65536];
-    size_t n;
-    off_t total = 0;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-        for (size_t i = 0; i < n; i++) crc = crc32_table[(crc ^ buf[i]) & 0xFFu] ^ (crc >> 8);
-        total += (off_t) n;
+    for (unsigned attempt = 0; attempt < 128; attempt++) {
+        char rejected[96];
+        if (attempt) snprintf(rejected, sizeof(rejected), "%s.rejected.%u", leaf, attempt);
+        else snprintf(rejected, sizeof(rejected), "%s.rejected", leaf);
+        struct stat existing;
+        if (fstatat(dir, rejected, &existing, AT_SYMLINK_NOFOLLOW) == 0) continue;
+        if (errno != ENOENT) break;
+        if (renameat(dir, leaf, dir, rejected) == 0) {
+            (void)fsync(dir);
+            fprintf(stderr, "compas_loader: rejected update saved as %s\n", rejected);
+        }
+        break;
     }
-    bool ok = !ferror(f);
-    fclose(f);
-    if (!ok) return false;
-
-    *out_crc = crc ^ 0xFFFFFFFFu;
-    *out_size = total;
-    return true;
+    close(dir);
 }
+void installer_run(const scan_result_t *scan, bool fb_ready) {
+    if (!scan || !scan->sd_update_present) return;
+    const char *path = scan->sd_update_path ? scan->sd_update_path : SD_UPDATE_PLAYER_PATH;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return;
+    struct stat snapshot;
+    char error[160] = {0};
+    bool ok = fstat(fd, &snapshot) == 0 && S_ISREG(snapshot.st_mode) &&
+              snapshot.st_size > 0 && snapshot.st_size <= PLAYER_INSTALL_MAX_BYTES;
+    if (ok && !player_install_preflight_fd(fd, false, error, sizeof(error))) {
+        quarantine_rejected_update(path, &snapshot);
+        fprintf(stderr, "compas_loader: rejected SD player update: %s\n", error);
+        close(fd);
+        return;
+    }
+    if (ok && fb_ready) {
+        fb_draw_installer_warning();
+        fb_flush();
+    }
+    if (ok) ok = player_install_fd(fd, (uint64_t)snapshot.st_size, NULL, false, true,
+                                   path, &snapshot, error, sizeof(error));
+    close(fd);
+    if (!ok) fprintf(stderr, "compas_loader: SD player update failed: %s\n", error[0] ? error : "Could not read update");
+    else fprintf(stderr, "compas_loader: installed SD player update\n");
+}
+#endif
 
 static bool fsync_path(const char * path, bool is_dir) {
     int fd = open(path, O_RDONLY | (is_dir ? O_DIRECTORY : 0));
@@ -100,258 +116,203 @@ static bool executable_regular_snapshot(const char * path, struct stat * out) {
 static bool same_file_snapshot(const struct stat * before, const struct stat * after) {
     return before->st_dev == after->st_dev && before->st_ino == after->st_ino &&
            before->st_mode == after->st_mode && before->st_size == after->st_size &&
+           before->st_uid == after->st_uid && before->st_gid == after->st_gid &&
+           before->st_nlink == after->st_nlink &&
            before->st_mtim.tv_sec == after->st_mtim.tv_sec &&
-           before->st_mtim.tv_nsec == after->st_mtim.tv_nsec;
+           before->st_mtim.tv_nsec == after->st_mtim.tv_nsec &&
+           before->st_ctim.tv_sec == after->st_ctim.tv_sec &&
+           before->st_ctim.tv_nsec == after->st_ctim.tv_nsec;
 }
 
-/* Copies bytes from src to dst. Returns false on short read or write failure. */
-static bool copy_file(const char * src_path, const char * dst_path) {
-    int src_fd = open(src_path, O_RDONLY);
-    if (src_fd < 0) {
-        fprintf(stderr, "installer: open(%s) failed: %s\n", src_path, strerror(errno));
-        return false;
+/* This is a bounded hint cache, never authority to remove an installed player.
+ * Metadata equality is a freshness heuristic, not a content-integrity proof. */
+#define PLAYER_VERSION_CACHE_SUFFIX ".version-cache"
+#define PLAYER_VERSION_CACHE_PATH_MAX 512
+#define PLAYER_VERSION_CACHE_MAGIC UINT32_C(0x43505643)
+#define PLAYER_VERSION_CACHE_VERSION 1
+
+typedef struct {
+    uint64_t dev, ino, mode, size;
+    uint64_t mtime_sec, mtime_nsec, ctime_sec, ctime_nsec;
+    uint64_t uid, gid, nlink;
+} cache_snapshot_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    char packaged_path[PLAYER_VERSION_CACHE_PATH_MAX];
+    char installed_path[PLAYER_VERSION_CACHE_PATH_MAX];
+    char packaged_stamp[BOOT_BUILD_STAMP_LEN + 1];
+    char installed_stamp[BOOT_BUILD_STAMP_LEN + 1];
+    cache_snapshot_t packaged;
+    cache_snapshot_t installed;
+    uint64_t checksum;
+} player_version_cache_t;
+
+static uint64_t cache_checksum(const player_version_cache_t * cache) {
+    const unsigned char * bytes = (const unsigned char *)cache;
+    const size_t length = offsetof(player_version_cache_t, checksum);
+    uint64_t value = UINT64_C(1469598103934665603);
+    for (size_t i = 0; i < length; ++i) {
+        value ^= bytes[i];
+        value *= UINT64_C(1099511628211);
     }
-    int dst_fd = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (dst_fd < 0) {
-        fprintf(stderr, "installer: open(%s) failed: %s\n", dst_path, strerror(errno));
-        close(src_fd);
-        return false;
+    return value;
+}
+
+static void snapshot_to_cache(const struct stat * st, cache_snapshot_t * out) {
+    out->dev = (uint64_t)st->st_dev;
+    out->ino = (uint64_t)st->st_ino;
+    out->mode = (uint64_t)st->st_mode;
+    out->size = (uint64_t)st->st_size;
+    out->mtime_sec = (uint64_t)st->st_mtim.tv_sec;
+    out->mtime_nsec = (uint64_t)st->st_mtim.tv_nsec;
+    out->ctime_sec = (uint64_t)st->st_ctim.tv_sec;
+    out->ctime_nsec = (uint64_t)st->st_ctim.tv_nsec;
+    out->uid = (uint64_t)st->st_uid;
+    out->gid = (uint64_t)st->st_gid;
+    out->nlink = (uint64_t)st->st_nlink;
+}
+
+static bool cache_snapshot_matches(const cache_snapshot_t * cached, const struct stat * st) {
+    cache_snapshot_t current;
+    snapshot_to_cache(st, &current);
+    return memcmp(cached, &current, sizeof(current)) == 0;
+}
+
+static bool valid_calendar_stamp(const char * stamp) {
+    if (!stamp || stamp[BOOT_BUILD_STAMP_LEN] != '\0') return false;
+    for (int i = 0; i < 16; ++i) {
+        if (i == 4 || i == 7 || i == 10 || i == 13) continue;
+        if (stamp[i] < '0' || stamp[i] > '9') return false;
     }
+    if (stamp[4] != '-' || stamp[7] != '-' || stamp[10] != '_' || stamp[13] != ':') return false;
+    int year = (stamp[0]-'0')*1000 + (stamp[1]-'0')*100 + (stamp[2]-'0')*10 + stamp[3]-'0';
+    int month = (stamp[5]-'0')*10 + stamp[6]-'0';
+    int day = (stamp[8]-'0')*10 + stamp[9]-'0';
+    int hour = (stamp[11]-'0')*10 + stamp[12]-'0';
+    int minute = (stamp[14]-'0')*10 + stamp[15]-'0';
+    static const int month_days[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (!year || month < 1 || month > 12 || hour > 23 || minute > 59) return false;
+    int max_day = month_days[month - 1];
+    if (month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) ++max_day;
+    return day >= 1 && day <= max_day;
+}
 
-    unsigned char buf[65536];
-    bool ok = true;
-    for (;;) {
-        ssize_t n = read(src_fd, buf, sizeof(buf));
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            fprintf(stderr, "installer: read(%s) failed: %s\n", src_path, strerror(errno));
-            ok = false;
-            break;
-        }
-        if (n == 0) break;
-        ssize_t off = 0;
-        while (off < n) {
-            ssize_t w = write(dst_fd, buf + off, (size_t) (n - off));
-            if (w < 0) {
-                if (errno == EINTR) continue;
-                fprintf(stderr, "installer: write(%s) failed: %s\n", dst_path, strerror(errno));
-                ok = false;
-                break;
-            }
-            off += w;
-        }
-        if (!ok) break;
+static bool make_cache_path(const char * installed, char out[PLAYER_VERSION_CACHE_PATH_MAX]) {
+    size_t length = strlen(installed);
+    size_t suffix = sizeof(PLAYER_VERSION_CACHE_SUFFIX) - 1;
+    if (!length || length + suffix >= PLAYER_VERSION_CACHE_PATH_MAX) return false;
+    memcpy(out, installed, length);
+    memcpy(out + length, PLAYER_VERSION_CACHE_SUFFIX, suffix + 1);
+    return true;
+}
+
+/* 1 = valid record, 0 = miss, -1 = unsafe path that must not be replaced. */
+static int read_player_version_cache(const char * cache_path, const char * packaged,
+                                     const char * installed, const struct stat * packaged_now,
+                                     const struct stat * installed_now,
+                                     player_version_cache_t * out) {
+    int fd = open(cache_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return errno == ENOENT ? 0 : -1;
+    struct stat opened, named;
+    bool safe = fstat(fd, &opened) == 0 && S_ISREG(opened.st_mode) && opened.st_nlink == 1 &&
+                opened.st_uid == geteuid() && (opened.st_mode & 077) == 0 &&
+                lstat(cache_path, &named) == 0 && same_file_snapshot(&opened, &named);
+    if (!safe) { close(fd); return -1; }
+
+    player_version_cache_t cache;
+    size_t used = 0;
+    while (used < sizeof(cache)) {
+        ssize_t n = read(fd, (unsigned char *)&cache + used, sizeof(cache) - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        used += (size_t)n;
     }
+    unsigned char extra;
+    ssize_t trailing;
+    do { trailing = read(fd, &extra, 1); } while (trailing < 0 && errno == EINTR);
+    bool exact = used == sizeof(cache) && trailing == 0;
+    struct stat after_fd, after_path;
+    bool stable = fstat(fd, &after_fd) == 0 && lstat(cache_path, &after_path) == 0 &&
+                  same_file_snapshot(&opened, &after_fd) && same_file_snapshot(&opened, &after_path);
+    close(fd);
+    if (!exact || !stable) return stable ? 0 : -1;
 
-    if (close(dst_fd) != 0) ok = false;
-    close(src_fd);
-    return ok;
+    if (cache.magic != PLAYER_VERSION_CACHE_MAGIC || cache.version != PLAYER_VERSION_CACHE_VERSION ||
+        cache.checksum != cache_checksum(&cache) ||
+        !memchr(cache.packaged_path, '\0', sizeof(cache.packaged_path)) ||
+        !memchr(cache.installed_path, '\0', sizeof(cache.installed_path)) ||
+        strcmp(cache.packaged_path, packaged) != 0 || strcmp(cache.installed_path, installed) != 0 ||
+        !valid_calendar_stamp(cache.packaged_stamp) || !valid_calendar_stamp(cache.installed_stamp) ||
+        !cache_snapshot_matches(&cache.packaged, packaged_now) ||
+        !cache_snapshot_matches(&cache.installed, installed_now)) return 0;
+    *out = cache;
+    return 1;
 }
 
-static uint16_t read_u16le(const unsigned char * p) {
-    return (uint16_t) p[0] | ((uint16_t) p[1] << 8);
+static bool write_all(int fd, const void * data, size_t length) {
+    const unsigned char * p = data;
+    while (length) {
+        ssize_t n = write(fd, p, length);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        p += n;
+        length -= (size_t)n;
+    }
+    return true;
 }
 
-static uint32_t read_u32le(const unsigned char * p) {
-    return (uint32_t) p[0] | ((uint32_t) p[1] << 8) | ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
-}
+static void write_player_version_cache(const char * cache_path, const char * packaged,
+                                      const char * installed, const char * packaged_stamp,
+                                      const char * installed_stamp, const struct stat * packaged_st,
+                                      const struct stat * installed_st, bool may_replace) {
+    if (strlen(packaged) >= PLAYER_VERSION_CACHE_PATH_MAX ||
+        strlen(installed) >= PLAYER_VERSION_CACHE_PATH_MAX) return;
+    struct stat existing;
+    bool existed = false;
+    if (lstat(cache_path, &existing) == 0) {
+        if (!may_replace || !S_ISREG(existing.st_mode) || existing.st_nlink != 1 ||
+            existing.st_uid != geteuid() || (existing.st_mode & 077) != 0) return;
+        existed = true;
+    } else if (errno != ENOENT) return;
 
-/* Confirms the copied file is a complete, loadable MIPS32LE executable ELF.
- * Validates ELF header fields, ensures the program header table fits within
- * the file, and verifies that all PT_LOAD segment ranges are bounded by the
- * actual file size to guard against truncated binaries. */
-static bool validate_player_elf(const char * path) {
-    struct stat st;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return false;
-    uint64_t file_size = (uint64_t) st.st_size;
+    player_version_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    cache.magic = PLAYER_VERSION_CACHE_MAGIC;
+    cache.version = PLAYER_VERSION_CACHE_VERSION;
+    snprintf(cache.packaged_path, sizeof(cache.packaged_path), "%s", packaged);
+    snprintf(cache.installed_path, sizeof(cache.installed_path), "%s", installed);
+    snprintf(cache.packaged_stamp, sizeof(cache.packaged_stamp), "%s", packaged_stamp);
+    snprintf(cache.installed_stamp, sizeof(cache.installed_stamp), "%s", installed_stamp);
+    snapshot_to_cache(packaged_st, &cache.packaged);
+    snapshot_to_cache(installed_st, &cache.installed);
+    cache.checksum = cache_checksum(&cache);
 
-    enum { ELF32_EHDR_SIZE = 52, ELF32_PHDR_SIZE = 32 };
-    if (file_size < ELF32_EHDR_SIZE) return false;
-
-    FILE * f = fopen(path, "rb");
-    if (!f) return false;
-
-    unsigned char ehdr[ELF32_EHDR_SIZE];
-    bool ok = fread(ehdr, 1, sizeof(ehdr), f) == sizeof(ehdr);
-
-    if (ok && memcmp(ehdr, "\x7f"
-                           "ELF",
-                     4) != 0)
-        ok = false;
-    if (ok && ehdr[4] != 1) ok = false; /* ELFCLASS32 */
-    if (ok && ehdr[5] != 1) ok = false; /* ELFDATA2LSB */
-
-    uint32_t e_phoff = 0;
-    uint16_t e_phentsize = 0, e_phnum = 0;
+    static unsigned counter;
+    char temp[PLAYER_VERSION_CACHE_PATH_MAX];
+    int fd = -1;
+    for (unsigned attempt = 0; attempt < 16; ++attempt) {
+        unsigned serial = ++counter;
+        int n = snprintf(temp, sizeof(temp), "%s.tmp.%ld.%u", cache_path, (long)getpid(), serial);
+        if (n < 0 || (size_t)n >= sizeof(temp)) return;
+        fd = open(temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd >= 0 || errno != EEXIST) break;
+    }
+    if (fd < 0) return;
+    bool ok = write_all(fd, &cache, sizeof(cache));
+    if (ok) (void)fsync(fd);
+    if (close(fd) != 0) ok = false;
+    struct stat current;
     if (ok) {
-        uint16_t e_type = read_u16le(ehdr + 16);
-        uint16_t e_machine = read_u16le(ehdr + 18);
-        if (e_type != 2 /* ET_EXEC */) ok = false;
-        if (e_machine != 8 /* EM_MIPS */) ok = false;
-        e_phoff = read_u32le(ehdr + 28);
-        e_phentsize = read_u16le(ehdr + 42);
-        e_phnum = read_u16le(ehdr + 44);
-    }
-
-    /* The program-header table must lie entirely within the file. */
-    if (ok && (e_phnum == 0 || e_phentsize < ELF32_PHDR_SIZE)) ok = false;
-    if (ok) {
-        uint64_t phtable_end = (uint64_t) e_phoff + (uint64_t) e_phentsize * (uint64_t) e_phnum;
-        if (phtable_end > file_size) ok = false;
-    }
-
-    bool saw_load_segment = false;
-    for (uint16_t i = 0; ok && i < e_phnum; i++) {
-        unsigned char phdr[ELF32_PHDR_SIZE];
-        if (fseek(f, (long) (e_phoff + (uint64_t) i * e_phentsize), SEEK_SET) != 0) {
-            ok = false;
-            break;
-        }
-        if (fread(phdr, 1, sizeof(phdr), f) != sizeof(phdr)) {
-            ok = false;
-            break;
-        }
-        uint32_t p_type = read_u32le(phdr + 0);
-        uint32_t p_offset = read_u32le(phdr + 4);
-        uint32_t p_filesz = read_u32le(phdr + 16);
-        if (p_type == 1 /* PT_LOAD */) {
-            saw_load_segment = true;
-            /* Ensure loadable segment bytes fit within actual file size. */
-            if ((uint64_t) p_offset + (uint64_t) p_filesz > file_size) ok = false;
+        if (existed) {
+            ok = lstat(cache_path, &current) == 0 && same_file_snapshot(&existing, &current);
+        } else {
+            ok = lstat(cache_path, &current) != 0 && errno == ENOENT;
         }
     }
-    if (ok && !saw_load_segment) ok = false; /* no loadable segments at all -- not a real executable */
-
-    fclose(f);
-    return ok;
-}
-
-static void draw_updating_screen(void) {
-    fb_restore_background(fb_rgb(0x12, 0x12, 0x12));
-    fb_color_t white = fb_rgb(0xFF, 0xFF, 0xFF);
-    const char * line1 = "UPDATING PLAYER";
-    const char * line2 = "DO NOT REMOVE SD CARD";
-    int th = fb_text_height();
-    fb_draw_text_centered(FB_HEIGHT / 2 - th, line1, white);
-    fb_draw_text_centered(FB_HEIGHT / 2 + th / 2, line2, white);
-    fb_flush();
-}
-
-void installer_run(const scan_result_t * scan, bool fb_ready) {
-    if (!scan->sd_update_present) return;
-
-    const char * source_path = scan->sd_update_path ? scan->sd_update_path : SD_UPDATE_PLAYER_PATH;
-
-    uint32_t sd_crc;
-    off_t sd_size;
-    if (!file_crc32_and_size(source_path, &sd_crc, &sd_size)) {
-        fprintf(stderr, "installer: could not read %s -- leaving it for a later boot\n", source_path);
-        return;
-    }
-
-    /* If the SD update is byte-identical to the installed player, skip
-     * installation and complete any pending cleanup of the SD update file. */
-    if (scanner_path_is_executable(INSTALLED_PLAYER_PATH)) {
-        uint32_t inst_crc;
-        off_t inst_size;
-        if (file_crc32_and_size(INSTALLED_PLAYER_PATH, &inst_crc, &inst_size) && inst_size == sd_size &&
-            inst_crc == sd_crc) {
-            /* Ensure installed directory entry is durable before removing SD file. */
-            if (!fsync_path(INSTALL_DIR, true)) {
-                fprintf(stderr,
-                        "installer: %s already installed but directory sync failed -- retrying its SD cleanup "
-                        "later\n",
-                        INSTALLED_PLAYER_PATH);
-                return;
-            }
-            if (unlink(source_path) != 0) {
-                fprintf(stderr, "installer: %s is already installed; retrying its SD cleanup failed: %s\n",
-                        INSTALLED_PLAYER_PATH, strerror(errno));
-            } else {
-                fsync_path(strncmp(source_path, LEGACY_SD_ALT_DIR, strlen(LEGACY_SD_ALT_DIR)) == 0 ?
-                               LEGACY_SD_ALT_DIR : SD_ALT_DIR, true);
-                fprintf(stderr, "installer: %s already installed; finished deferred SD cleanup\n",
-                        INSTALLED_PLAYER_PATH);
-            }
-            return;
-        }
-    }
-
-    /* Remove any leftover temporary file before checking available space. */
-    unlink(INSTALL_TMP_PATH);
-
-    struct statvfs vfs;
-    if (statvfs(INSTALL_DIR, &vfs) != 0) {
-        fprintf(stderr, "installer: statvfs(%s) failed: %s -- leaving SD update for a later boot\n", INSTALL_DIR,
-                strerror(errno));
-        return;
-    }
-    if ((uint64_t) vfs.f_bavail * (uint64_t) vfs.f_bsize < (uint64_t) sd_size) {
-        fprintf(stderr, "installer: not enough free space on %s for the SD update -- leaving it for a later boot\n",
-                INSTALL_DIR);
-        return;
-    }
-
-    if (fb_ready) draw_updating_screen();
-
-    if (!copy_file(source_path, INSTALL_TMP_PATH)) {
-        fprintf(stderr, "installer: copy failed -- leaving SD update for a later boot\n");
-        unlink(INSTALL_TMP_PATH);
-        return;
-    }
-
-    uint32_t tmp_crc;
-    off_t tmp_size;
-    if (!file_crc32_and_size(INSTALL_TMP_PATH, &tmp_crc, &tmp_size) || tmp_size != sd_size || tmp_crc != sd_crc) {
-        fprintf(stderr, "installer: copied file failed validation -- leaving SD update for a later boot\n");
-        unlink(INSTALL_TMP_PATH);
-        return;
-    }
-
-    if (!validate_player_elf(INSTALL_TMP_PATH)) {
-        fprintf(stderr,
-                "installer: %s is not a valid MIPS executable -- refusing to replace the installed player, leaving "
-                "SD update for a later boot\n",
-                source_path);
-        unlink(INSTALL_TMP_PATH);
-        return;
-    }
-
-    if (chmod(INSTALL_TMP_PATH, 0755) != 0) {
-        fprintf(stderr, "installer: chmod(%s) failed: %s -- leaving SD update for a later boot\n", INSTALL_TMP_PATH,
-                strerror(errno));
-        unlink(INSTALL_TMP_PATH);
-        return;
-    }
-
-    if (!fsync_path(INSTALL_TMP_PATH, false)) {
-        fprintf(stderr, "installer: leaving SD update for a later boot\n");
-        unlink(INSTALL_TMP_PATH);
-        return;
-    }
-
-    if (rename(INSTALL_TMP_PATH, INSTALLED_PLAYER_PATH) != 0) {
-        fprintf(stderr, "installer: rename to %s failed: %s -- leaving SD update for a later boot\n",
-                INSTALLED_PLAYER_PATH, strerror(errno));
-        unlink(INSTALL_TMP_PATH);
-        return;
-    }
-    /* Ensure directory entry is durable before deleting the SD update file. */
-    if (!fsync_path(INSTALL_DIR, true)) {
-        fprintf(stderr, "installer: install completed but directory sync failed -- leaving SD update for a later "
-                        "boot\n");
-        return;
-    }
-
-    if (unlink(source_path) != 0) {
-        fprintf(stderr, "installer: install succeeded but SD cleanup failed: %s -- will retry next boot\n",
-                strerror(errno));
-    } else {
-        fsync_path(strncmp(source_path, LEGACY_SD_ALT_DIR, strlen(LEGACY_SD_ALT_DIR)) == 0 ?
-                       LEGACY_SD_ALT_DIR : SD_ALT_DIR, true);
-    }
-
-    fprintf(stderr, "installer: installed SD update to %s\n", INSTALLED_PLAYER_PATH);
+    if (ok && rename(temp, cache_path) == 0) fsync_parent_dir_best_effort(cache_path);
+    else (void)unlink(temp);
 }
 
 const char * installer_select_internal_player(const char * packaged, const char * installed) {
@@ -365,6 +326,24 @@ const char * installer_select_internal_player(const char * packaged, const char 
 
     if (!executable_regular_snapshot(packaged, &packaged_before)) return installed;
 
+    char cache_path[PLAYER_VERSION_CACHE_PATH_MAX] = {0};
+    player_version_cache_t cached;
+    int cache_state = -1;
+    if (make_cache_path(installed, cache_path)) {
+        cache_state = read_player_version_cache(cache_path, packaged, installed,
+                                                &packaged_before, &installed_before, &cached);
+        /* A cache hit can only preserve the installed override. A cached newer
+         * packaged player always goes through the complete scan and checks below. */
+        if (cache_state == 1 && strcmp(cached.packaged_stamp, cached.installed_stamp) <= 0) {
+            struct stat packaged_cached_after, installed_cached_after;
+            if (executable_regular_snapshot(packaged, &packaged_cached_after) &&
+                executable_regular_snapshot(installed, &installed_cached_after) &&
+                same_file_snapshot(&packaged_before, &packaged_cached_after) &&
+                same_file_snapshot(&installed_before, &installed_cached_after)) return installed;
+            cache_state = 0;
+        }
+    }
+
     char packaged_stamp[BOOT_BUILD_STAMP_LEN + 1];
     char installed_stamp[BOOT_BUILD_STAMP_LEN + 1];
     if (!scanner_read_build_stamp(packaged, packaged_stamp, sizeof(packaged_stamp)) ||
@@ -372,15 +351,21 @@ const char * installer_select_internal_player(const char * packaged, const char 
         return installed;
     }
 
-    fprintf(stderr, "installer: packaged player %s, installed player %s\n", packaged_stamp, installed_stamp);
-    if (strcmp(packaged_stamp, installed_stamp) <= 0) return installed;
-
     struct stat packaged_after, installed_after;
     if (!executable_regular_snapshot(packaged, &packaged_after) ||
         !executable_regular_snapshot(installed, &installed_after) ||
         !same_file_snapshot(&packaged_before, &packaged_after) ||
         !same_file_snapshot(&installed_before, &installed_after)) {
         fprintf(stderr, "installer: player changed during version check; preserving installed copy\n");
+        return installed;
+    }
+
+    fprintf(stderr, "installer: packaged player %s, installed player %s\n", packaged_stamp, installed_stamp);
+    if (strcmp(packaged_stamp, installed_stamp) <= 0) {
+        if (cache_path[0] && valid_calendar_stamp(packaged_stamp) && valid_calendar_stamp(installed_stamp)) {
+            write_player_version_cache(cache_path, packaged, installed, packaged_stamp, installed_stamp,
+                                       &packaged_after, &installed_after, cache_state >= 0);
+        }
         return installed;
     }
 
@@ -395,39 +380,7 @@ const char * installer_select_internal_player(const char * packaged, const char 
 }
 
 const char * installer_internal_player_path(void) {
-    const char * installed = NULL;
-    bool new_present = scanner_path_is_executable(INSTALLED_PLAYER_PATH);
-    bool legacy_present = scanner_path_is_executable(LEGACY_INSTALLED_PLAYER_PATH);
-    if (new_present && legacy_present) {
-        char new_stamp[BOOT_BUILD_STAMP_LEN + 1];
-        char legacy_stamp[BOOT_BUILD_STAMP_LEN + 1];
-        bool new_stamped = scanner_read_build_stamp(INSTALLED_PLAYER_PATH, new_stamp, sizeof(new_stamp));
-        bool legacy_stamped = scanner_read_build_stamp(LEGACY_INSTALLED_PLAYER_PATH, legacy_stamp,
-                                                       sizeof(legacy_stamp));
-        /* If both are trustworthy, keep whichever user-installed build is
-         * newer. Unknown legacy metadata cannot displace a valid new path. */
-        if (legacy_stamped && (!new_stamped || strcmp(legacy_stamp, new_stamp) > 0)) {
-            installed = LEGACY_INSTALLED_PLAYER_PATH;
-        } else {
-            installed = INSTALLED_PLAYER_PATH;
-        }
-    } else if (new_present) {
-        installed = INSTALLED_PLAYER_PATH;
-    } else if (legacy_present) {
-        installed = LEGACY_INSTALLED_PLAYER_PATH;
-    }
-    /* A legacy install without a build stamp has no trustworthy way to outrank
-     * the newly named packaged player. Keep the legacy file intact for manual
-     * recovery, but boot the stamped package so it cannot shadow every future
-     * release indefinitely. The normal new-path override policy below still
-     * preserves unknown stamped state exactly as before. */
-    if (!new_present && legacy_present) {
-        char packaged_stamp[BOOT_BUILD_STAMP_LEN + 1];
-        char legacy_stamp[BOOT_BUILD_STAMP_LEN + 1];
-        if (scanner_read_build_stamp(INTERNAL_PLAYER_PATH, packaged_stamp, sizeof(packaged_stamp)) &&
-            !scanner_read_build_stamp(LEGACY_INSTALLED_PLAYER_PATH, legacy_stamp, sizeof(legacy_stamp))) {
-            return INTERNAL_PLAYER_PATH;
-        }
-    }
-    return installed ? installer_select_internal_player(INTERNAL_PLAYER_PATH, installed) : INTERNAL_PLAYER_PATH;
+    return scanner_path_is_executable(INSTALLED_PLAYER_PATH)
+        ? installer_select_internal_player(INTERNAL_PLAYER_PATH, INSTALLED_PLAYER_PATH)
+        : INTERNAL_PLAYER_PATH;
 }

@@ -20,8 +20,7 @@
  *   ./<album><size>.{jpeg,jpg,png,bmp}
  *   ./cover<size>.{jpeg,jpg,png,bmp}
  *   ./folder.{jpg,jpeg,png}  (unsized pass only)
- *   <musicroot>/.compas/albumart/<artist>-<album><size>.{jpeg,jpg,png,bmp}
- *   the same names under <musicroot>/.open_hiby_player/albumart until moved
+ *   <musicroot>/.compas/albumart/v3-<album-key><size>.{jpeg,jpg,png,bmp}
  *   same album/cover/folder names in the parent directory
  *   (unsized only) if this directory's name looks like a disc marker
  *   ("CD1", "Disc 2", "disk_03", ...), the same album/cover/folder names

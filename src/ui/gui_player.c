@@ -7034,14 +7034,10 @@ static file_browser_index_t *resume_file_index = NULL;
 #define QUEUE_RESUME_PATH "./.compas/queue.bin"
 #define SD_QUEUE_RESUME_PATH "./music/.compas/queue.bin"
 #define SD_QUEUE_RESUME_DIR "./music/.compas"
-#define QUEUE_RESUME_LEGACY_PATH "./open_hiby_player_queue.bin"
-#define SD_QUEUE_RESUME_LEGACY_PATH "./music/.open_hiby_player/queue.bin"
 #else
 #define QUEUE_RESUME_PATH "/usr/data/.compas/queue.bin"
 #define SD_QUEUE_RESUME_PATH "/data/mnt/sd_0/.compas/queue.bin"
 #define SD_QUEUE_RESUME_DIR "/data/mnt/sd_0/.compas"
-#define QUEUE_RESUME_LEGACY_PATH "/usr/data/open_hiby_player_queue.bin"
-#define SD_QUEUE_RESUME_LEGACY_PATH "/data/mnt/sd_0/.open_hiby_player/queue.bin"
 #endif
 
 /* A lazy All-Songs queue has no paths until playlist_path_at() resolves them.
@@ -7078,7 +7074,6 @@ static bool have_restored_queue;
 typedef struct {
     int target_dirfd;
     char target_name[NAME_MAX];
-    bool target_is_sd;
     queue_resume_t queue;
 } checkpoint_worker_ctx_t;
 
@@ -7164,23 +7159,6 @@ static void remove_queue_checkpoint_at(int dirfd, const char * name) {
     if (dirfd >= 0 && name) (void) unlinkat(dirfd, name, 0);
 }
 
-static void remove_legacy_sd_checkpoint(int compas_dirfd) {
-    int rootfd = openat(compas_dirfd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (rootfd < 0) return;
-    int legacyfd = openat(rootfd, LEGACY_STORAGE_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (legacyfd >= 0) { (void) unlinkat(legacyfd, "queue.bin", 0); close(legacyfd); }
-    close(rootfd);
-}
-
-static void retire_legacy_checkpoint(const checkpoint_worker_ctx_t * ctx) {
-    if (!ctx) return;
-    if (!ctx->target_is_sd) {
-        (void) unlink(QUEUE_RESUME_LEGACY_PATH);
-        return;
-    }
-    remove_legacy_sd_checkpoint(ctx->target_dirfd);
-}
-
 /* Plain uint64_t, not atomic: this target's toolchain lacks a native 64-bit
  * atomic instruction and needs libatomic for one (confirmed -- linking
  * atomic_uint_least64_t here fails with "undefined reference to
@@ -7205,7 +7183,6 @@ static void * queue_checkpoint_worker(void * arg) {
         atomic_store(&checkpoint_failure_pending, true);
     } else {
         atomic_store(&checkpoint_failure_pending, false);
-        retire_legacy_checkpoint(ctx);
     }
     queue_resume_free(&ctx->queue);
     if (atomic_load(&checkpoint_large_lazy_cleanup_pending)) {
@@ -7243,8 +7220,6 @@ void gui_player_queue_checkpoint(void) {
         int internal_dirfd = open_checkpoint_target_dir(QUEUE_RESUME_PATH);
         if (internal_dirfd >= 0) { remove_queue_checkpoint_at(internal_dirfd, "queue.bin"); close(internal_dirfd); }
         if (queue_sd_dirfd >= 0) remove_queue_checkpoint_at(queue_sd_dirfd, "queue.bin");
-        (void) unlink(QUEUE_RESUME_LEGACY_PATH);
-        if (queue_sd_dirfd >= 0) remove_legacy_sd_checkpoint(queue_sd_dirfd);
         checkpoint_revision_internal = 0;
         checkpoint_position_internal = -1;
         checkpoint_revision_sd = 0;
@@ -7329,7 +7304,6 @@ void gui_player_queue_checkpoint(void) {
 
     checkpoint_ctx.target_dirfd = target_dirfd;
     snprintf(checkpoint_ctx.target_name, sizeof(checkpoint_ctx.target_name), "%s", target_name);
-    checkpoint_ctx.target_is_sd = is_sd_persistable && sd_mounted;
     checkpoint_ctx.queue = s;
     *last_rev = queue_revision;
     *last_pos = position;
@@ -7424,8 +7398,7 @@ bool build_sd_card_resume_playlist(char *** out_playlist, int * out_count, int *
     queue_resume_free(&restored_queue);
     have_restored_queue = false;
 
-    if (!queue_resume_read(SD_QUEUE_RESUME_PATH, &restored_queue) &&
-        !queue_resume_read(SD_QUEUE_RESUME_LEGACY_PATH, &restored_queue)) return false;
+    if (!queue_resume_read(SD_QUEUE_RESUME_PATH, &restored_queue)) return false;
 
     if (restored_queue.count <= 0 || restored_queue.current < 0 || restored_queue.current >= restored_queue.count) {
         queue_resume_free(&restored_queue);
@@ -7574,8 +7547,7 @@ bool build_saved_resume_playlist(char *** out_playlist, int * out_count, int * o
     }
     queue_resume_free(&restored_queue);
     have_restored_queue = false;
-    if (queue_resume_read(QUEUE_RESUME_PATH, &restored_queue) ||
-        queue_resume_read(QUEUE_RESUME_LEGACY_PATH, &restored_queue)) {
+    if (queue_resume_read(QUEUE_RESUME_PATH, &restored_queue)) {
         bool local = true;
         for (int i = 0; i < restored_queue.count; i++) {
             const char * path = restored_queue.paths[i];

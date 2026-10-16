@@ -21,9 +21,6 @@
 #define SD_READY_EXTENDED_DEADLINE_MS 15000
 #define SD_READY_HARD_DEADLINE_MS 20000
 
-/* Grace period to wait for candidate executables after mounting. */
-#define SD_READY_EXEC_GRACE_MS 300
-
 /* Returns true if a filesystem is mounted at SD_MOUNT_POINT. */
 static bool real_mount_point_mounted(void * ctx) {
     (void) ctx;
@@ -196,12 +193,12 @@ static void real_wait_ms(void * ctx_v, int ms) {
 
 /* Logs SD readiness result and diagnostics to stderr. */
 static void log_sd_ready_outcome(const sd_ready_result_t * r) {
-    const char * prefix = "compas_bootloader: SD readiness";
+    const char * prefix = "compas_loader: SD readiness";
 
     if (r->elapsed_ms < 0) {
         fprintf(stderr, "%s: monotonic clock unavailable -- proceeded with a single best-effort check "
-                        "(mounted=%d, executable_ready=%d)\n",
-                prefix, r->mounted, r->executable_ready);
+                        "(mounted=%d)\n",
+                prefix, r->mounted);
         return;
     }
 
@@ -211,7 +208,7 @@ static void log_sd_ready_outcome(const sd_ready_result_t * r) {
                 r->device_node_used ? r->device_node_used : "(unknown device)");
         break;
     case SD_READY_STAGE_MOUNTED:
-        fprintf(stderr, "%s: filesystem mounted after %lldms (via %s) but no configured executable was found\n",
+        fprintf(stderr, "%s: filesystem mounted after %lldms (via %s)\n",
                 prefix, (long long) r->elapsed_ms, r->device_node_used ? r->device_node_used : "(unknown device)");
         break;
     case SD_READY_STAGE_NODE_PRESENT:
@@ -261,12 +258,10 @@ void mount_sd_card_if_needed(void) {
         .wait_ms = real_wait_ms,
     };
 
-    const char * exec_candidates[] = { SD_UPDATE_PLAYER_PATH, LEGACY_SD_UPDATE_PLAYER_PATH };
-
     sd_ready_result_t result =
-        wait_for_sd_ready(&probes, SD_DEVICE_NODE_PARTITION, SD_DEVICE_NODE_WHOLE_DISK, exec_candidates, 2,
+        wait_for_sd_ready(&probes, SD_DEVICE_NODE_PARTITION, SD_DEVICE_NODE_WHOLE_DISK, NULL, 0,
                           SD_READY_SHORT_DEADLINE_MS, SD_READY_EXTENDED_DEADLINE_MS, SD_READY_HARD_DEADLINE_MS,
-                          SD_READY_POLL_INTERVAL_MS, SD_READY_EXEC_GRACE_MS);
+                          SD_READY_POLL_INTERVAL_MS, 0);
 
     if (ctx.inotify_fd >= 0) close(ctx.inotify_fd);
 

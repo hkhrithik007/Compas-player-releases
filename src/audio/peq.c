@@ -39,7 +39,7 @@ static peq_band_t bands[PEQ_NUM_BANDS];
 static biquad_coeffs_t coeffs[PEQ_NUM_BANDS];
 static biquad_state_t state[PEQ_NUM_BANDS][PEQ_MAX_CHANNELS];
 static bool last_call_was_s32 = false;
-static bool bypass = false;
+static atomic_bool bypass = false;
 static double preamp_db = 0.0;
 /* UI/plugin writes are atomic; the smoothed value belongs to the PCM owner. */
 static _Atomic float stereo_width_target = 1.0f;
@@ -121,7 +121,7 @@ static const double default_freqs[PEQ_NUM_BANDS] = {
     31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000
 };
 
-static void set_defaults(void) {
+static void set_defaults(bool reset_crossfeed) {
     for (int i = 0; i < PEQ_NUM_BANDS; i++) {
         bands[i].freq_hz = default_freqs[i];
         bands[i].gain_db = 0.0;
@@ -134,8 +134,10 @@ static void set_defaults(void) {
     bypass = false;
     preamp_db = 0.0;
     peq_set_stereo_width(1.0);
-    peq_set_crossfeed(0.0);
-    peq_set_crossfeed_angle(0);
+    if (reset_crossfeed) {
+        peq_set_crossfeed(0.0);
+        peq_set_crossfeed_angle(0);
+    }
     update_preamp_linear_cache();
 }
 
@@ -277,13 +279,18 @@ static void recompute_all_coeffs(unsigned int sample_rate) {
 }
 
 void peq_init(void) {
-    set_defaults();
+    set_defaults(true);
     memset(state, 0, sizeof(state));
     peq_load();
 }
 
 void peq_reset_to_defaults(void) {
-    set_defaults();
+    set_defaults(true);
+    coeffs_dirty = true;
+}
+
+void peq_reset_equalizer(void) {
+    set_defaults(false);
     coeffs_dirty = true;
 }
 
@@ -561,11 +568,13 @@ void peq_set_band_enabled(int index, bool enabled) {
 }
 
 void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int sample_rate) {
-    /* Reset limiter gain to unity when processing is bypassed or inactive so
-     * that it starts cleanly the next time processing resumes. Bypass also
-     * drops crossfeed memory so the next active buffer cannot ring out
-     * samples from before the bypass. */
-    if (bypass) {
+    const bool eq_off = atomic_load_explicit(&bypass, memory_order_relaxed);
+    /* Bypass disables the EQ controls and stereo width, while Crossfeed has
+     * its own setting and remains available. Keep this early return when no
+     * Crossfeed is active so an inactive signal stays bit-perfect. */
+    float cross_target = (float) peq_get_crossfeed();
+    bool cross_active = channels == 2 && (cross_target != 0.0f || crossfeed_mix != 0.0f);
+    if (eq_off && !cross_active) {
         limiter_gain = 1.0f;
         stereo_width_current = 1.0f;
         crossfeed_clear_audio_state();
@@ -573,17 +582,16 @@ void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int s
         return;
     }
 
-    float width = (float) peq_get_stereo_width();
+    float width = eq_off ? 1.0f : (float) peq_get_stereo_width();
     bool width_active = channels == 2 && (width != 1.0f || stereo_width_current != 1.0f);
-    float cross_target = (float) peq_get_crossfeed();
-    bool cross_active = channels == 2 && (cross_target != 0.0f || crossfeed_mix != 0.0f);
+    if (eq_off) stereo_width_current = 1.0f;
     if (!cross_active) crossfeed_clear_audio_state();
     crossfeed_consume_discontinuity(cross_active);
     bool any_enabled = false;
     for (int i = 0; i < PEQ_NUM_BANDS; i++) {
-        if (bands[i].enabled) { any_enabled = true; break; }
+        if (!eq_off && bands[i].enabled) { any_enabled = true; break; }
     }
-    if (!any_enabled && preamp_db == 0.0 && !width_active && !cross_active) {
+    if (!any_enabled && (eq_off || preamp_db == 0.0) && !width_active && !cross_active) {
         limiter_gain = 1.0f;
         return;
     }
@@ -602,7 +610,7 @@ void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int s
     if (channels < 1) return;
     if (channels > PEQ_MAX_CHANNELS) channels = PEQ_MAX_CHANNELS;
 
-    float preamp_linear = cached_preamp_linear;
+    float preamp_linear = eq_off ? 1.0f : cached_preamp_linear;
 
     float attack_coeff = cached_attack_coeff;
     float release_coeff = cached_release_coeff;
@@ -624,7 +632,7 @@ void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int s
             float sample = (float) buf[i * (size_t) channels + (size_t) ch] * preamp_linear;
 
             for (int band = 0; band < PEQ_NUM_BANDS; band++) {
-                if (!bands[band].enabled) continue;
+                if (eq_off || !bands[band].enabled) continue;
 
                 biquad_coeffs_t * c = &coeffs[band];
                 biquad_state_t * s = &state[band][ch];
@@ -678,7 +686,10 @@ void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int s
 }
 
 void peq_process_s32(int32_t * buf, size_t frame_count, int channels, unsigned int sample_rate) {
-    if (bypass) {
+    const bool eq_off = atomic_load_explicit(&bypass, memory_order_relaxed);
+    float cross_target = (float) peq_get_crossfeed();
+    bool cross_active = channels == 2 && (cross_target != 0.0f || crossfeed_mix != 0.0f);
+    if (eq_off && !cross_active) {
         limiter_gain = 1.0f;
         stereo_width_current = 1.0f;
         crossfeed_clear_audio_state();
@@ -686,17 +697,16 @@ void peq_process_s32(int32_t * buf, size_t frame_count, int channels, unsigned i
         return;
     }
 
-    float width = (float) peq_get_stereo_width();
+    float width = eq_off ? 1.0f : (float) peq_get_stereo_width();
     bool width_active = channels == 2 && (width != 1.0f || stereo_width_current != 1.0f);
-    float cross_target = (float) peq_get_crossfeed();
-    bool cross_active = channels == 2 && (cross_target != 0.0f || crossfeed_mix != 0.0f);
+    if (eq_off) stereo_width_current = 1.0f;
     if (!cross_active) crossfeed_clear_audio_state();
     crossfeed_consume_discontinuity(cross_active);
     bool any_enabled = false;
     for (int i = 0; i < PEQ_NUM_BANDS; i++) {
-        if (bands[i].enabled) { any_enabled = true; break; }
+        if (!eq_off && bands[i].enabled) { any_enabled = true; break; }
     }
-    if (!any_enabled && preamp_db == 0.0 && !width_active && !cross_active) {
+    if (!any_enabled && (eq_off || preamp_db == 0.0) && !width_active && !cross_active) {
         limiter_gain = 1.0f;
         return;
     }
@@ -715,7 +725,7 @@ void peq_process_s32(int32_t * buf, size_t frame_count, int channels, unsigned i
     if (channels < 1) return;
     if (channels > PEQ_MAX_CHANNELS) channels = PEQ_MAX_CHANNELS;
 
-    float preamp_linear = cached_preamp_linear;
+    float preamp_linear = eq_off ? 1.0f : cached_preamp_linear;
     float attack_coeff = cached_attack_coeff;
     float release_coeff = cached_release_coeff;
 
@@ -736,7 +746,7 @@ void peq_process_s32(int32_t * buf, size_t frame_count, int channels, unsigned i
             float sample = (float) buf[i * (size_t) channels + (size_t) ch] * preamp_linear;
 
             for (int band = 0; band < PEQ_NUM_BANDS; band++) {
-                if (!bands[band].enabled) continue;
+                if (eq_off || !bands[band].enabled) continue;
 
                 biquad_coeffs_t * c = &coeffs[band];
                 biquad_state_t * s = &state[band][ch];
@@ -939,7 +949,7 @@ bool peq_save_to_path(const char * path) {
 }
 
 void peq_load(void) {
-    if (!peq_load_from_path(PEQ_FILE_PATH)) peq_load_from_path(PEQ_LEGACY_FILE_PATH);
+    peq_load_from_path(PEQ_FILE_PATH);
 }
 
 void peq_save(void) {

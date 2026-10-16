@@ -8,6 +8,16 @@
   #define APP_RELEASE_LABEL "Development Build"
 #endif
 
+const char * app_board_marker(void) {
+#if defined(BOARD_R3PROII)
+    return "COMPAS_PLAYER_BOARD:r3proii";
+#elif defined(BOARD_R3II_2025)
+    return "COMPAS_PLAYER_BOARD:r3ii_2025";
+#else
+    return "COMPAS_PLAYER_BOARD:r1";
+#endif
+}
+
 const char * app_version_label(void) {
 #ifdef TEST_BUILD_TAG
     return "Test Build " TEST_BUILD_TAG;

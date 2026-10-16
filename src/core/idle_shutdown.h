@@ -2,6 +2,7 @@
 #define IDLE_SHUTDOWN_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /* Full poweroff, the same mechanism the stock firmware's own "Idle
  * shutdown" setting uses (confirmed via `strings` on the stock binary:
@@ -21,7 +22,7 @@
 void idle_shutdown_now(void);
 
 /* Exit status idle_shutdown_reboot_handoff() uses when its parent is
- * compas_bootloader. Non-zero so the supervisor reboots (after releasing
+ * compas_loader. Non-zero so the supervisor reboots (after releasing
  * the SD card) instead of treating the exit as a clean poweroff. The
  * bootloader's player_exit.log marks this value as a requested restart. */
 #define IDLE_SHUTDOWN_REBOOT_EXIT_CODE 75
@@ -31,13 +32,20 @@ void idle_shutdown_now(void);
 void idle_shutdown_reboot_now(void);
 
 /* Flush terminal settings and hand off a reboot. On device, exits with
- * IDLE_SHUTDOWN_REBOOT_EXIT_CODE when supervised by compas_bootloader;
- * otherwise syncs and invokes reboot(RB_AUTOBOOT). Returns false with errno
- * preserved if the syscall fails; settings remain latched. A caller returning
- * to the live UI must call settings_shutdown_cancel(). Host builds return
- * false harmlessly. This
+ * IDLE_SHUTDOWN_REBOOT_EXIT_CODE when supervised by compas_loader (or the previous compas_bootloader);
+ * otherwise syncs, asks BusyBox init to run its shutdown scripts when present,
+ * waits up to 20 seconds, then invokes the kernel reboot syscall. Returns
+ * false with errno preserved if the syscall fails; settings remain latched.
+ * A caller returning to the live UI must call settings_shutdown_cancel().
+ * Host builds return false harmlessly. This
  * lower-level entry point intentionally has no update-busy guard because the
  * recovery updater calls it while holding the update reservation. */
 bool idle_shutdown_reboot_handoff(void);
+
+/* Reboot into the boot selector using a durable one-shot marker on internal
+ * storage. Returns false with an error message when the marker cannot be
+ * safely persisted or the reboot request fails. Host builds never touch the
+ * host filesystem or reboot it. */
+bool idle_shutdown_reboot_to_bootloader(char * error, size_t error_size);
 
 #endif /* IDLE_SHUTDOWN_H */

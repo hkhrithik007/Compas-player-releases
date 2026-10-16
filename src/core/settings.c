@@ -211,6 +211,7 @@ static void set_defaults(player_settings_t * out) {
     out->volume_lock_screen_off = false;
     out->accent_color = DEFAULT_ACCENT_COLOR;
     out->accent_dynamic = false;
+    out->startup_splash_tint = false;
     out->crossfade_enabled = false;
     out->gapless_enabled = true; /* on by default -- see settings.h */
     out->replaygain_mode = 1; /* Per Track -- preserves the old replaygain_enabled=true default */
@@ -258,6 +259,8 @@ static void set_defaults(player_settings_t * out) {
     out->show_artist_images = true;
     out->file_sort_mode = 0;
     out->album_sort_mode = 0;
+    out->artist_albums_sort_mode = 0;
+    out->album_artist_albums_sort_mode = 0;
     /* Defaults on: a device left screen-off with idle_shutdown_enabled=false
      * sits at full power indefinitely. Suspend-to-RAM (not a full poweroff)
      * avoids resetting the music queue. 10 minutes (IDLE_SHUTDOWN_STEPS min)
@@ -271,6 +274,7 @@ static void set_defaults(player_settings_t * out) {
     out->play_mode = 0; /* PLAY_MODE_SEQUENTIAL */
     out->swipe_up_home_enabled = true;
     out->quick_drawer_volume_visible = true;
+    ui_customization_defaults(&out->ui_customization);
     out->startup_volume_fixed_enabled = true; /* matches stock's own default */
     out->startup_volume_fixed_percent = 20;
     out->car_mode_volume_percent = 80;
@@ -314,46 +318,7 @@ void settings_subsonic_server_upsert(player_settings_t * settings, const char * 
     settings->subsonic_saved[found].verify_tls = verify_tls;
 }
 
-static void import_legacy_subsonic_list_file(player_settings_t * out, const char * path) {
-    FILE * f = fopen(path, "r");
-    if (!f) return;
-    char line[1024];
-    while (fgets(line, sizeof(line), f)) {
-        size_t n = strlen(line);
-        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
-        char * url = line;
-        char * user = strchr(url, '\t');
-        if (!user) continue;
-        *user++ = '\0';
-        char * pass = strchr(user, '\t');
-        if (!pass) continue;
-        *pass++ = '\0';
-        char * tls = strchr(pass, '\t');
-        if (!tls) continue;
-        *tls++ = '\0';
-        settings_subsonic_server_upsert(out, url, user, pass, tls[0] != '0');
-    }
-    fclose(f);
-}
-
-static void import_legacy_subsonic_servers(player_settings_t * out) {
-    if (out->subsonic_saved_count == 0) {
-        import_legacy_subsonic_list_file(out,
-#ifdef HOST_BUILD
-            "./open_hiby_player_subsonic.txt"
-#else
-            "/usr/data/open_hiby_player_subsonic.txt"
-#endif
-        );
-#ifndef HOST_BUILD
-        import_legacy_subsonic_list_file(out, "/data/mnt/sd_0/.compas/subsonic.list");
-        import_legacy_subsonic_list_file(out, "/data/mnt/sd_0/.open_hiby_player/subsonic.list");
-#endif
-#ifdef HOST_BUILD
-        import_legacy_subsonic_list_file(out, "./.compas/subsonic.list");
-        import_legacy_subsonic_list_file(out, "./.open_hiby_player/subsonic.list");
-#endif
-    }
+static void upsert_current_subsonic_url(player_settings_t * out) {
     if (out->subsonic_saved_count == 0 && out->subsonic_url[0]) {
         settings_subsonic_server_upsert(out, out->subsonic_url, out->subsonic_username, out->subsonic_password,
                                         out->subsonic_verify_tls);
@@ -361,9 +326,8 @@ static void import_legacy_subsonic_servers(player_settings_t * out) {
 }
 
 /* Sidecar is what gui.c reads (via metadata_db_load_subsonic_servers()).
- * Union settings.subsonic_saved into it (so a settings-only list from this
- * tree isn't dropped by an SD TSV left by the other copy), then mirror up
- * to SETTINGS_SUBSONIC_SAVED_MAX sidecar rows back into settings so
+ * Union settings.subsonic_saved into it, then mirror up to
+ * SETTINGS_SUBSONIC_SAVED_MAX sidecar rows back into settings so
  * settings_save() still keeps a copy on /usr/data. Identical rows are not
  * rewritten -- upsert itself skips a no-op save. */
 static void sync_subsonic_saved_sidecar(player_settings_t * out) {
@@ -416,14 +380,15 @@ bool settings_load(player_settings_t * out) {
     set_defaults(out);
 
     bool play_button_mapping_seen = false;
+    bool artist_albums_sort_seen = false;
+    bool album_artist_albums_sort_seen = false;
     bool car_mode_volume_percent_seen = false;
     int legacy_car_mode_volume_percent = 80;
     bool legacy_car_mode_volume_percent_seen = false;
 
     FILE * f = fopen(SETTINGS_FILE_PATH, "r");
-    if (!f) f = fopen(SETTINGS_LEGACY_FILE_PATH, "r");
     if (!f) {
-        import_legacy_subsonic_servers(out);
+        upsert_current_subsonic_url(out);
         sync_subsonic_saved_sidecar(out);
         return false;
     }
@@ -491,6 +456,8 @@ bool settings_load(player_settings_t * out) {
             out->accent_color = (uint32_t) strtoul(value, NULL, 16);
         } else if (strcmp(key, "accent_dynamic") == 0) {
             out->accent_dynamic = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "startup_splash_tint") == 0) {
+            out->startup_splash_tint = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "crossfade") == 0) {
             out->crossfade_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "gapless") == 0) {
@@ -552,7 +519,7 @@ bool settings_load(player_settings_t * out) {
             out->bt_volume_sync_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "bt_device_rate") == 0) {
             /* "AA:BB:CC:DD:EE:FF,44100" */
-            char * comma = strchr(value, ',');
+            const char * comma = strchr(value, ',');
             char * rate_end = NULL;
             unsigned long parsed = comma ? strtoul(comma + 1, &rate_end, 10) : 0;
             /* A malformed line is dropped rather than stored: a bad rate here
@@ -625,6 +592,12 @@ bool settings_load(player_settings_t * out) {
             out->file_sort_mode = strcmp(value, "1") == 0 ? 1 : 0;
         } else if (strcmp(key, "album_sort_mode") == 0) {
             out->album_sort_mode = strcmp(value, "1") == 0 ? 1 : (strcmp(value, "2") == 0 ? 2 : 0);
+        } else if (strcmp(key, "artist_albums_sort_mode") == 0) {
+            out->artist_albums_sort_mode = strcmp(value, "1") == 0 ? 1 : (strcmp(value, "2") == 0 ? 2 : 0);
+            artist_albums_sort_seen = true;
+        } else if (strcmp(key, "album_artist_albums_sort_mode") == 0) {
+            out->album_artist_albums_sort_mode = strcmp(value, "1") == 0 ? 1 : (strcmp(value, "2") == 0 ? 2 : 0);
+            album_artist_albums_sort_seen = true;
         } else if (strcmp(key, "show_artist_images") == 0) {
             out->show_artist_images = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "idle_shutdown_enabled") == 0) {
@@ -645,6 +618,13 @@ bool settings_load(player_settings_t * out) {
             out->swipe_up_home_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "quick_drawer_volume_visible") == 0) {
             out->quick_drawer_volume_visible = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "quick_drawer_order") == 0) {
+            ui_item_order_t order;
+            if (ui_order_parse(UI_ORDER_DRAWER, value, &order)) out->ui_customization.drawer = order;
+        } else if (strcmp(key, "quick_drawer_enabled") == 0) {
+            out->ui_customization.drawer_enabled = strcmp(value, "1") == 0;
+        } else if (strcmp(key, "quick_drawer_eq_visible") == 0) {
+            out->ui_customization.drawer_eq_visible = strcmp(value, "1") == 0;
         } else if (strcmp(key, "startup_volume_fixed_enabled") == 0) {
             out->startup_volume_fixed_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "startup_volume_fixed_percent") == 0) {
@@ -706,7 +686,8 @@ bool settings_load(player_settings_t * out) {
                 char c = value[i];
                 ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
             }
-            snprintf(out->language, sizeof(out->language), "%s", ok ? value : "en");
+            snprintf(out->language, sizeof(out->language), "%.*s",
+                     (int)sizeof(out->language) - 1, ok ? value : "en");
         }
     }
 
@@ -750,10 +731,15 @@ bool settings_load(player_settings_t * out) {
     out->idle_shutdown_minutes = nearest_step(out->idle_shutdown_minutes, IDLE_SHUTDOWN_STEPS, IDLE_SHUTDOWN_STEP_COUNT);
     out->sleep_timer_minutes = nearest_step(out->sleep_timer_minutes, SLEEP_TIMER_STEPS, SLEEP_TIMER_STEP_COUNT);
 
-    import_legacy_subsonic_servers(out);
+    upsert_current_subsonic_url(out);
     sync_subsonic_saved_sidecar(out);
 
     fclose(f);
+
+    /* Existing installs inherit their previous global album order in each
+     * nested collection until the user chooses a context-specific order. */
+    if (!artist_albums_sort_seen) out->artist_albums_sort_mode = out->album_sort_mode;
+    if (!album_artist_albums_sort_seen) out->album_artist_albums_sort_mode = out->album_sort_mode;
     return true;
 }
 
@@ -766,7 +752,19 @@ static void fsync_settings_dir(void) {
     close(dir_fd);
 }
 
+static bool ui_drawer_order_matches_default(const ui_item_order_t * order,
+                                     const ui_customization_t * defaults) {
+    if (!order || !defaults) return false;
+    const ui_item_order_t * default_order = &defaults->drawer;
+    if (order->count != default_order->count) return false;
+    for (unsigned i = 0; i < order->count; ++i)
+        if (order->ids[i] != default_order->ids[i]) return false;
+    return true;
+}
+
 static void settings_write_file(const player_settings_t * settings) {
+    ui_customization_t ui_defaults;
+    ui_customization_defaults(&ui_defaults);
     char subsonic_download_subfolder[SETTINGS_SUBSONIC_DOWNLOAD_SUBFOLDER_MAX] = "";
     (void) settings_validate_subsonic_download_subfolder(settings->subsonic_download_subfolder,
         subsonic_download_subfolder, sizeof(subsonic_download_subfolder));
@@ -807,6 +805,7 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "volume_lock_screen_off=%d\n", settings->volume_lock_screen_off ? 1 : 0);
     fprintf(f, "accent_color=%06X\n", (unsigned int) (settings->accent_color & 0xFFFFFF));
     fprintf(f, "accent_dynamic=%d\n", settings->accent_dynamic ? 1 : 0);
+    fprintf(f, "startup_splash_tint=%d\n", settings->startup_splash_tint ? 1 : 0);
     fprintf(f, "crossfade=%d\n", settings->crossfade_enabled ? 1 : 0);
     fprintf(f, "gapless=%d\n", settings->gapless_enabled ? 1 : 0);
     fprintf(f, "replaygain_mode=%d\n", settings->replaygain_mode);
@@ -861,6 +860,8 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "show_artist_images=%d\n", settings->show_artist_images ? 1 : 0);
     fprintf(f, "file_sort_mode=%d\n", settings->file_sort_mode == 1 ? 1 : 0);
     fprintf(f, "album_sort_mode=%d\n", settings->album_sort_mode >= 0 && settings->album_sort_mode <= 2 ? settings->album_sort_mode : 0);
+    fprintf(f, "artist_albums_sort_mode=%d\n", settings->artist_albums_sort_mode >= 0 && settings->artist_albums_sort_mode <= 2 ? settings->artist_albums_sort_mode : 0);
+    fprintf(f, "album_artist_albums_sort_mode=%d\n", settings->album_artist_albums_sort_mode >= 0 && settings->album_artist_albums_sort_mode <= 2 ? settings->album_artist_albums_sort_mode : 0);
     fprintf(f, "idle_shutdown_enabled=%d\n", settings->idle_shutdown_enabled ? 1 : 0);
     fprintf(f, "idle_shutdown_minutes=%d\n", settings->idle_shutdown_minutes);
     fprintf(f, "idle_suspend_enabled=%d\n", settings->idle_suspend_enabled ? 1 : 0);
@@ -870,6 +871,13 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "play_mode=%d\n", settings->play_mode);
     fprintf(f, "swipe_up_home_enabled=%d\n", settings->swipe_up_home_enabled ? 1 : 0);
     fprintf(f, "quick_drawer_volume_visible=%d\n", settings->quick_drawer_volume_visible ? 1 : 0);
+    char ui_order_text[UI_ORDER_MAX * 24];
+    if (!ui_drawer_order_matches_default(&settings->ui_customization.drawer, &ui_defaults)) {
+        ui_order_format(UI_ORDER_DRAWER, &settings->ui_customization.drawer, ui_order_text, sizeof(ui_order_text));
+        fprintf(f, "quick_drawer_order=%s\n", ui_order_text);
+    }
+    fprintf(f, "quick_drawer_enabled=%d\n", settings->ui_customization.drawer_enabled ? 1 : 0);
+    fprintf(f, "quick_drawer_eq_visible=%d\n", settings->ui_customization.drawer_eq_visible ? 1 : 0);
     fprintf(f, "startup_volume_fixed_enabled=%d\n", settings->startup_volume_fixed_enabled ? 1 : 0);
     fprintf(f, "startup_volume_fixed_percent=%d\n", settings->startup_volume_fixed_percent);
     fprintf(f, "car_mode_volume_percent=%d\n", settings->car_mode_volume_percent);

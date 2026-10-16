@@ -66,6 +66,9 @@ typedef struct {
 
 /* This board's release asset name. */
 const char * firmware_ota_board_asset(void);
+/* Fetch GitHub's authoritative latest release for a caller-selected asset. */
+bool firmware_ota_fetch_release_for_asset(const char * asset_name, firmware_ota_release_t * release,
+                                         char * error, size_t error_size);
 /* Moves every other root .upt aside before either manual or OTA recovery. */
 bool firmware_ota_park_other_upts(const char * selected_path, char * error, size_t error_size);
 

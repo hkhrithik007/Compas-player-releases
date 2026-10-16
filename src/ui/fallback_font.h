@@ -26,10 +26,7 @@ extern lv_font_t app_font_display;
 /* Initializes the font stack metrics early at startup (before screens are built) */
 void fallback_font_init_early(int font_size_tier, int lyrics_font_size_tier);
 
-/* Schedules deferred background loading of CJK/Korean/Thai fallbacks */
-void fallback_font_schedule_deferred_load(void);
-
-/* Forces immediate synchronous load/build of font stack (used in tests / live switch) */
+/* Completes the fallback chain after startup screens are built; also used for live switch. */
 void fallback_font_load_now(void);
 
 /* Transactionally rebuilds only the four general-UI font handles for a

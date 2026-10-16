@@ -27,23 +27,11 @@
   #define METADATA_DB_ROOT "/data/mnt/sd_0"
 #endif
 #define METADATA_DB_DIR METADATA_DB_ROOT "/.compas"
-#define METADATA_DB_OLD_DIR METADATA_DB_ROOT "/.open_hiby_player"
-#define MIGRATION_PENDING METADATA_DB_DIR "/migration.pending"
-#define MIGRATION_COMPLETE METADATA_DB_DIR "/migration.complete"
 #define CATALOG_INCARNATION_NAME "catalog.incarnation"
 #define CATALOG_INCARNATION_TEMP_NAME "catalog.incarnation.tmp"
 
 static bool db_ready;
-static int migration_db_fd = -1;
-static int migration_root_fd = -1;
-static int migration_old_fd = -1;
-static bool migration_pending;
-static bool migration_cleanup;
-static bool migration_archive_retained;
-static bool migration_replayed;
-static bool migration_applied;
-static size_t migration_unmatched;
-static tagcache_stats_snapshot_t * migration_stats;
+static int catalog_dir_fd = -1;
 static char catalog_library_id[METADATA_DB_CATALOG_LIBRARY_ID_SIZE];
 static bool catalog_library_id_ready;
 static bool catalog_library_id_force_rotation;
@@ -90,183 +78,15 @@ static void metadata_query_lock(void) {
     for (unsigned i = 0; i < metadata_query_depth; i++) pthread_mutex_lock(&metadata_db_mutex);
 }
 
-static bool database_file_name(const char * name) {
-    return strcmp(name, "tagcache.gen") == 0 ||
-           (strncmp(name, "database_", 9) == 0 && strstr(name + 9, ".tcd") != NULL);
+static bool catalog_pin_directory(void) {
+    if (catalog_dir_fd >= 0) close(catalog_dir_fd);
+    catalog_dir_fd = tagcache_dup_directory_fd();
+    return catalog_dir_fd >= 0;
 }
 
-/* Returns -1 on an inspection error, 0 when absent, and 1 when present. */
-static int database_files_present_fd(int fd) {
-    if (fd < 0) return 0;
-    int scan_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY);
-    if (scan_fd < 0) return errno == ENOENT ? 0 : -1;
-    DIR * d = fdopendir(scan_fd);
-    if (!d) { close(scan_fd); return -1; }
-    int result = 0;
-    for (;;) {
-        errno = 0;
-        struct dirent * de = readdir(d);
-        if (!de) {
-            if (errno) result = -1;
-            break;
-        }
-        if (database_file_name(de->d_name)) result = 1;
-    }
-    if (closedir(d) != 0) result = -1;
-    return result;
-}
-
-static int migration_marker_present_fd(const char *path) {
-    if (migration_db_fd < 0) return -1;
-    const char *name = strrchr(path, '/');
-    name = name ? name + 1 : path;
-    struct stat st;
-    if (fstatat(migration_db_fd, name, &st, AT_SYMLINK_NOFOLLOW) != 0)
-        return errno == ENOENT ? 0 : -1;
-    return S_ISREG(st.st_mode) ? 1 : -1;
-}
-
-static bool migration_pin_dirs(void) {
-    if (migration_db_fd >= 0) close(migration_db_fd);
-    if (migration_root_fd >= 0) close(migration_root_fd);
-    if (migration_old_fd >= 0) close(migration_old_fd);
-    migration_db_fd = tagcache_dup_directory_fd();
-    migration_root_fd = migration_db_fd >= 0 ? openat(migration_db_fd, "..", O_RDONLY | O_DIRECTORY) : -1;
-    migration_old_fd = migration_root_fd >= 0 ? openat(migration_root_fd, ".open_hiby_player", O_RDONLY | O_DIRECTORY) : -1;
-    if (migration_db_fd < 0 || migration_root_fd < 0) return false;
-    if (migration_old_fd < 0 && errno != ENOENT) return false;
-    return true;
-}
-
-static void migration_unpin_dirs(void) {
-    if (migration_old_fd >= 0) close(migration_old_fd);
-    if (migration_root_fd >= 0) close(migration_root_fd);
-    if (migration_db_fd >= 0) close(migration_db_fd);
-    migration_old_fd = migration_root_fd = migration_db_fd = -1;
-}
-
-static bool migration_detect(void) {
-    migration_pending = migration_cleanup = migration_archive_retained = migration_applied = false;
-    migration_replayed = false;
-    uint32_t stored_state = tagcache_migration_state();
-    if (stored_state & TAGCACHE_MIGRATION_APPLIED) {
-        migration_applied = true;
-        migration_archive_retained = (stored_state & TAGCACHE_MIGRATION_ARCHIVE) != 0;
-        return true;
-    }
-    int complete = migration_marker_present_fd(MIGRATION_COMPLETE);
-    int pending = migration_marker_present_fd(MIGRATION_PENDING);
-    if (complete < 0 || pending < 0) return false;
-    if (complete) {
-        int old = database_files_present_fd(migration_old_fd);
-        if (old < 0) return false;
-        migration_archive_retained = old != 0;
-        migration_cleanup = false;
-        return true;
-    }
-    if (pending) {
-        migration_pending = true;
-        return true;
-    }
-    int current = database_files_present_fd(migration_db_fd);
-    if (current < 0) return false;
-    if (current) return true;
-    int old = database_files_present_fd(migration_old_fd);
-    if (old < 0) return false;
-    migration_pending = old != 0;
-    return true;
-}
-
-static bool migration_write_marker(const char * path) {
-    const char *name = strrchr(path, '/');
-    name = name ? name + 1 : path;
-    int fd = openat(migration_db_fd, name, O_WRONLY | O_CREAT | O_EXCL, 0644);
-    if (fd < 0) {
-        if (errno != EEXIST || migration_marker_present_fd(path) != 1) return false;
-        fd = openat(migration_db_fd, name, O_RDONLY);
-        if (fd < 0) return false;
-    }
-    bool ok = fsync(fd) == 0;
-    if (close(fd) != 0) ok = false;
-    return ok && fsync(migration_db_fd) == 0 && fsync(migration_root_fd) == 0;
-}
-
-bool metadata_db_migration_needed(void) {
-    METADATA_DB_GUARD;
-    return migration_pending || migration_cleanup;
-}
-
-bool metadata_db_migration_cleanup_pending(void) {
-    METADATA_DB_GUARD;
-    return migration_cleanup;
-}
-
-bool metadata_db_migration_archive_retained(void) {
-    METADATA_DB_GUARD;
-    return migration_archive_retained;
-}
-
-void metadata_db_migration_cancel(void) {
-    METADATA_UPDATE_GUARD;
-    METADATA_DB_GUARD;
-    tagcache_free_stats(migration_stats);
-    migration_stats = NULL;
-    migration_replayed = false;
-    migration_unmatched = 0;
-}
-
-bool metadata_db_migration_prepare(void) {
-    METADATA_UPDATE_GUARD;
-    METADATA_DB_GUARD;
-    metadata_db_migration_cancel();
-    if (!db_ready) return false;
-    if (!migration_pending) return true;
-    if (migration_old_fd < 0) return false;
-    char old_dir[64];
-    snprintf(old_dir, sizeof(old_dir), "/proc/self/fd/%d", migration_old_fd);
-    if (!tagcache_extract_stats(old_dir, &migration_stats)) return false;
-    if (!migration_write_marker(MIGRATION_PENDING)) {
-        metadata_db_migration_cancel();
-        return false;
-    }
-    return true;
-}
-
-bool metadata_db_migration_finish(void) {
-    METADATA_UPDATE_GUARD;
-    METADATA_DB_GUARD;
-    if (!db_ready || metadata_db_get_load_outcome() != METADATA_DB_LOAD_SUCCESS_NORMAL) return false;
-    if (migration_pending) {
-        /* Replay occurs in metadata_db_end_update(), before the first
-         * generation pointer publication.  If finish is called before that
-         * boundary, leave the pending migration untouched. */
-        if (!migration_replayed || !migration_applied) return false;
-        if (!migration_write_marker(MIGRATION_COMPLETE)) {
-            /* The new generation and its applied state are already durable;
-             * completion is cleanup bookkeeping and must not report the old
-             * database as still active. */
-            migration_pending = false;
-            migration_cleanup = true;
-            migration_archive_retained = true;
-            tagcache_free_stats(migration_stats);
-            migration_stats = NULL;
-            return true;
-        }
-        migration_pending = false;
-        migration_cleanup = false;
-        migration_archive_retained = true;
-        metadata_db_migration_cancel();
-    }
-    if (migration_cleanup) {
-        if (!migration_write_marker(MIGRATION_COMPLETE)) return true;
-        migration_cleanup = false;
-        migration_archive_retained = true;
-        tagcache_free_stats(migration_stats);
-        migration_stats = NULL;
-    }
-    if (migration_applied && !migration_pending && migration_marker_present_fd(MIGRATION_COMPLETE) == 0)
-        migration_write_marker(MIGRATION_COMPLETE);
-    return true;
+static void catalog_unpin_directory(void) {
+    if (catalog_dir_fd >= 0) close(catalog_dir_fd);
+    catalog_dir_fd = -1;
 }
 
 #ifndef HOST_BUILD
@@ -479,8 +299,8 @@ static bool catalog_id_format_valid(char id[METADATA_DB_CATALOG_LIBRARY_ID_SIZE]
 }
 
 static catalog_id_read_result_t catalog_read_id(char out[METADATA_DB_CATALOG_LIBRARY_ID_SIZE]) {
-    if (migration_db_fd < 0) return CATALOG_ID_READ_ERROR;
-    int fd = openat(migration_db_fd, CATALOG_INCARNATION_NAME,
+    if (catalog_dir_fd < 0) return CATALOG_ID_READ_ERROR;
+    int fd = openat(catalog_dir_fd, CATALOG_INCARNATION_NAME,
                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return errno == ENOENT ? CATALOG_ID_MISSING : CATALOG_ID_READ_ERROR;
 
@@ -508,8 +328,8 @@ static catalog_id_read_result_t catalog_read_id(char out[METADATA_DB_CATALOG_LIB
 }
 
 static bool catalog_write_id(const char * id) {
-    if (migration_db_fd < 0) return false;
-    int fd = openat(migration_db_fd, CATALOG_INCARNATION_TEMP_NAME,
+    if (catalog_dir_fd < 0) return false;
+    int fd = openat(catalog_dir_fd, CATALOG_INCARNATION_TEMP_NAME,
                     O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (fd < 0) return false;
     size_t length = strlen(id);
@@ -523,10 +343,10 @@ static bool catalog_write_id(const char * id) {
     }
     if (ok && fsync(fd) != 0) ok = false;
     if (close(fd) != 0) ok = false;
-    if (ok && renameat(migration_db_fd, CATALOG_INCARNATION_TEMP_NAME,
-                       migration_db_fd, CATALOG_INCARNATION_NAME) != 0) ok = false;
-    if (ok && fsync(migration_db_fd) != 0) ok = false;
-    if (!ok) unlinkat(migration_db_fd, CATALOG_INCARNATION_TEMP_NAME, 0);
+    if (ok && renameat(catalog_dir_fd, CATALOG_INCARNATION_TEMP_NAME,
+                       catalog_dir_fd, CATALOG_INCARNATION_NAME) != 0) ok = false;
+    if (ok && fsync(catalog_dir_fd) != 0) ok = false;
+    if (!ok) unlinkat(catalog_dir_fd, CATALOG_INCARNATION_TEMP_NAME, 0);
     return ok;
 }
 
@@ -604,9 +424,9 @@ metadata_db_load_outcome_t metadata_db_open(void) {
         last_outcome = METADATA_DB_LOAD_FAILED;
         return last_outcome;
     }
-    if (!tagcache_open(METADATA_DB_DIR) || !migration_pin_dirs() || !migration_detect()) {
+    if (!tagcache_open(METADATA_DB_DIR) || !catalog_pin_directory()) {
         tagcache_close();
-        migration_unpin_dirs();
+        catalog_unpin_directory();
         last_outcome = METADATA_DB_LOAD_FAILED;
         return last_outcome;
     }
@@ -629,7 +449,7 @@ bool metadata_db_storage_current(void) {
 
 int metadata_db_dup_directory_fd(void) {
     METADATA_DB_GUARD;
-    return migration_db_fd >= 0 ? dup(migration_db_fd) : -1;
+    return catalog_dir_fd >= 0 ? dup(catalog_dir_fd) : -1;
 }
 
 bool metadata_db_numeric_write_failed(void) {
@@ -696,11 +516,10 @@ bool metadata_db_prepare_rebuild(void) {
 
     mkdir(METADATA_DB_DIR, 0755);
     bool prepared = tagcache_open_for_rebuild(METADATA_DB_DIR);
-    if (prepared) prepared = migration_pin_dirs();
-    if (prepared) prepared = migration_detect();
+    if (prepared) prepared = catalog_pin_directory();
     if (!prepared) {
         tagcache_close();
-        migration_unpin_dirs();
+        catalog_unpin_directory();
     }
     capture_tagcache_outcome(false);
     db_ready = prepared;
@@ -765,10 +584,8 @@ bool metadata_db_try_artist_row(const char * raw_artist, int64_t * out_offset) {
 void metadata_db_close(void) {
     METADATA_UPDATE_GUARD;
     METADATA_DB_GUARD;
-    metadata_db_migration_cancel();
-    migration_pending = migration_cleanup = false;
     tagcache_close();
-    migration_unpin_dirs();
+    catalog_unpin_directory();
     db_ready = false;
     last_outcome = METADATA_DB_LOAD_UNMOUNTED;
     catalog_library_id[0] = '\0';
@@ -838,22 +655,10 @@ bool metadata_db_end_update(void) {
     METADATA_UPDATE_GUARD;
     METADATA_DB_GUARD;
     if (!db_ready) return false;
-    if (migration_pending && migration_stats && !migration_replayed) {
-        if (!tagcache_replay_stats_allow_missing(migration_stats, &migration_unmatched)) {
-            tagcache_abort_update();
-            return false;
-        }
-        migration_replayed = true;
-        migration_archive_retained = migration_unmatched != 0;
-        tagcache_set_staged_migration_state(TAGCACHE_MIGRATION_APPLIED |
-                                            (migration_archive_retained ? TAGCACHE_MIGRATION_ARCHIVE : 0));
-    }
     bool ok = tagcache_end_update_with_lock(metadata_query_unlock, metadata_query_lock);
     capture_tagcache_outcome(true);
     if (ok && catalog_library_id_force_rotation && catalog_identity_prepare())
         catalog_rebuild_pending = false;
-    if (ok && migration_pending) migration_applied = true;
-    if (!ok) { migration_replayed = false; migration_unmatched = 0; }
     return ok;
 }
 
@@ -862,8 +667,6 @@ void metadata_db_abort_update(void) {
     METADATA_DB_GUARD;
     if (!db_ready) return;
     tagcache_abort_update();
-    migration_replayed = false;
-    migration_unmatched = 0;
     capture_tagcache_outcome(true);
 }
 

@@ -133,10 +133,4 @@ playlist_read_status_t playlist_files_read_ex(const char * path, char *** paths,
  * and file_browser.c's file_browser_build_playlist_from_m3u(). */
 void playlist_files_resolve_path(const char * m3u_path, const char * line, char * out_full_path, size_t out_size);
 
-/* Rewrites every .m3u/.m3u8 file in dir so every line is relative to that
- * file's own directory, migrating any absolute-path entries. Runs at most
- * once, gated by a marker file (dir/.relative_paths_migrated). */
-void playlist_files_migrate_to_relative(const char * dir);
-
-
 #endif /* PLAYLIST_FILES_H */

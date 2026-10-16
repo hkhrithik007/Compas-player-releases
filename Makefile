@@ -47,6 +47,8 @@ CROSS_STRIP = mipsel-linux-musl-strip
 # X1600 targets advertise MIPS32r2. Keep the existing o32/FP32 register
 # contract explicit and disable FP contraction while GCC uses the target ISA.
 # Pass TARGET_CPU_FLAGS=-march=mips1 to rebuild against the old baseline for A/B.
+# R1/R3 Pro II combined loaders use the pinned CPU flags in their build script;
+# that script derives strip from CROSS_CC rather than using CROSS_STRIP.
 TARGET_CPU_FLAGS ?= -march=mips32r2 -mabi=32 -mfp32 -mno-odd-spreg -ffp-contract=off
 
 # Dependency directory names
@@ -682,15 +684,16 @@ $(TARGET_CODE_SECTION_FLAGS_STAMP): FORCE_TARGET_CODE_SECTION_FLAGS
 # misc). main.c stays at src/ root as the entry point.
 CFLAGS += -Isonic
 
-APP_SRCS = src/main.c src/ui/gui.c src/ui/gui_subsonic.c src/ui/gui_settings.c src/ui/gui_network.c src/ui/gui_theme.c src/ui/gui_notifications.c src/ui/gui_library.c src/ui/gui_queue.c src/ui/gui_player.c src/ui/gui_track_info.c src/ui/gui_plugins.c src/ui/gui_shell.c src/ui/gui_navigation.c src/ui/gui_books.c src/ui/gui_file_manager.c src/ui/gui_text_input.c src/ui/gui_lyrics.c src/ui/gui_reload.c src/audio/audio.c src/library/file_browser.c src/library/file_ops.c src/hardware/hw_buttons.c src/hardware/button_mapping.c src/hardware/input_device_utils.c src/library/metadata.c src/library/metadata_db.c src/core/settings.c src/core/screenshot.c src/core/app_version.c src/audio/aiff_decoder.c src/audio/dsd_filter.c src/audio/dsd_decoder.c src/audio/aac_decoder.c src/audio/mp4_demux.c src/audio/ape_demux.c src/audio/ape_decoder.c src/audio/ape_ffmpeg_core.c src/audio/peq.c src/audio/audio_tempo.c src/ui/assets.c src/ui/screen_builders.c src/ui/cover_card_preview.c src/hardware/battery.c src/network/wifi_status.c src/network/ca_bundle.c src/network/http_conn.c src/network/http_client.c src/network/http_stream.c src/network/http_stream_file.c src/network/subsonic_client.c src/library/cover_decode.c src/library/image_thumb.c src/library/lyrics.c src/audio/asf_demux.c src/audio/wma_decoder.c src/audio/ogg_probe.c src/audio/opus_decoder.c src/audio/opusfile_alloc.c src/audio/wavpack_decoder.c src/audio/caf_decoder.c src/audio/vorbis_decoder.c src/library/cue_parser.c src/ui/fallback_font.c src/ui/gui_text_view.c \
-src/core/subprocess.c src/network/wifi_control.c src/network/bluetooth_control.c src/network/hiby_sys_server.c src/hardware/backlight.c src/network/import_web.c src/network/airplay_control.c src/network/airplay_bridge.c src/network/airplay_metadata.c src/hardware/headphone_status.c src/hardware/device_config.c src/hardware/led_control.c src/hardware/charge_limiter.c src/core/idle_shutdown.c src/hardware/power_suspend.c src/core/text_reader.c src/hardware/usb_mode_control.c src/hardware/usb_dac_bridge.c src/hardware/usb_audio_output.c src/core/firmware_update.c src/library/playlist_files.c src/library/favorite_writer.c src/network/firmware_ota.c src/network/plugin_store.c src/core/timezone_data.c src/core/timezone_apply.c src/core/hostname_apply.c src/network/dlna_control.c src/network/remote_control.c src/network/catalog_source_cache.c src/network/remote_control_mdns.c src/plugins/plugin_manager.c
+APP_SRCS = src/main.c src/ui/gui.c src/ui/gui_subsonic.c src/ui/gui_settings.c src/ui/gui_network.c src/ui/gui_theme.c src/ui/gui_notifications.c src/ui/gui_library.c src/ui/gui_queue.c src/ui/gui_player.c src/ui/gui_track_info.c src/ui/gui_plugins.c src/ui/gui_shell.c src/ui/gui_navigation.c src/ui/gui_books.c src/ui/gui_file_manager.c src/ui/gui_text_input.c src/ui/gui_lyrics.c src/ui/gui_reload.c src/audio/audio.c src/library/file_browser.c src/library/file_ops.c src/hardware/hw_buttons.c src/hardware/button_mapping.c src/hardware/input_device_utils.c src/library/metadata.c src/library/metadata_db.c src/core/settings.c src/core/startup_splash.c src/core/screenshot.c src/core/app_version.c src/audio/aiff_decoder.c src/audio/dsd_filter.c src/audio/dsd_decoder.c src/audio/aac_decoder.c src/audio/mp4_demux.c src/audio/ape_demux.c src/audio/ape_decoder.c src/audio/ape_ffmpeg_core.c src/audio/peq.c src/audio/audio_tempo.c src/ui/assets.c src/ui/screen_builders.c src/ui/cover_card_preview.c src/hardware/battery.c src/network/wifi_status.c src/network/ca_bundle.c src/network/http_conn.c src/network/http_client.c src/network/http_stream.c src/network/http_stream_file.c src/network/subsonic_client.c src/library/cover_decode.c src/library/image_thumb.c src/library/lyrics.c src/audio/asf_demux.c src/audio/wma_decoder.c src/audio/ogg_probe.c src/audio/opus_decoder.c src/audio/opusfile_alloc.c src/audio/wavpack_decoder.c src/audio/caf_decoder.c src/audio/vorbis_decoder.c src/library/cue_parser.c src/ui/fallback_font.c src/ui/gui_text_view.c \
+src/core/subprocess.c src/network/wifi_control.c src/network/bluetooth_control.c src/network/hiby_sys_server.c src/hardware/backlight.c src/network/import_web.c src/network/airplay_control.c src/network/airplay_bridge.c src/network/airplay_metadata.c src/hardware/headphone_status.c src/hardware/device_config.c src/hardware/led_control.c src/hardware/charge_limiter.c src/core/idle_shutdown.c src/hardware/power_suspend.c src/core/text_reader.c src/hardware/usb_mode_control.c src/hardware/usb_dac_bridge.c src/hardware/usb_audio_output.c src/core/firmware_update.c src/core/player_update.c src/core/reboot_handoff.c src/library/playlist_files.c src/library/favorite_writer.c src/network/firmware_ota.c src/network/plugin_store.c src/core/timezone_data.c src/core/timezone_apply.c src/core/hostname_apply.c src/network/dlna_control.c src/network/remote_control.c src/network/catalog_source_cache.c src/network/remote_control_mdns.c src/plugins/plugin_manager.c
 APP_SRCS += src/ui/gui_setup.c src/ui/gui_setup_plugins.c src/core/timezone_location.c
 APP_SRCS += src/ui/lyrics_layout.c src/ui/transition_compositor.c src/ui/frosted_glass.c src/ui/hw_volume_coalesce.c
-APP_SRCS += src/core/ui_wake.c src/library/cover_raster_cache.c src/library/track_metadata_worker.c
+APP_SRCS += src/core/ui_wake.c src/core/ui_customization.c src/library/cover_raster_cache.c src/library/track_metadata_worker.c
 APP_SRCS += src/core/firmware_image.c
 APP_SRCS += src/core/boot_trace.c
+APP_SRCS += src/core/player_install.c src/bootloader/scanner.c src/bootloader/selector_request.c src/bootloader/internal_storage.c
 APP_SRCS += src/ui/ui_fonts.c
-APP_SRCS += src/core/storage_migration.c src/core/sd_fsck.c src/core/sd_fsck_run.c
+APP_SRCS += src/core/sd_fsck.c src/core/sd_fsck_run.c
 APP_SRCS += src/plugins/plugin_json.c src/plugins/plugin_storage.c src/plugins/plugin_disabled_list.c
 APP_SRCS += src/ui/gui_plugin_manage.c src/ui/gui_plugin_store.c src/ui/gui_lock_screen.c
 APP_SRCS += src/core/theme_file.c src/ui/gui_themes.c
@@ -1058,8 +1061,9 @@ $(TARGET_BIN): $(TARGET_OBJS) $(TARGET_CPU_FLAGS_STAMP) $(TARGET_AUDIO_LIBS) Mak
 	$(CROSS_STRIP) -s -o $@ $(BUILD_TARGET_DIR)/$(TARGET_BIN)_unstripped
 	@echo "Target build complete: File ready at '$(TARGET_BIN)'"
 
-# Standalone bootloader -- see src/bootloader/main.c's own top comment.
-# Deliberately its own tiny static binary, not linked against LVGL/the main
+# Board bootloader output. R1 and R3 Pro II use the combined Compás/Rockbox
+# selector by default; R3II 2025 keeps the standalone Compás loader.
+# The standalone loader is its own tiny static binary, not linked against LVGL/the main
 # TARGET_OBJS: subprocess.c and tjpgd.c (for the boot splash -- see fb_draw.c's
 # own doc comment) are pulled in directly (both already dependency-free) rather
 # than reusing TARGET_OBJS's build rule, so this never accidentally drags in
@@ -1070,11 +1074,18 @@ $(TARGET_BIN): $(TARGET_OBJS) $(TARGET_CPU_FLAGS_STAMP) $(TARGET_AUDIO_LIBS) Mak
 # sitting in the working directory, since (unlike the player binary and its
 # object directory) this target's own output name was never suffixed.
 ifeq ($(BOARD),r1)
-BOOTLOADER_BIN = compas_bootloader
+BOOTLOADER_BIN = compas_loader
 else
-BOOTLOADER_BIN = compas_bootloader_$(BOARD)
+BOOTLOADER_BIN = compas_loader_$(BOARD)
 endif
-BOOTLOADER_SRCS = src/bootloader/main.c src/bootloader/fb_draw.c \
+BOOTLOADER_SRCS = src/bootloader/selector_controller.c src/bootloader/selector_input.c \
+                  src/bootloader/selector_ui.c src/bootloader/selector_request.c \
+                  src/core/sd_fsck.c src/core/sd_fsck_run.c \
+                  src/bootloader/main.c src/bootloader/fb_draw.c src/bootloader/boot_tuning.c \
+                  src/core/startup_splash.c \
+                  src/bootloader/internal_storage.c \
+                  src/core/reboot_handoff.c \
+                  src/core/player_install.c $(MBEDTLS_DIR)/library/sha256.c $(MBEDTLS_DIR)/library/platform_util.c \
                   src/bootloader/scanner.c src/bootloader/installer.c src/bootloader/sd_ready.c \
                   src/bootloader/sd_ready_real.c \
                   src/core/subprocess.c src/core/boot_trace.c \
@@ -1083,13 +1094,26 @@ BOOTLOADER_SRCS = src/bootloader/main.c src/bootloader/fb_draw.c \
 # combination that lets the linker drop unused functions/data at the
 # granularity of individual symbols instead of whole .o files, which keeps
 # the statically linked mount helpers and JPEG decoder small.
-BOOTLOADER_CFLAGS = -O2 -Wall -I. -Isrc/bootloader -Isrc/core $(BOARD_DEFINE) -ffunction-sections -fdata-sections
+BOOTLOADER_CFLAGS = -O2 -Wall -I. -Isrc/bootloader -Isrc/core -I$(MBEDTLS_DIR)/include -DCOMPAS_LOADER_BUILD $(BOARD_DEFINE) -ffunction-sections -fdata-sections
 
+ifeq ($(filter $(BOARD),r1 r3proii),$(BOARD))
+bootloader:
+	CROSS_CC="$(CROSS_CC)" bash scripts/build_rockbox_bootloader.sh "$(BOARD)"
+	@test -s "build/rockbox-bootloader/$(BOARD)/compas_rockbox_bootloader"
+	@set -e; tmp="$(BOOTLOADER_BIN).tmp"; trap 'rm -f "$$tmp"' EXIT; cp "build/rockbox-bootloader/$(BOARD)/compas_rockbox_bootloader" "$$tmp"; chmod 0755 "$$tmp"; mv -f "$$tmp" "$(BOOTLOADER_BIN)"
+	@echo "Combined Compás/Rockbox bootloader ready: $(BOOTLOADER_BIN)"
+else
 bootloader: $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(BUILD_TARGET_DIR)
-	$(CROSS_CC) $(TARGET_CPU_FLAGS) $(BOOTLOADER_CFLAGS) -static -no-pie $(BOOTLOADER_SRCS) -o $(BUILD_TARGET_DIR)/$(BOOTLOADER_BIN)_unstripped -Wl,--gc-sections
+	$(CROSS_CC) $(TARGET_CPU_FLAGS) $(BOOTLOADER_CFLAGS) -static -no-pie $(BOOTLOADER_SRCS) -o $(BUILD_TARGET_DIR)/$(BOOTLOADER_BIN)_unstripped -Wl,--gc-sections -lpthread -lm
 	$(CROSS_STRIP) -s -o $(BOOTLOADER_BIN) $(BUILD_TARGET_DIR)/$(BOOTLOADER_BIN)_unstripped
-	@echo "Bootloader build complete: File ready at '$(BOOTLOADER_BIN)'"
+	@echo "Standalone Compás bootloader ready: $(BOOTLOADER_BIN)"
+endif
+
+# Explicit alias for rebuilding the combined R1/R3 Pro II selector.
+.PHONY: rockbox-bootloader
+rockbox-bootloader:
+	CROSS_CC="$(CROSS_CC)" bash scripts/build_rockbox_bootloader.sh "$(BOARD)"
 
 $(BUILD_TARGET_DIR)/%.o: src/%.c $(LVGL_PATCH_STAMP) $(TARGET_CPU_FLAGS_STAMP)
 	@mkdir -p $(dir $@)

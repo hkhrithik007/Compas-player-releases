@@ -214,6 +214,8 @@
 /open_hiby_player_target_*
 /compas_bootloader
 /compas_bootloader_*
+/compas_loader
+/compas_loader_*
 /open_hiby_bootloader
 /open_hiby_bootloader_*
 /compile_commands.json

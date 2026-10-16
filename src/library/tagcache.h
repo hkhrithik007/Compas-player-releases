@@ -79,10 +79,7 @@ typedef enum {
     TAGCACHE_LOAD_FAILED
 } tagcache_load_outcome_t;
 
-typedef struct tagcache_stats_snapshot tagcache_stats_snapshot_t;
 typedef struct tagcache_snapshot tagcache_snapshot_t;
-#define TAGCACHE_MIGRATION_APPLIED 0x1u
-#define TAGCACHE_MIGRATION_ARCHIVE 0x2u
 
 bool tagcache_open(const char * dir);
 tagcache_snapshot_t *tagcache_snapshot_open(bool recency);
@@ -214,18 +211,9 @@ int tagcache_set_rating_durable_begin(const char * path, int32_t rating);
  * worker to skip its commit delay, or flushes here in degraded mode. */
 bool tagcache_numeric_wait_durable(int waiter, int timeout_ms);
 void tagcache_add_play(const char * path, int32_t now);
-/* Staging-only overlay used when migrating sidecar stats onto a just-upserted
- * scan row. Persisted by the following end_update write. */
+/* Staging-only overlay for statistics moved from remote-state sidecars onto a scanned row. */
 void tagcache_overlay_stats(const char * path, int32_t rating, int32_t playcount, int32_t last_played);
-bool tagcache_extract_stats(const char * dir, tagcache_stats_snapshot_t ** out);
-/* Returns false when an interesting source path is present on disk but absent
- * from the current database. Matching rows are overlaid before returning. */
-bool tagcache_replay_stats(const tagcache_stats_snapshot_t * snapshot);
-bool tagcache_replay_stats_allow_missing(const tagcache_stats_snapshot_t * snapshot, size_t * unmatched);
-void tagcache_free_stats(tagcache_stats_snapshot_t * snapshot);
 int32_t tagcache_generation(void);
-uint32_t tagcache_migration_state(void);
-void tagcache_set_staged_migration_state(uint32_t state);
 
 int32_t tagcache_title_rank_of_path(const char * path);
 int32_t tagcache_recency_rank_of_path(const char * path);

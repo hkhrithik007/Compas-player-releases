@@ -1,7 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "scanner.h"
-#include "sd_ready.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -11,9 +10,6 @@
 #include <unistd.h>
 
 #define BUILD_STAMP_LEN BOOT_BUILD_STAMP_LEN
-
-/* mount_sd_card_if_needed() is implemented in sd_ready_real.c, backed by
- * the wait_for_sd_ready() state machine. */
 
 bool scanner_path_is_executable(const char * path) {
     struct stat st;
@@ -89,16 +85,4 @@ bool scanner_read_build_stamp(const char * path, char * out, size_t out_size) {
     }
 
     return found && read_ok;
-}
-
-void scanner_scan(scan_result_t * out) {
-    memset(out, 0, sizeof(*out));
-
-    mount_sd_card_if_needed();
-
-    out->sd_update_path = scanner_path_is_executable(SD_UPDATE_PLAYER_PATH) ? SD_UPDATE_PLAYER_PATH :
-                          (scanner_path_is_executable(LEGACY_SD_UPDATE_PLAYER_PATH) ?
-                               LEGACY_SD_UPDATE_PLAYER_PATH : NULL);
-    out->sd_update_present = out->sd_update_path != NULL;
-
 }

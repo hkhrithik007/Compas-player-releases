@@ -892,8 +892,15 @@ static bool read_id3v2_streaming(FILE * f, track_metadata_t * out, uint8_t major
     if (body_start < 0 || tag_size > (uint32_t) LONG_MAX || body_start > LONG_MAX - (long) tag_size) return false;
     long tag_end = body_start + (long) tag_size;
     bool found_any = false;
+    /* v2.2/v2.3 unsynchronization applies to the complete tag body, so keep
+     * decoding bytes as the stream consumes them. In v2.4 frame headers,
+     * extended-header sizes and frame sizes describe the stored bytes; parse
+     * those boundaries raw and de-unsynchronize only each affected frame
+     * body below. */
+    bool legacy_tag_unsync = major_version < 4 && (tag_flags & 0x80) != 0;
+    bool tag_unsync = (tag_flags & 0x80) != 0;
     id3_stream_t stream = { f, tag_size, ID3_STREAM_WORK_BUDGET_BYTES,
-                            (tag_flags & 0x80) != 0, false };
+                            legacy_tag_unsync, false };
 
     if (major_version >= 3 && (tag_flags & 0x40)) {
         uint8_t ext[4];
@@ -956,7 +963,13 @@ static bool read_id3v2_streaming(FILE * f, track_metadata_t * out, uint8_t major
             bool read_ok = data && id3_stream_read(&stream, data, frame_size);
             if (read_ok) {
                 uint32_t n = frame_size;
-                if (frame_unsync) n = id3_deunsync_in_place(data, n);
+                /* v2.4's tag flag means every frame body is unsynchronized;
+                 * a per-frame flag can also request it. The stored frame was
+                 * read raw above, so apply the transform once even when both
+                 * flags are set. Legacy v2.3 was already decoded by the
+                 * stream reader and must not be decoded a second time. */
+                if (major_version >= 4 && (tag_unsync || frame_unsync))
+                    n = id3_deunsync_in_place(data, n);
                 uint32_t prefix = (grouped ? 1U : 0U) + (data_len ? 4U : 0U);
                 if (prefix <= n) {
                     uint8_t * payload = data + prefix;
@@ -1055,9 +1068,10 @@ static bool read_id3v2(FILE * f, track_metadata_t * out, bool include_blobs) {
         return false;
     }
 
-    /* De-unsynchronize tag body in place if the header unsynchronization flag
-     * (bit 0x80) is set, stripping inserted 0x00 bytes following 0xFF bytes. */
-    if (flags & 0x80) {
+    /* v2.2/v2.3 unsynchronize the complete tag body. In v2.4, frame headers,
+     * extended-header sizes and frame sizes stay in stored-byte coordinates;
+     * each affected frame body is de-unsynchronized after it is bounded. */
+    if (major_version < 4 && (flags & 0x80)) {
         tag_size = id3_deunsync_in_place(tag_data, tag_size);
     }
 
@@ -1172,6 +1186,13 @@ static bool read_id3v2(FILE * f, track_metadata_t * out, bool include_blobs) {
             uint8_t * frame_data = tag_data + pos;
             uint32_t frame_data_size = frame_size;
 
+            /* Unsynchronization covers the complete stored frame body,
+             * including group identity and DLI prefixes. Decode it before
+             * removing those prefixes so an escaped 0xFF group byte cannot
+             * shift the following DLI. */
+            if (major_version >= 4 && ((flags & 0x80) || frame_unsync))
+                frame_data_size = id3_deunsync_in_place(frame_data, frame_data_size);
+
             if (frame_grouped && frame_data_size >= 1) {
                 frame_data += 1;
                 frame_data_size -= 1;
@@ -1179,18 +1200,6 @@ static bool read_id3v2(FILE * f, track_metadata_t * out, bool include_blobs) {
             if (frame_has_data_len && frame_data_size >= 4) {
                 frame_data += 4;
                 frame_data_size -= 4;
-            }
-
-            if (frame_unsync && frame_data_size > 0) {
-                uint32_t write_pos = 0;
-                for (uint32_t read_pos = 0; read_pos < frame_data_size; read_pos++) {
-                    uint8_t b = frame_data[read_pos];
-                    frame_data[write_pos++] = b;
-                    if (b == 0xFF && read_pos + 1 < frame_data_size && frame_data[read_pos + 1] == 0x00) {
-                        read_pos++;
-                    }
-                }
-                frame_data_size = write_pos;
             }
 
             if (strcmp(frame_id, "TIT2") == 0) {

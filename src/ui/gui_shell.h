@@ -55,6 +55,9 @@ void refresh_volume_topbar(int32_t percent);
 void gui_shell_apply_topbar_settings(void);
 void quick_drawer_mark_snapshot_dirty(void);
 void gui_shell_refresh_quick_drawer_volume_visibility(void);
+/* Reflows the existing Quick Drawer widgets to the current saved/plugin UI
+ * customization. Safe before the drawer is built. */
+void gui_shell_apply_customization(void);
 void register_swipe_dead_zone(lv_obj_t * obj);
 void unregister_swipe_dead_zone(lv_obj_t * obj);
 /* For gui_reload.c's in-process UI reload -- see its own comment. Must run

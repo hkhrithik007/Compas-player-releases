@@ -54,7 +54,6 @@
 #ifndef CHARGE_LIMITER_BASELINE_PATH
 #define CHARGE_LIMITER_BASELINE_PATH "/usr/data/.compas/charge_baseline.txt"
 #endif
-#define LEGACY_CHARGE_LIMITER_BASELINE_PATH "/usr/data/open_hiby_charge_baseline.txt"
 /* Bumped from 1: the persisted file used to also carry a captured voltage
  * baseline (removed -- voltage is a known per-board constant now, nothing
  * to capture or persist). A stale v1 file is safely ignored/reset rather
@@ -180,10 +179,6 @@ static bool mp_write(uint8_t r, uint8_t v) { return xfer(MP_BUS, MP_ADDR, r, &v,
 static void load_baseline(void) {
     const char *path = CHARGE_LIMITER_BASELINE_PATH;
     FILE *f = fopen(path, "r");
-    if (!f && strcmp(CHARGE_LIMITER_BASELINE_PATH, LEGACY_CHARGE_LIMITER_BASELINE_PATH) != 0) {
-        path = LEGACY_CHARGE_LIMITER_BASELINE_PATH;
-        f = fopen(path, "r");
-    }
     if (!f) return;
     unsigned ver, ai;
     bool ok = fscanf(f, "version=%u axp_current=%u", &ver, &ai) == 2 &&
@@ -199,8 +194,7 @@ static void load_baseline(void) {
 }
 
 static bool save_baseline(void) {
-    /* The migration target is inside the shared .compas data directory. The
-     * directory may not exist on an upgraded device until this first save. */
+    /* The shared .compas data directory may not exist until this first save. */
     char parent[sizeof(CHARGE_LIMITER_BASELINE_PATH)];
     snprintf(parent, sizeof(parent), "%s", CHARGE_LIMITER_BASELINE_PATH);
     char *parent_slash = strrchr(parent, '/');

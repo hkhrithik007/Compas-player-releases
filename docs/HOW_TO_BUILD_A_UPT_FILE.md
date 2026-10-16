@@ -67,17 +67,19 @@ checksum secret.
 
 ## 2. Build matching player and bootloader binaries
 
-Build both outputs for the same board. The Makefile writes board-specific
-outputs so builds do not overwrite each other:
+Build both outputs for the same board. R1 and R3 Pro II use the combined
+Compás/Rockbox bootloader by default; R3II 2025 uses the standalone Compás
+loader because no verified Rockbox target exists for that board. The Makefile
+writes board-specific outputs so builds do not overwrite each other:
 
 | Board | Build commands | Player output | Bootloader output |
 | --- | --- | --- | --- |
-| R1 | `make target BOARD=r1`<br>`make bootloader BOARD=r1` | `compas_player_target` | `compas_bootloader` |
-| R3 Pro II | `make target BOARD=r3proii`<br>`make bootloader BOARD=r3proii` | `compas_player_target_r3proii` | `compas_bootloader_r3proii` |
-| R3II 2025 | `make target BOARD=r3ii_2025`<br>`make bootloader BOARD=r3ii_2025` | `compas_player_target_r3ii_2025` | `compas_bootloader_r3ii_2025` |
+| R1 | `make target BOARD=r1`<br>`make bootloader BOARD=r1` | `compas_player_target` | `compas_loader` |
+| R3 Pro II | `make target BOARD=r3proii`<br>`make bootloader BOARD=r3proii` | `compas_player_target_r3proii` | `compas_loader_r3proii` |
+| R3II 2025 | `make target BOARD=r3ii_2025`<br>`make bootloader BOARD=r3ii_2025` | `compas_player_target_r3ii_2025` | `compas_loader_r3ii_2025` |
 
 Do not mix binaries between boards or use a host executable. The image installs
-them as `/usr/bin/compas_player` and `/usr/bin/compas_bootloader`. It also
+them as `/usr/bin/compas_player` and `/usr/bin/compas_loader`. It also
 removes the old `/usr/bin/open_hiby_bootloader` and updates the launcher to
 start the new bootloader.
 
@@ -126,17 +128,17 @@ created automatically.
 ```sh
 # R1
 scripts/repack_upt.sh --board r1 \
-  /path/to/r1.upt compas_player_target compas_bootloader output/r1-custom.upt
+  /path/to/r1.upt compas_player_target compas_loader output/r1-custom.upt
 
 # R3 Pro II
 scripts/repack_upt.sh --board r3proii \
   /path/to/r3proii.upt compas_player_target_r3proii \
-  compas_bootloader_r3proii output/r3proii-custom.upt
+  compas_loader_r3proii output/r3proii-custom.upt
 
 # R3II 2025
 scripts/repack_upt.sh --board r3ii_2025 \
   /path/to/r3ii_2025.upt compas_player_target_r3ii_2025 \
-  compas_bootloader_r3ii_2025 output/r3ii_2025-custom.upt
+  compas_loader_r3ii_2025 output/r3ii_2025-custom.upt
 ```
 
 On success, the script prints the output size and SHA-256 checksum. A

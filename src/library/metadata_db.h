@@ -79,15 +79,6 @@ metadata_db_load_outcome_t metadata_db_get_load_outcome(void);
 int32_t metadata_db_get_generation(void);
 bool metadata_db_try_get_generation(int32_t * out_generation);
 
-/* Migration extraction and replay run on the existing scan worker. The scan
- * must commit successfully before finish replays and commits statistics. */
-bool metadata_db_migration_needed(void);
-bool metadata_db_migration_cleanup_pending(void);
-bool metadata_db_migration_archive_retained(void);
-bool metadata_db_migration_prepare(void);
-bool metadata_db_migration_finish(void);
-void metadata_db_migration_cancel(void);
-
 /* Resolves the Artists row a track belongs to in one lock scope. Returns false
  * without waiting when the database is busy (a split rebuild holds the lock for
  * its whole run), leaving the caller to skip a cosmetic highlight rather than

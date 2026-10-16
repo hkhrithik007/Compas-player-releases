@@ -118,9 +118,6 @@ static int db_dir_fd = -1;
 static struct stat db_dir_identity;
 static bool db_dir_identity_valid;
 static bool db_open, disk_ready, rebuild_preserve_generations;
-static uint32_t committed_migration_state, staged_migration_state;
-#define TAGCACHE_MIGRATION_STATE_MAGIC 0x54434d53u
-#define TAGCACHE_MIGRATION_STATE_VERSION 1u
 static tagcache_load_outcome_t last_load_outcome = TAGCACHE_LOAD_FAILED;
 #define READER_SORT_CACHE_ROWS 64
 #define TC_QUERY_BLOCK_VALUES 128
@@ -364,51 +361,6 @@ static bool close_synced(int fd) {
     return ok;
 }
 
-static void migration_state_name(char * out, size_t n, int32_t gen) {
-    snprintf(out, n, "migration.g%d", gen);
-}
-
-struct migration_state_record { uint32_t magic, version, generation, state; };
-
-static bool write_migration_state(int32_t gen, uint32_t state) {
-    char name[64], path[640], tmp[680];
-    migration_state_name(name, sizeof(name), gen);
-    db_path(path, sizeof(path), name);
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    int fd = open(tmp, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-    struct migration_state_record record = {TAGCACHE_MIGRATION_STATE_MAGIC, TAGCACHE_MIGRATION_STATE_VERSION,
-                                            (uint32_t)gen, state};
-    bool ok = fd >= 0 && write_fully(fd, &record, sizeof(record));
-    if (fd >= 0 && fsync(fd) != 0) ok = false;
-    if (fd >= 0 && close(fd) != 0) ok = false;
-    if (!ok) {
-        unlink(tmp);
-        return false;
-    }
-    if (rename(tmp, path) != 0) { unlink(tmp); return false; }
-    return true;
-}
-
-static int read_migration_state(int32_t gen, uint32_t *out_state) {
-    char name[64], path[640];
-    migration_state_name(name, sizeof(name), gen);
-    db_path(path, sizeof(path), name);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return errno == ENOENT ? 0 : -1;
-    struct migration_state_record record;
-    struct stat st;
-    ssize_t n = pread(fd, &record, sizeof(record), 0);
-    bool valid = fstat(fd, &st) == 0 && n == (ssize_t)sizeof(record) &&
-                 st.st_size == (off_t)sizeof(record) && record.magic == TAGCACHE_MIGRATION_STATE_MAGIC &&
-                 record.version == TAGCACHE_MIGRATION_STATE_VERSION && record.generation == (uint32_t)gen &&
-                 (record.state & ~(TAGCACHE_MIGRATION_APPLIED | TAGCACHE_MIGRATION_ARCHIVE)) == 0;
-    close(fd);
-    if (!valid) return -1;
-    if (out_state) *out_state = record.state;
-    return 1;
-}
-
-
 static const int persist_tag_ids[] = { tag_artist,       tag_album,    tag_genre,     tag_albumartist, tag_composer,
                                        tag_comment,      tag_grouping, tag_virt_canonicalartist, tag_title, tag_filename };
 _Static_assert(sizeof(persist_tag_ids) / sizeof(persist_tag_ids[0]) == TAGCACHE_REFS_COUNT,
@@ -588,9 +540,6 @@ static void unlink_generation(int32_t gen) {
     master_file_name(name, sizeof(name), gen);
     db_path(path, sizeof(path), name);
     unlink(path);
-    migration_state_name(name, sizeof(name), gen);
-    db_path(path, sizeof(path), name);
-    unlink(path);
     generation_refs_name(name, sizeof(name), gen);
     db_path(path, sizeof(path), name);
     unlink(path);
@@ -630,14 +579,6 @@ static void unlink_other_generations(int32_t keep, int32_t previous) {
             if (*end == '\0' && parsed > 0 && parsed <= INT32_MAX &&
                 (parsed == keep || parsed == previous)) continue;
             if (db_path(path, sizeof(path), name)) unlink(path);
-            continue;
-        }
-        if (strncmp(name, "migration.g", 11) == 0) {
-            char *end;
-            long gen = strtol(name + 11, &end, 10);
-            if (*end == '\0' && gen > 0 && gen != keep && gen != previous) {
-                if (db_path(path, sizeof(path), name)) unlink(path);
-            }
             continue;
         }
         const char *gpos = strstr(name, ".tcd.g");
@@ -720,26 +661,6 @@ static bool validate_tag_header(const struct tagcache_header * hdr, size_t file_
     return true;
 }
 
-struct tagcache_stats_row {
-    char * path;
-    int32_t rating;
-    int32_t playcount;
-    int32_t last_played;
-};
-
-struct tagcache_stats_snapshot {
-    int master_fd;
-    int filename_fd;
-    struct master_header master;
-    struct tagcache_header filename;
-    int32_t entry_count;
-    /* Compatibility view for existing diagnostics: only the first row is
-     * retained; replay itself streams every row from the pinned descriptors. */
-    struct tagcache_stats_row first_row;
-    struct tagcache_stats_row *rows;
-    size_t count;
-};
-
 static int compare_load_generations(const void * a, const void * b);
 
 enum stats_read_result { STATS_READ_OK = 1, STATS_READ_EOF = 0, STATS_READ_ERROR = -1 };
@@ -759,380 +680,7 @@ static int stats_read_at(int fd, void * buf, size_t size, off_t offset) {
     return STATS_READ_OK;
 }
 
-static bool stats_path_at(int fd, const struct tagcache_header * hdr, int32_t seek, int32_t row_id,
-                          char * out, size_t out_size) {
-    if (seek < (int32_t) sizeof(*hdr) || seek > INT32_MAX - (int32_t) sizeof(struct tagfile_entry)) return false;
-    size_t end = 0;
-    if (!checked_add_size(sizeof(*hdr), (size_t) hdr->datasize, &end) || (size_t) seek >= end) return false;
-    struct tagfile_entry te;
-    if (stats_read_at(fd, &te, sizeof(te), (off_t) seek) != STATS_READ_OK) return false;
-    if (te.idx_id != row_id || te.tag_length <= 1 || te.tag_length > (int32_t) out_size) return false;
-    size_t record_end = 0;
-    if (!checked_add_size((size_t) seek, sizeof(te), &record_end) ||
-        !checked_add_size(record_end, (size_t) te.tag_length, &record_end) || record_end > end)
-        return false;
-    if (stats_read_at(fd, out, (size_t) te.tag_length, (off_t) seek + (off_t) sizeof(te)) != STATS_READ_OK) return false;
-    return out[0] != '\0' && !memchr(out, '\0', (size_t) te.tag_length - 1) && out[te.tag_length - 1] == '\0';
-}
-
-enum stats_pointer_result { STATS_POINTER_MISSING, STATS_POINTER_OK, STATS_POINTER_ERROR };
-
-static enum stats_pointer_result stats_read_pointer(const char * dir, int32_t * out) {
-    char path[640], buf[64];
-    snprintf(path, sizeof(path), "%s/tagcache.gen", dir);
-    FILE * f = fopen(path, "r");
-    if (!f) return errno == ENOENT ? STATS_POINTER_MISSING : STATS_POINTER_ERROR;
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    bool read_error = ferror(f) != 0;
-    bool close_error = fclose(f) != 0;
-    if (read_error || close_error) return STATS_POINTER_ERROR;
-    if (n == 0 || n >= sizeof(buf) - 1 || memchr(buf, '\0', n)) return STATS_POINTER_MISSING;
-    buf[n] = '\0';
-    char * end;
-    errno = 0;
-    long gen = strtol(buf, &end, 10);
-    while (isspace((unsigned char) *end)) end++;
-    if (end == buf || *end || errno == ERANGE || gen <= 0 || gen > INT32_MAX) return STATS_POINTER_MISSING;
-    *out = (int32_t) gen;
-    return STATS_POINTER_OK;
-}
-
-static bool stats_add_generation(int32_t ** gens, size_t * count, size_t * cap, int32_t gen) {
-    for (size_t i = 0; i < *count; i++)
-        if ((*gens)[i] == gen) return true;
-    if (*count == *cap) {
-        size_t next = *cap ? *cap * 2 : 16;
-        if (next < *cap || next > SIZE_MAX / sizeof(**gens)) return false;
-        int32_t * grown = realloc(*gens, next * sizeof(**gens));
-        if (!grown) return false;
-        *gens = grown;
-        *cap = next;
-    }
-    (*gens)[(*count)++] = gen;
-    return true;
-}
-
-static bool stats_collect_generations(const char * dir, int32_t pointed, int32_t ** out, size_t * out_count) {
-    DIR * d = opendir(dir);
-    if (!d) return false;
-    int32_t * gens = NULL;
-    size_t count = 0, cap = 0;
-    bool ok = true;
-    struct dirent * de;
-    for (;;) {
-        errno = 0;
-        de = readdir(d);
-        if (!de) {
-            if (errno != 0) ok = false;
-            break;
-        }
-        const char * name = de->d_name;
-        int32_t gen;
-        if (strcmp(name, "database_idx.tcd") == 0) {
-            gen = 0;
-        } else {
-            static const char prefix[] = "database_idx.tcd.g";
-            size_t prefix_len = sizeof(prefix) - 1;
-            if (strncmp(name, prefix, prefix_len) != 0) continue;
-            char * end;
-            errno = 0;
-            long parsed = strtol(name + prefix_len, &end, 10);
-            if (end == name + prefix_len || *end || errno == ERANGE || parsed <= 0 || parsed > INT32_MAX) continue;
-            gen = (int32_t) parsed;
-        }
-        if (gen != pointed && !stats_add_generation(&gens, &count, &cap, gen)) {
-            ok = false;
-            break;
-        }
-    }
-    if (closedir(d) != 0) ok = false;
-    if (!ok) {
-        free(gens);
-        return false;
-    }
-    if (count > 1) qsort(gens, count, sizeof(*gens), compare_load_generations);
-    *out = gens;
-    *out_count = count;
-    return true;
-}
-
-enum stats_extract_result { STATS_CANDIDATE_BAD, STATS_EXTRACTED, STATS_EXTRACT_FATAL };
-
-static void stats_snapshot_clear(struct tagcache_stats_snapshot * snapshot) {
-    if (!snapshot) return;
-    if (snapshot->master_fd >= 0) close(snapshot->master_fd);
-    if (snapshot->filename_fd >= 0) close(snapshot->filename_fd);
-    snapshot->master_fd = snapshot->filename_fd = -1;
-    snapshot->entry_count = 0;
-    free(snapshot->first_row.path);
-    snapshot->first_row.path = NULL;
-    snapshot->rows = &snapshot->first_row;
-    snapshot->count = 0;
-}
-
-static enum stats_extract_result stats_extract_generation(const char * dir, int32_t gen,
-                                                          struct tagcache_stats_snapshot * snapshot) {
-    char name[80], master_path[640], filename_path[640];
-    if (gen > 0) {
-        snprintf(name, sizeof(name), "database_idx.tcd.g%d", gen);
-        int32_t source_gen;
-        /* A refs read/validation error is not an absent candidate: treating it
-         * as one could replay stale favorites from an older generation. */
-        if (!resolve_tag_generation_at(dir, gen, tag_filename, &source_gen)) return STATS_EXTRACT_FATAL;
-        if (source_gen > 0)
-            snprintf(filename_path, sizeof(filename_path), "%s/database_%d.tcd.g%d", dir, tag_filename, source_gen);
-        else
-            snprintf(filename_path, sizeof(filename_path), "%s/database_%d.tcd", dir, tag_filename);
-    } else {
-        snprintf(name, sizeof(name), "database_idx.tcd");
-        snprintf(filename_path, sizeof(filename_path), "%s/database_%d.tcd", dir, tag_filename);
-    }
-    snprintf(master_path, sizeof(master_path), "%s/%s", dir, name);
-    int master_fd = open(master_path, O_RDONLY);
-    if (master_fd < 0) return errno == ENOENT ? STATS_CANDIDATE_BAD : STATS_EXTRACT_FATAL;
-    struct stat master_st;
-    struct master_header mh;
-    if (fstat(master_fd, &master_st) != 0) {
-        close(master_fd);
-        return STATS_EXTRACT_FATAL;
-    }
-    int read_result = stats_read_at(master_fd, &mh, sizeof(mh), 0);
-    if (read_result == STATS_READ_ERROR) {
-        close(master_fd);
-        return STATS_EXTRACT_FATAL;
-    }
-    if (read_result != STATS_READ_OK || !validate_master_header(&mh, (size_t) master_st.st_size)) {
-        if (close(master_fd) != 0) return STATS_EXTRACT_FATAL;
-        return STATS_CANDIDATE_BAD;
-    }
-    int filename_fd = open(filename_path, O_RDONLY);
-    if (filename_fd < 0) {
-        int open_errno = errno;
-        bool close_failed = close(master_fd) != 0;
-        if (close_failed) return STATS_EXTRACT_FATAL;
-        return open_errno == ENOENT ? STATS_CANDIDATE_BAD : STATS_EXTRACT_FATAL;
-    }
-    struct stat filename_st;
-    struct tagcache_header filename_hdr;
-    if (fstat(filename_fd, &filename_st) != 0) {
-        close(filename_fd);
-        close(master_fd);
-        return STATS_EXTRACT_FATAL;
-    }
-    read_result = stats_read_at(filename_fd, &filename_hdr, sizeof(filename_hdr), 0);
-    if (read_result == STATS_READ_ERROR) {
-        close(filename_fd);
-        close(master_fd);
-        return STATS_EXTRACT_FATAL;
-    }
-    if (read_result != STATS_READ_OK || !validate_tag_header(&filename_hdr, (size_t) filename_st.st_size)) {
-        bool close_failed = close(filename_fd) != 0;
-        close_failed = close(master_fd) != 0 || close_failed;
-        if (close_failed) return STATS_EXTRACT_FATAL;
-        return STATS_CANDIDATE_BAD;
-    }
-    char path[TAGCACHE_PATH_MAX];
-    for (int32_t i = 0; i < mh.tch.entry_count; i++) {
-        struct index_entry idx;
-        read_result = stats_read_at(master_fd, &idx, sizeof(idx), (off_t) sizeof(mh) + (off_t) i * sizeof(idx));
-        if (read_result != STATS_READ_OK) {
-            close(filename_fd);
-            close(master_fd);
-            stats_snapshot_clear(snapshot);
-            return STATS_EXTRACT_FATAL;
-        }
-        if (idx.flag & FLAG_DELETED || (idx.tag_seek[tag_rating] == 0 && idx.tag_seek[tag_playcount] == 0 &&
-                                        idx.tag_seek[tag_lastplayed] == 0))
-            continue;
-        if (!stats_path_at(filename_fd, &filename_hdr, idx.tag_seek[tag_filename], i, path, sizeof(path))) {
-            close(filename_fd);
-            close(master_fd);
-            stats_snapshot_clear(snapshot);
-            return STATS_EXTRACT_FATAL;
-        }
-        /* Reading every historical path here validates the candidate while
-         * keeping only the two generation descriptors.  Replay streams rows
-         * from those descriptors later instead of duplicating every path. */
-        if (!path[0]) {
-            close(filename_fd);
-            close(master_fd);
-            stats_snapshot_clear(snapshot);
-            return STATS_EXTRACT_FATAL;
-        }
-        if (snapshot->count == 0) {
-            snapshot->first_row.path = strdup(path);
-            if (!snapshot->first_row.path) {
-                close(filename_fd);
-                close(master_fd);
-                stats_snapshot_clear(snapshot);
-                return STATS_EXTRACT_FATAL;
-            }
-            snapshot->first_row.rating = idx.tag_seek[tag_rating];
-            snapshot->first_row.playcount = idx.tag_seek[tag_playcount];
-            snapshot->first_row.last_played = idx.tag_seek[tag_lastplayed];
-        }
-        snapshot->count++;
-    }
-    snapshot->master_fd = master_fd;
-    snapshot->filename_fd = filename_fd;
-    snapshot->master = mh;
-    snapshot->filename = filename_hdr;
-    snapshot->entry_count = mh.tch.entry_count;
-    snapshot->rows = &snapshot->first_row;
-    return STATS_EXTRACTED;
-}
-
-bool tagcache_extract_stats(const char * dir, tagcache_stats_snapshot_t ** out) {
-    if (!out || !dir || !dir[0]) return false;
-    *out = NULL;
-    int pinned_dir_fd = open(dir, O_RDONLY | O_DIRECTORY);
-    if (pinned_dir_fd < 0) return false;
-    char pinned_dir[64];
-    if (snprintf(pinned_dir, sizeof(pinned_dir), "/proc/self/fd/%d", pinned_dir_fd) >= (int)sizeof(pinned_dir)) {
-        close(pinned_dir_fd);
-        return false;
-    }
-    int32_t pointed = 0;
-    enum stats_pointer_result pointer_result = stats_read_pointer(pinned_dir, &pointed);
-    if (pointer_result == STATS_POINTER_ERROR) { close(pinned_dir_fd); return false; }
-    bool have_pointer = pointer_result == STATS_POINTER_OK;
-    int32_t * generations = NULL;
-    size_t generation_count = 0;
-    if (!stats_collect_generations(pinned_dir, have_pointer ? pointed : -1, &generations, &generation_count)) {
-        close(pinned_dir_fd);
-        return false;
-    }
-    struct tagcache_stats_snapshot * snapshot = calloc(1, sizeof(*snapshot));
-    if (!snapshot) {
-        free(generations);
-        close(pinned_dir_fd);
-        return false;
-    }
-    snapshot->master_fd = snapshot->filename_fd = -1;
-    bool extracted = false;
-    enum stats_extract_result result = STATS_CANDIDATE_BAD;
-    if (have_pointer) {
-        result = stats_extract_generation(pinned_dir, pointed, snapshot);
-        if (result == STATS_EXTRACT_FATAL) {
-            free(generations);
-            tagcache_free_stats(snapshot);
-            close(pinned_dir_fd);
-            return false;
-        }
-        extracted = result == STATS_EXTRACTED;
-    }
-    for (size_t n = 0; !extracted && n < generation_count; n++) {
-        stats_snapshot_clear(snapshot);
-        result = stats_extract_generation(pinned_dir, generations[n], snapshot);
-        if (result == STATS_EXTRACT_FATAL) {
-            free(generations);
-            tagcache_free_stats(snapshot);
-            close(pinned_dir_fd);
-            return false;
-        }
-        extracted = result == STATS_EXTRACTED;
-    }
-    free(generations);
-    close(pinned_dir_fd);
-    if (!extracted) {
-        tagcache_free_stats(snapshot);
-        return false;
-    }
-    *out = snapshot;
-    return true;
-}
-
-/* The reader implementation is included below the migration helpers. */
-static int32_t reader_find_path(const char *path);
-static bool reader_index(int32_t slot, struct index_entry *out);
-static bool reader_song(int32_t slot, tagcache_song_t *out);
-static int32_t scan_find_path(const char *path, bool insert, int32_t new_slot);
-static bool scan_seen_test(int32_t slot);
-
-static bool tagcache_scan_song_seen(const char *path, tagcache_song_t *out) {
-    reader_context_t *saved_reader = selected_reader;
-    bool scan_view = scan_lazy_active || scan_view_ready;
-    if (scan_view && scan_view_ready) selected_reader = &scan_reader;
-    int32_t slot = scan_lazy_active ? reader_find_path(path) : scan_find_path(path, false, -1);
-    struct index_entry idx;
-    if (slot < 0 || !reader_index(slot, &idx) || (idx.flag & FLAG_DELETED) ||
-        (scan_lazy_active ? !scan_seen_test(slot) : !(idx.flag & FLAG_SEEN))) {
-        selected_reader = saved_reader;
-        return false;
-    }
-    bool ok = reader_song(slot, out);
-    selected_reader = saved_reader;
-    return ok;
-}
-
-static bool tagcache_replay_stats_impl(const tagcache_stats_snapshot_t * snapshot, size_t * unmatched,
-                                       bool reject_unmatched) {
-    if (!snapshot) return false;
-    (void) reject_unmatched;
-    if (unmatched) *unmatched = 0;
-    /* Migration replay runs between begin_update() and end_update(); resolve
-     * against the staged view so rows scanned in this pass receive history
-     * before the first generation publication. */
-    reader_context_t *saved_reader = selected_reader;
-    if (scan_view_ready) selected_reader = &scan_reader;
-    bool ok = true;
-    char path[TAGCACHE_PATH_MAX];
-    for (int32_t i = 0; i < snapshot->entry_count; i++) {
-        struct index_entry idx;
-        if (stats_read_at(snapshot->master_fd, &idx, sizeof(idx),
-                          (off_t)sizeof(snapshot->master) + (off_t)i * sizeof(idx)) != STATS_READ_OK) {
-            selected_reader = saved_reader;
-            return false;
-        }
-        if (idx.flag & FLAG_DELETED || (idx.tag_seek[tag_rating] == 0 && idx.tag_seek[tag_playcount] == 0 &&
-                                        idx.tag_seek[tag_lastplayed] == 0)) continue;
-        if (!stats_path_at(snapshot->filename_fd, &snapshot->filename, idx.tag_seek[tag_filename], i,
-                           path, sizeof(path))) {
-            selected_reader = saved_reader;
-            return false;
-        }
-        tagcache_song_t current;
-        if (tagcache_scan_song_seen(path, &current)) {
-            int32_t playcount = current.playcount > idx.tag_seek[tag_playcount] ? current.playcount : idx.tag_seek[tag_playcount];
-            int32_t last_played = current.last_played > idx.tag_seek[tag_lastplayed] ? current.last_played : idx.tag_seek[tag_lastplayed];
-            tagcache_overlay_stats(path, idx.tag_seek[tag_rating], playcount, last_played);
-            continue;
-        }
-        struct stat st;
-        if (stat(path, &st) == 0 || errno != ENOENT) {
-            /* Existing paths omitted by the scan indicate a parser/scan
-             * failure, not deletion. Keep migration pending so a later scan
-             * can replay their ratings; only ENOENT paths are allowable. */
-            ok = false;
-            if (unmatched) (*unmatched)++;
-        } else if (unmatched) (*unmatched)++;
-    }
-    selected_reader = saved_reader;
-    return ok;
-}
-
-bool tagcache_replay_stats(const tagcache_stats_snapshot_t * snapshot) {
-    size_t unmatched = 0;
-    return tagcache_replay_stats_impl(snapshot, &unmatched, true) && unmatched == 0;
-}
-
-bool tagcache_replay_stats_allow_missing(const tagcache_stats_snapshot_t * snapshot, size_t * unmatched) {
-    return tagcache_replay_stats_impl(snapshot, unmatched, false);
-}
-
-void tagcache_free_stats(tagcache_stats_snapshot_t * snapshot) {
-    if (!snapshot) return;
-    stats_snapshot_clear(snapshot);
-    free(snapshot);
-}
-
 int32_t tagcache_generation(void) { return db_open ? disk_gen : 0; }
-uint32_t tagcache_migration_state(void) { return db_open ? committed_migration_state : 0; }
-void tagcache_set_staged_migration_state(uint32_t state) {
-    if (!db_open) return;
-    staged_migration_state = state;
-    if (scan_lazy_active && state != committed_migration_state) scan_force_publication = true;
-}
 
 static int compare_load_generations(const void * a, const void * b) {
     int32_t ga = *(const int32_t *) a;
@@ -2360,8 +1908,6 @@ static bool write_all(void (*unlock)(void), void (*lock)(void)) {
      * must still reject publication so it cannot become the active database
      * for the new card. */
     if (ok && !db_identity_current()) ok = false;
-    if (ok && (staged_migration_state != 0 || committed_migration_state != 0))
-        ok = write_migration_state(gen, staged_migration_state);
     if (ok) ok = library_fsync_dir(db_dir);
     if (ok && !rebuild_preserve_generations) ok = write_gen_pointer(gen);
     if (!ok) {
@@ -2396,15 +1942,6 @@ static bool load_generation(int32_t gen) {
         ent_count = live_count = 0;
         return false;
     }
-    int migration_state_result = read_migration_state(gen, &committed_migration_state);
-    if (migration_state_result < 0) {
-        reader_close_indexes();
-        reader_close();
-        ent_count = live_count = 0;
-        return false;
-    }
-    if (migration_state_result == 0) committed_migration_state = 0;
-    staged_migration_state = committed_migration_state;
     disk_ready = true;
     return true;
 }
@@ -2515,7 +2052,6 @@ void tagcache_close(void) {
     master_serial = 1;
     db_open = disk_ready = rebuild_preserve_generations = updating = scan_initializing = update_failed = false;
     scan_preserve_unseen = false;
-    committed_migration_state = staged_migration_state = 0;
     if (db_dir_fd >= 0) close(db_dir_fd);
     db_dir_fd = -1;
     db_dir_identity_valid = false;
@@ -2618,8 +2154,7 @@ bool tagcache_end_update(void) { return tagcache_end_update_with_lock(NULL, NULL
 void tagcache_abort_update(void) {
     if (!db_open) return;
     bool numeric_ok = tagcache_flush_numeric();
-    if (numeric_ok && scan_lazy_active && !updating && !scan_view_ready && !update_failed &&
-        staged_migration_state == committed_migration_state) {
+    if (numeric_ok && scan_lazy_active && !updating && !scan_view_ready && !update_failed) {
         scan_seen_release();
         scan_preserve_unseen = false;
         return;

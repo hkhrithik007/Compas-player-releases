@@ -30,6 +30,7 @@ WIFI_MODULE_PATCHES = {
     "brcmfmac": ("compas-radio-input-safety.patch", "compas-radio-lifecycle.patch"),
 }
 WIFI_KERNEL_PATCHES = {"brcmfmac": "compas-mmc-radio-lifetime.patch"}
+DIAGNOSTIC_KERNEL_PATCHES = {"oops-code-alias": "compas-oops-code-alias.patch"}
 DISPLAY_STACKS = ("vendor", "compas")
 DISPLAY_SOURCE_DIR = pathlib.Path("firmware/kernel/display-experimental")
 DISPLAY_REQUIRED_SYMVERS = {
@@ -70,6 +71,18 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def upstream_patch_names(upstream: pathlib.Path) -> set[str]:
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(upstream), "ls-files", "-z", "--", "patches/*.patch"],
+            check=True, capture_output=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise PreparationError(f"Cannot list upstream kernel patches: {exc}") from exc
+    return {pathlib.PurePosixPath(os.fsdecode(path)).name
+            for path in tracked.split(b"\0") if path}
+
+
 def local_patches(upstream: pathlib.Path) -> list[pathlib.Path]:
     patch_dir = REPO_ROOT / "firmware/kernel/patches"
     if patch_dir.is_symlink():
@@ -78,15 +91,7 @@ def local_patches(upstream: pathlib.Path) -> list[pathlib.Path]:
         return []
     if not patch_dir.is_dir():
         raise PreparationError(f"Local kernel patch path must be a regular directory: {patch_dir}")
-    try:
-        tracked = subprocess.run(
-            ["git", "-C", str(upstream), "ls-files", "-z", "--", "patches/*.patch"],
-            check=True, capture_output=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise PreparationError(f"Cannot list upstream kernel patches: {exc}") from exc
-    upstream_names = {pathlib.PurePosixPath(os.fsdecode(path)).name
-                      for path in tracked.split(b"\0") if path}
+    upstream_names = upstream_patch_names(upstream)
     patches = sorted(patch_dir.glob("*.patch"), key=lambda path: path.name)
     for patch in patches:
         if patch.is_symlink() or not patch.is_file():
@@ -113,6 +118,29 @@ def wifi_kernel_patches(wifi_stack: str = "vendor") -> list[pathlib.Path]:
     if patch.is_symlink() or not patch.is_file():
         raise PreparationError(f"brcmfmac Wi-Fi build requires kernel patch: {required}")
     return [patch]
+
+
+def diagnostic_kernel_patches(names: list[str] | None = None) -> list[pathlib.Path]:
+    names = list(names or [])
+    unknown = [name for name in names if name not in DIAGNOSTIC_KERNEL_PATCHES]
+    if unknown:
+        raise PreparationError(f"Unsupported diagnostic kernel patch {unknown[0]!r}; "
+                               f"choose {', '.join(sorted(DIAGNOSTIC_KERNEL_PATCHES))}")
+    if len(set(names)) != len(names):
+        raise PreparationError("Diagnostic kernel patches must not be repeated")
+    if not names:
+        return []
+    patch_dir = REPO_ROOT / "firmware/kernel/diagnostic-patches"
+    if patch_dir.is_symlink() or not patch_dir.is_dir():
+        raise PreparationError(f"Diagnostic kernel build requires a regular kernel patch directory: {patch_dir}")
+    patches = []
+    for name in names:
+        required = DIAGNOSTIC_KERNEL_PATCHES[name]
+        patch = patch_dir / required
+        if patch.is_symlink() or not patch.is_file():
+            raise PreparationError(f"Diagnostic kernel build requires kernel patch: {required}")
+        patches.append(patch)
+    return patches
 
 
 def module_patches(wifi_stack: str = "vendor") -> list[pathlib.Path]:
@@ -483,7 +511,8 @@ def container_command(runtime: str, workspace: pathlib.Path, sdk: pathlib.Path |
                       sdk_sha256: str | None, profile: str, jobs: int = 2,
                       patches: list[str] | None = None,
                       wifi_stack: str = "vendor",
-                      wifi_patches: list[str] | None = None) -> list[str]:
+                      wifi_patches: list[str] | None = None,
+                      diagnostic_patches: list[str] | None = None) -> list[str]:
     kit = workspace / "hiby-custom-kernel"
     volume = docker_volume_name(workspace, sdk_sha256)
     command = [
@@ -505,7 +534,7 @@ def container_command(runtime: str, workspace: pathlib.Path, sdk: pathlib.Path |
     wifi_fragment = WIFI_FRAGMENTS.get(wifi_stack)
     if wifi_fragment:
         command.extend(["--fragment", wifi_fragment])
-    for patch in [*(patches or []), *(wifi_patches or [])]:
+    for patch in [*(patches or []), *(wifi_patches or []), *(diagnostic_patches or [])]:
         command.extend(["--patch", patch])
     return command
 
@@ -743,6 +772,12 @@ def prepare(args: argparse.Namespace) -> pathlib.Path:
     display_sources = display_source_files(display_stack)
     source_patches = module_patches(wifi_stack)
     experimental_kernel_patches = wifi_kernel_patches(wifi_stack)
+    diagnostic_patches = diagnostic_kernel_patches(getattr(args, "diagnostic_patch", None))
+    if diagnostic_patches:
+        taken = {patch.name for patch in [*patches, *experimental_kernel_patches]} | upstream_patch_names(upstream)
+        for patch in diagnostic_patches:
+            if patch.name in taken:
+                raise PreparationError(f"Diagnostic kernel patch collides with another kernel patch filename: {patch.name}")
     wifi_fragment_name = WIFI_FRAGMENTS.get(wifi_stack)
     wifi_fragment_path = REPO_ROOT / "firmware/kernel" / wifi_fragment_name if wifi_fragment_name else None
     if wifi_fragment_path and (wifi_fragment_path.is_symlink() or not wifi_fragment_path.is_file()):
@@ -768,16 +803,17 @@ def prepare(args: argparse.Namespace) -> pathlib.Path:
     jobs = getattr(args, "jobs", 2)
     patch_names = [patch.name for patch in patches]
     wifi_patch_names = [patch.name for patch in experimental_kernel_patches]
+    diagnostic_patch_names = [patch.name for patch in diagnostic_patches]
     command = container_command(runtime, workspace, sdk, sdk_sha256, args.profile, jobs, patch_names,
-                                wifi_stack, wifi_patch_names)
+                                wifi_stack, wifi_patch_names, diagnostic_patch_names)
 
     workspace.mkdir(parents=True)
     try:
         copy_tracked_checkout(upstream, kit_destination)
         copied_patch_dir = kit_destination / "patches"
-        if patches or experimental_kernel_patches:
+        if patches or experimental_kernel_patches or diagnostic_patches:
             copied_patch_dir.mkdir(parents=True, exist_ok=True)
-            for patch in [*patches, *experimental_kernel_patches]:
+            for patch in [*patches, *experimental_kernel_patches, *diagnostic_patches]:
                 shutil.copy2(patch, copied_patch_dir / patch.name)
         applied_module_patches = apply_module_patches(kit_destination, workspace, source_patches)
         display_source_records = copy_display_sources(kit_destination, workspace, display_sources)
@@ -836,6 +872,14 @@ def prepare(args: argparse.Namespace) -> pathlib.Path:
                 }
                 for patch in experimental_kernel_patches
             ],
+            "diagnostic_kernel_patches": [
+                {
+                    "original_path": patch.relative_to(REPO_ROOT).as_posix(),
+                    "sha256": sha256(patch),
+                    "copied_to": f"hiby-custom-kernel/patches/{patch.name}",
+                }
+                for patch in diagnostic_patches
+            ],
             "module_patches": applied_module_patches,
             "display_sources": display_source_records,
             "provider_source": ({
@@ -890,6 +934,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "vendor preserves the existing module stack (default: vendor)")
     parser.add_argument("--provider-source", type=pathlib.Path,
                         help="reviewed bcm_wlbt_power.c source required for --wifi-stack brcmfmac")
+    parser.add_argument("--diagnostic-patch", choices=tuple(DIAGNOSTIC_KERNEL_PATCHES), action="append",
+                        default=None, help="opt-in diagnostic kernel patch; never part of the default build (repeatable)")
     parser.add_argument("--sdk", type=pathlib.Path, help="optional Ingenic SDK tarball")
     parser.add_argument("--container-runtime", choices=("auto", "docker", "podman"), default="auto",
                         help="container runtime (default: prefer Docker, then Podman)")

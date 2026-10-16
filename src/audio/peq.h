@@ -77,15 +77,15 @@ void peq_set_stereo_width(double width);
  * EQ, crossfeed (including that immediate gain), stereo width, limiter and
  * clamp. Mono buffers skip crossfeed and width. Strength 0 is an exact
  * no-op (the PCM fast path returns before the sample loop when preamp,
- * bands, width, and crossfeed are all idle). Bypass and native DoP skip
- * this stage entirely; DoP never enters peq_process(). Enabling only
- * crossfeed is enough to run the PCM stage.
+ * bands, width, and crossfeed are all idle). Native DoP never enters
+ * peq_process(). PEQ bypass disables preamp, bands, and stereo width while
+ * Crossfeed remains independent and can still run through this PCM stage.
  *
  * The stored default is 0 for new installs, reset, and profiles that omit
  * the key. PEQ_CROSSFEED_SUGGESTED is a conservative strength for a caller
  * that is explicitly turning the effect on. The audio thread ramps strength
- * and angle tap changes over PEQ_CROSSFEED_RAMP_SEC. Going idle, bypass, or
- * a non-stereo buffer clears the low-pass and delay history. A sample-rate
+ * and angle tap changes over PEQ_CROSSFEED_RAMP_SEC. Going idle or a
+ * non-stereo buffer clears the low-pass and delay history. A sample-rate
  * or PCM-format change, and a PCM discontinuity noted by the audio thread,
  * prime both from the next input sample so the previous stream is not
  * replayed and steady DC does not step. Continuous gapless PCM and ordinary
@@ -134,7 +134,7 @@ void peq_get_response_db(const double * frequencies_hz, double * response_db,
                          size_t count, unsigned int sample_rate);
 
 /* In-place processing of an interleaved S16 buffer. No-op (fast path) if
- * bypassed or no bands are enabled, preamp is 0 dB, width is neutral, and
+ * PEQ is bypassed and Crossfeed is idle, or no bands are enabled, preamp is 0 dB, width is neutral, and
  * crossfeed strength is 0. */
 void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int sample_rate);
 
@@ -173,5 +173,7 @@ bool peq_scan_profiles(const char * root, char *** out_paths, int * out_count);
  * profile. Caller refreshes UI widgets and calls peq_save() afterward itself,
  * same division of responsibility as peq_load_from_path(). */
 void peq_reset_to_defaults(void);
+/* Reset PEQ controls while preserving independent Crossfeed strength and angle. */
+void peq_reset_equalizer(void);
 
 #endif /* PEQ_H */
