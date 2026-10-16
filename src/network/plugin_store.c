@@ -1407,8 +1407,9 @@ static bool read_record_alloc(plugin_store_plugin_t ** out, char (**versions)[32
     return true;
 }
 
-void plugin_store_classify_layout_loaders(const char * const * filenames, bool * flags, size_t count) {
-    if (!filenames || !flags || !count) return;
+void plugin_store_classify_loaders(const char * const * filenames, bool * layout_flags,
+                                   bool * theme_flags, size_t count) {
+    if (!filenames || (!layout_flags && !theme_flags) || !count) return;
     plugin_store_plugin_t * records = NULL;
     char (*versions)[32] = NULL;
     size_t record_count = 0;
@@ -1416,14 +1417,19 @@ void plugin_store_classify_layout_loaders(const char * const * filenames, bool *
 
     for (size_t r = 0; r < record_count; r++) {
         const plugin_store_plugin_t * record = &records[r];
-        if (!plugin_contains_player_layout(record)) continue;
+        bool is_layout = layout_flags && plugin_contains_player_layout(record);
+        bool is_theme = theme_flags && plugin_contains_theme_pack(record);
+        if (!is_layout && !is_theme) continue;
         for (int f = 0; f < record->file_count; f++) {
             const char * dest = record->files[f].dest;
             if (strncmp(dest, ".plugins/", 9) != 0 || strchr(dest + 9, '/')) continue;
             size_t len = strlen(dest + 9);
             if (len <= 4 || strcasecmp(dest + 9 + len - 4, ".lua") != 0) continue;
             for (size_t i = 0; i < count; i++) {
-                if (filenames[i] && strcmp(filenames[i], dest + 9) == 0) flags[i] = true;
+                if (filenames[i] && strcmp(filenames[i], dest + 9) == 0) {
+                    if (is_layout) layout_flags[i] = true;
+                    if (is_theme) theme_flags[i] = true;
+                }
             }
         }
     }

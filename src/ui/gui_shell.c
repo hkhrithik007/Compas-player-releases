@@ -3277,8 +3277,9 @@ bool active_press_is_over_drag_adjust_widget(void) {
  * plugin settings list sliders. */
 /* 11 native slider cards, up to 8 plugin settings sliders
  * (PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE x PLUGIN_SETTINGS_LIST_MAX_SLIDERS),
- * the accent color picker and ten Quick Drawer reorder handles, with headroom. */
-#define SWIPE_DEAD_ZONE_MAX 48
+ * the accent color picker, ten Quick Drawer reorder handles and up to 24
+ * plugin item editor handles, with headroom. */
+#define SWIPE_DEAD_ZONE_MAX 72
 static lv_obj_t * swipe_dead_zones[SWIPE_DEAD_ZONE_MAX];
 static int swipe_dead_zone_count = 0;
 

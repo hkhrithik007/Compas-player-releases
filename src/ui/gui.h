@@ -100,6 +100,12 @@ int gui_plugin_show_settings_list(const char * title, const int * row_types, con
                                    const bool * wrap_labels, int count, bool update_existing,
                                    const gui_lock_screen_options_t * preview);
 
+/* Opens the single plugin order editor screen. The editor copies all input
+ * strings and state. The change callback is owned by plugin_manager.c and is
+ * invoked with the slot returned here after a toggle or committed drag. */
+int gui_plugin_show_order_editor(const char * title, const char * const * keys,
+                                 const char * const * labels, const bool * visible, int count);
+
 /* Starts playback of a brand-new playlist built from `paths[0..count)`,
  * starting at paths[start_index] -- same "starting something new clears
  * Up Next" semantics as every other play-launch path (on_file_selected()).

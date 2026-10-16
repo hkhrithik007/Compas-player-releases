@@ -112,9 +112,10 @@ void plugin_store_get_status(plugin_store_status_t * out, plugin_store_result_t 
 bool plugin_store_get_details(const char * id, plugin_store_details_t * out);
 /* Resolves a selected catalog plugin to its installed primary XML layout ID. */
 bool plugin_store_get_player_layout_id(const char * plugin_id, char * out, size_t size);
-/* Marks installed Lua files whose record also owns an XML player layout.
- * Existing true flags are preserved. */
-void plugin_store_classify_layout_loaders(const char * const * filenames, bool * flags, size_t count);
+/* Marks installed Lua files whose records own player layouts or native
+ * themes. Existing true flags are preserved. Either output may be NULL. */
+void plugin_store_classify_loaders(const char * const * filenames, bool * layout_flags,
+                                   bool * theme_flags, size_t count);
 /* Non-blocking, verified layout previews. Missing/failed previews use a placeholder. */
 #define PLUGIN_STORE_PREVIEW_CAPACITY 16
 /* Requests visible/nearby IDs; offscreen previews may be evicted. */

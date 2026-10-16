@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 /* In-process "soft" UI reload: tears down every screen, style, and
  * plugin-contributed UI element and rebuilds them fresh in the same
  * process, without restarting it -- so a plugin.set_icon()/set_background_
@@ -25,6 +27,10 @@ void gui_soft_reload(void);
  * pass, strictly after the triggering call has fully returned and control
  * is back in gui.c's lv_timer_handler() loop. */
 void gui_reload_request(void);
+
+/* Explicit Plugin Manager refresh: rebuilds plugin UI, then restores its
+ * supported native navigation path and scroll position from semantic IDs. */
+bool gui_reload_request_preserving_plugin_manager_page(void);
 
 /* Layout-only reload: preserve reusable decoded library artwork while
  * replacing widgets. Coalesced full reload requests still invalidate it. */

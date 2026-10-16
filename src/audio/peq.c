@@ -1,4 +1,5 @@
 #include "peq.h"
+#include "mseb.h"
 #include "library_endian.h"
 #include "storage_paths.h"
 
@@ -336,6 +337,7 @@ void peq_set_crossfeed_angle(int degrees) {
 }
 
 void peq_note_pcm_discontinuity(void) {
+    mseb_note_pcm_discontinuity();
     atomic_store_explicit(&crossfeed_discontinuity, true, memory_order_relaxed);
 }
 
@@ -567,8 +569,23 @@ void peq_set_band_enabled(int index, bool enabled) {
     bands[index].enabled = enabled;
 }
 
+/* The manual filters must not resume with histories from before MSEB took
+ * ownership of tone processing. Crossfeed remains independent, but primes
+ * its history against the new signal at this processing boundary. */
+static void sync_mseb_ownership(bool active) {
+    static bool previous;
+    if (active != previous) {
+        memset(state, 0, sizeof(state));
+        limiter_gain = 1.0f;
+        atomic_store_explicit(&crossfeed_discontinuity, true, memory_order_relaxed);
+    }
+    previous = active;
+}
+
 void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int sample_rate) {
-    const bool eq_off = atomic_load_explicit(&bypass, memory_order_relaxed);
+    const bool mseb_active = mseb_process(buf, frame_count, channels, sample_rate);
+    sync_mseb_ownership(mseb_active);
+    const bool eq_off = mseb_active || atomic_load_explicit(&bypass, memory_order_relaxed);
     /* Bypass disables the EQ controls and stereo width, while Crossfeed has
      * its own setting and remains available. Keep this early return when no
      * Crossfeed is active so an inactive signal stays bit-perfect. */
@@ -686,7 +703,9 @@ void peq_process(int16_t * buf, size_t frame_count, int channels, unsigned int s
 }
 
 void peq_process_s32(int32_t * buf, size_t frame_count, int channels, unsigned int sample_rate) {
-    const bool eq_off = atomic_load_explicit(&bypass, memory_order_relaxed);
+    const bool mseb_active = mseb_process_s32(buf, frame_count, channels, sample_rate);
+    sync_mseb_ownership(mseb_active);
+    const bool eq_off = mseb_active || atomic_load_explicit(&bypass, memory_order_relaxed);
     float cross_target = (float) peq_get_crossfeed();
     bool cross_active = channels == 2 && (cross_target != 0.0f || crossfeed_mix != 0.0f);
     if (eq_off && !cross_active) {
