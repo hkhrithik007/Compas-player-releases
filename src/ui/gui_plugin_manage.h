@@ -14,12 +14,17 @@
  * onto the SD card -- plugin_manager_init() re-scans .plugins/ from disk
  * every time it runs). */
 lv_obj_t * gui_plugin_manage_build_screen(void);
+lv_obj_t * gui_plugin_manage_get_screen(void);
 
 /* Builds/tears down this module's one screen -- called alongside
  * gui_settings_init()/gui_settings_teardown() (gui.c, gui_reload.c), same
  * lifecycle as every other settings sub-screen. */
 void gui_plugin_manage_init(void);
 void gui_plugin_manage_teardown(void);
+
+/* Numeric scroll state only; never exposes an LVGL object across reload. */
+int32_t gui_plugin_manage_scroll_y(void);
+void gui_plugin_manage_restore_scroll_y(int32_t scroll_y);
 
 /* Applies pending toggle changes once the screen has left the navigation
  * stack without an unload event. Called from the main poll. */

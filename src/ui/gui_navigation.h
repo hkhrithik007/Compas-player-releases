@@ -5,6 +5,23 @@
 
 #define NAV_STACK_MAX 16
 #define STATIC_SNAPSHOT_SCREEN_COUNT 9
+#define GUI_NAV_RELOAD_PATH_MAX 4
+
+typedef enum {
+    GUI_NAV_PAGE_HOME,
+    GUI_NAV_PAGE_MORE,
+    GUI_NAV_PAGE_SETTINGS,
+    GUI_NAV_PAGE_SETTINGS_SYSTEM,
+    GUI_NAV_PAGE_PLUGIN_MANAGER,
+} gui_nav_page_id_t;
+
+/* Reload-safe navigation snapshot: semantic page IDs and scalar scroll state
+ * only. It deliberately contains no LVGL object pointers. */
+typedef struct {
+    gui_nav_page_id_t pages[GUI_NAV_RELOAD_PATH_MAX];
+    int depth;
+    int32_t plugin_manager_scroll_y;
+} gui_nav_reload_state_t;
 
 typedef struct {
     lv_obj_t * overlay;
@@ -51,6 +68,8 @@ void gui_navigation_replace_static_screen(int snapshot_index, lv_obj_t * old_scr
 bool player_transition_cache_is_dirty(void);
 
 void gui_navigation_init(void);
+bool gui_navigation_capture_plugin_manager_path(gui_nav_reload_state_t * state);
+bool gui_navigation_restore_path(const gui_nav_reload_state_t * state);
 /* Called by gui_reload.c's in-process UI reload before and after rebuilding screens. */
 void gui_navigation_teardown(void);
 bool gui_navigation_transition_in_progress(void);

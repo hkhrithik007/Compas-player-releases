@@ -10,6 +10,7 @@
 #include "app_clock.h"
 #include "app_version.h"
 #include <math.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <strings.h>
 #include <sys/stat.h>
@@ -83,27 +84,62 @@ static lv_obj_t * ui_order_list;
 static lv_obj_t * ui_order_rows[UI_DRAWER_COUNT];
 static lv_obj_t * ui_order_drag_handles[UI_DRAWER_COUNT];
 static lv_obj_t * ui_order_visible_buttons[UI_DRAWER_COUNT];
-static lv_timer_t * ui_order_drag_timer;
-static bool ui_order_drag_active;
-static int ui_order_drag_id = -1;
-static int ui_order_drag_ids[UI_DRAWER_COUNT];
-static int ui_order_drag_count;
-static int32_t ui_order_drag_y;
-static lv_indev_t * ui_order_drag_indev;
-static bool ui_order_drag_list_was_scrollable;
-static bool ui_order_drag_changed;
-static void ui_order_row_translate_anim_cb(void * var, int32_t value) {
-    lv_obj_t * row = var;
-    if (row) lv_obj_set_style_translate_y(row, value, 0);
-}
-static void ui_order_row_stop_translate(lv_obj_t * row) {
-    if (!row) return;
-    lv_anim_delete(row, ui_order_row_translate_anim_cb);
-    lv_obj_set_style_translate_y(row, 0, 0);
-}
-static void ui_order_rows_animate_to_layout(void) {
-    for (int id = 0; id < UI_DRAWER_COUNT; ++id) {
-        lv_obj_t * row = ui_order_rows[id];
+
+typedef struct ui_order_drag_state ui_order_drag_state_t;
+struct ui_order_drag_state {
+    lv_obj_t * list;
+    lv_obj_t ** rows;
+    int row_capacity;
+    int ids[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+    int count;
+    int drag_id;
+    int drag_count;
+    int32_t pointer_y;
+    lv_indev_t * indev;
+    lv_timer_t * timer;
+    bool active;
+    bool list_was_scrollable;
+    bool changed;
+    void (*prepare)(ui_order_drag_state_t * state, int id);
+    void (*commit)(ui_order_drag_state_t * state);
+    void (*restore)(ui_order_drag_state_t * state);
+};
+_Static_assert(UI_DRAWER_COUNT <= PLUGIN_ORDER_EDITOR_MAX_ITEMS,
+               "Quick Drawer order editor exceeds shared drag capacity");
+_Static_assert(UI_DRAWER_COUNT <= UI_ORDER_MAX,
+               "Quick Drawer order exceeds saved order capacity");
+_Static_assert(UI_ORDER_MAX <= PLUGIN_ORDER_EDITOR_MAX_ITEMS,
+               "Saved order exceeds shared drag capacity");
+static ui_order_drag_state_t ui_order_drag_state = { .drag_id = -1 };
+static void ui_order_drag_begin(ui_order_drag_state_t * state, int id);
+static void ui_order_drag_finish(ui_order_drag_state_t * state, bool commit);
+static void ui_order_drag_event(ui_order_drag_state_t * state, int id, lv_event_t * e);
+
+/* The plugin editor uses the same drag row reordering primitive as Quick
+ * Drawer, but owns a separate screen/state slot so it can sit above either
+ * settings list without touching the player's saved UI customization. */
+typedef struct {
+    char key[64];
+    char label[128];
+    bool visible;
+} plugin_order_editor_item_t;
+static lv_obj_t * plugin_order_editor_screen;
+static lv_obj_t * plugin_order_editor_title;
+static lv_obj_t * plugin_order_editor_list;
+static lv_obj_t * plugin_order_editor_rows[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+static lv_obj_t * plugin_order_editor_handles[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+static lv_obj_t * plugin_order_editor_switches[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+static plugin_order_editor_item_t plugin_order_editor_items[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+static int plugin_order_editor_order[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+static int plugin_order_editor_count;
+static ui_order_drag_state_t plugin_order_editor_drag_state = { .drag_id = -1 };
+
+static bool ui_order_reorder_rows(lv_obj_t * list, lv_obj_t ** rows, int * order,
+                                  int count, int id, int32_t pointer_y);
+static void ui_order_row_translate_anim_cb(void * var, int32_t value);
+static void ui_order_animate_rows(lv_obj_t ** rows, const int * ids, int count) {
+    for (int i = 0; i < count; ++i) {
+        lv_obj_t * row = rows[ids[i]];
         if (!row) continue;
         lv_anim_delete(row, ui_order_row_translate_anim_cb);
         int32_t offset = lv_obj_get_style_translate_y(row, LV_PART_MAIN);
@@ -117,6 +153,15 @@ static void ui_order_rows_animate_to_layout(void) {
         lv_anim_set_exec_cb(&anim, ui_order_row_translate_anim_cb);
         lv_anim_start(&anim);
     }
+}
+static void ui_order_row_translate_anim_cb(void * var, int32_t value) {
+    lv_obj_t * row = var;
+    if (row) lv_obj_set_style_translate_y(row, value, 0);
+}
+static void ui_order_row_stop_translate(lv_obj_t * row) {
+    if (!row) return;
+    lv_anim_delete(row, ui_order_row_translate_anim_cb);
+    lv_obj_set_style_translate_y(row, 0, 0);
 }
 static lv_obj_t * quick_drawer_settings_screen;
 static lv_obj_t * quick_drawer_settings_list;
@@ -3713,10 +3758,9 @@ static ui_item_order_t * ui_saved_order(void) {
     return &current_settings.ui_customization.drawer;
 }
 static void populate_ui_order_screen(void);
-static void ui_order_drag_finish(bool commit);
 static void ui_order_control_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
-    if (ui_order_drag_active) ui_order_drag_finish(false);
+    if (ui_order_drag_state.active) ui_order_drag_finish(&ui_order_drag_state, false);
     int id = (int)(intptr_t)lv_event_get_user_data(e);
     if (id < 0 || id >= UI_DRAWER_COUNT) return;
     ui_item_order_t * order = ui_saved_order();
@@ -3732,52 +3776,51 @@ static void ui_order_control_cb(lv_event_t * e) {
     populate_ui_order_screen();
     gui_shell_apply_customization();
 }
-static int ui_order_drag_index(int id) {
-    for (int i = 0; i < ui_order_drag_count; ++i)
-        if (ui_order_drag_ids[i] == id) return i;
-    return -1;
-}
-static void ui_order_drag_reorder(void) {
-    if (!ui_order_drag_active || ui_order_drag_id < 0 || !ui_order_list) return;
-    int from = ui_order_drag_index(ui_order_drag_id);
-    if (from < 0) return;
-    lv_obj_update_layout(ui_order_list);
-    int32_t visual_y[UI_DRAWER_COUNT];
-    for (int i = 0; i < ui_order_drag_count; ++i) {
-        lv_obj_t * row = ui_order_rows[ui_order_drag_ids[i]];
+static bool ui_order_reorder_rows(lv_obj_t * list, lv_obj_t ** rows, int * order,
+                                  int count, int id, int32_t pointer_y) {
+    if (!list || !rows || !order || count <= 1) return false;
+    int from = -1;
+    for (int i = 0; i < count; ++i) if (order[i] == id) { from = i; break; }
+    if (from < 0) return false;
+    lv_obj_update_layout(list);
+    int32_t visual_y[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+    for (int i = 0; i < count; ++i) {
+        int row_id = order[i];
+        if (row_id < 0 || row_id >= PLUGIN_ORDER_EDITOR_MAX_ITEMS || !rows[row_id]) return false;
         lv_area_t row_area;
-        lv_obj_get_coords(row, &row_area);
+        lv_obj_get_coords(rows[row_id], &row_area);
         /* Flex layout includes translate_y in the current rendered coordinates. */
-        visual_y[ui_order_drag_ids[i]] = row_area.y1;
+        visual_y[row_id] = row_area.y1;
     }
     int to = from;
-    while (to + 1 < ui_order_drag_count) {
+    while (to + 1 < count) {
+        lv_obj_t * next = rows[order[to + 1]];
         lv_area_t next_area;
-        lv_obj_get_coords(ui_order_rows[ui_order_drag_ids[to + 1]], &next_area);
+        lv_obj_get_coords(next, &next_area);
         int32_t next_center = (next_area.y1 + next_area.y2) / 2 -
-            lv_obj_get_style_translate_y(ui_order_rows[ui_order_drag_ids[to + 1]], LV_PART_MAIN);
-        if (ui_order_drag_y <= next_center) break;
+            lv_obj_get_style_translate_y(next, LV_PART_MAIN);
+        if (pointer_y <= next_center) break;
         ++to;
     }
     while (to > 0) {
+        lv_obj_t * previous = rows[order[to - 1]];
         lv_area_t previous_area;
-        lv_obj_get_coords(ui_order_rows[ui_order_drag_ids[to - 1]], &previous_area);
+        lv_obj_get_coords(previous, &previous_area);
         int32_t previous_center = (previous_area.y1 + previous_area.y2) / 2 -
-            lv_obj_get_style_translate_y(ui_order_rows[ui_order_drag_ids[to - 1]], LV_PART_MAIN);
-        if (ui_order_drag_y >= previous_center) break;
+            lv_obj_get_style_translate_y(previous, LV_PART_MAIN);
+        if (pointer_y >= previous_center) break;
         --to;
     }
-    if (to == from) return;
-    int id = ui_order_drag_ids[from];
-    if (to > from) memmove(&ui_order_drag_ids[from], &ui_order_drag_ids[from + 1], (size_t)(to - from) * sizeof(int));
-    else memmove(&ui_order_drag_ids[to + 1], &ui_order_drag_ids[to], (size_t)(from - to) * sizeof(int));
-    ui_order_drag_ids[to] = id;
-    for (int i = 0; i < ui_order_drag_count; ++i)
-        lv_obj_move_to_index(ui_order_rows[ui_order_drag_ids[i]], i);
-    lv_obj_update_layout(ui_order_list);
-    for (int i = 0; i < ui_order_drag_count; ++i) {
-        int row_id = ui_order_drag_ids[i];
-        lv_obj_t * row = ui_order_rows[row_id];
+    if (to == from) return false;
+    int moved_id = order[from];
+    if (to > from) memmove(&order[from], &order[from + 1], (size_t)(to - from) * sizeof(int));
+    else memmove(&order[to + 1], &order[to], (size_t)(from - to) * sizeof(int));
+    order[to] = moved_id;
+    for (int i = 0; i < count; ++i) lv_obj_move_to_index(rows[order[i]], i);
+    lv_obj_update_layout(list);
+    for (int i = 0; i < count; ++i) {
+        int row_id = order[i];
+        lv_obj_t * row = rows[row_id];
         lv_anim_delete(row, ui_order_row_translate_anim_cb);
         lv_area_t row_area;
         lv_obj_get_coords(row, &row_area);
@@ -3785,98 +3828,138 @@ static void ui_order_drag_reorder(void) {
             lv_obj_get_style_translate_y(row, LV_PART_MAIN);
         lv_obj_set_style_translate_y(row, offset, 0);
     }
-    ui_order_rows_animate_to_layout();
-    ui_order_drag_changed = true;
+    ui_order_animate_rows(rows, order, count);
+    return true;
 }
-static void ui_order_drag_finish(bool commit) {
-    if (ui_order_drag_timer) { lv_timer_delete(ui_order_drag_timer); ui_order_drag_timer = NULL; }
-    bool restore_ui = !commit || !ui_order_drag_changed;
-    if (ui_order_drag_active && ui_order_drag_list_was_scrollable && ui_order_list)
-        lv_obj_add_flag(ui_order_list, LV_OBJ_FLAG_SCROLLABLE);
-    if (ui_order_drag_active && commit && ui_order_drag_changed) {
-        ui_item_order_t * order = ui_saved_order();
-        bool final_order_changed = order->count != (unsigned)ui_order_drag_count;
-        for (int i = 0; !final_order_changed && i < ui_order_drag_count; ++i)
-            if (order->ids[i] != (uint8_t)ui_order_drag_ids[i]) final_order_changed = true;
-        if (final_order_changed) {
-            order->count = (uint8_t)ui_order_drag_count;
-            for (int i = 0; i < ui_order_drag_count; ++i) order->ids[i] = (uint8_t)ui_order_drag_ids[i];
-            settings_save_async(&current_settings);
-            gui_shell_apply_customization();
-        }
+static void ui_order_drag_prepare_drawer(ui_order_drag_state_t * state, int id) {
+    (void)id;
+    ui_item_order_t * saved = ui_saved_order();
+    state->count = 0;
+    unsigned saved_count = saved->count > UI_ORDER_MAX ? UI_ORDER_MAX : saved->count;
+    for (unsigned i = 0; i < saved_count && state->count < UI_ORDER_MAX; ++i)
+        if (saved->ids[i] < UI_DRAWER_COUNT) state->ids[state->count++] = saved->ids[i];
+}
+static void ui_order_drag_commit_drawer(ui_order_drag_state_t * state) {
+    if (state->drag_count < 0 || state->drag_count > UI_ORDER_MAX ||
+        state->drag_count > UI_DRAWER_COUNT) return;
+    ui_item_order_t * saved = ui_saved_order();
+    bool changed = saved->count != (unsigned)state->drag_count;
+    for (int i = 0; !changed && i < state->drag_count; ++i)
+        if (saved->ids[i] != (uint8_t)state->ids[i]) changed = true;
+    if (!changed) return;
+    saved->count = (uint8_t)state->drag_count;
+    for (int i = 0; i < state->drag_count; ++i) saved->ids[i] = (uint8_t)state->ids[i];
+    settings_save_async(&current_settings);
+    gui_shell_apply_customization();
+}
+static void ui_order_drag_restore_drawer(ui_order_drag_state_t * state) {
+    (void)state;
+    if (ui_order_screen && ui_order_list) populate_ui_order_screen();
+}
+static void ui_order_drag_finish(ui_order_drag_state_t * state, bool commit) {
+    if (!state) return;
+    if (state->timer) { lv_timer_delete(state->timer); state->timer = NULL; }
+    if (!state->active) {
+        for (int id = 0; id < state->row_capacity; ++id)
+            ui_order_row_stop_translate(state->rows[id]);
+        return;
     }
-    if (ui_order_drag_id >= 0 && ui_order_rows[ui_order_drag_id])
-        lv_obj_clear_state(ui_order_rows[ui_order_drag_id], LV_STATE_USER_1);
+    bool should_commit = commit && state->changed;
+    bool restore_ui = !should_commit;
+    if (state->list_was_scrollable && state->list)
+        lv_obj_add_flag(state->list, LV_OBJ_FLAG_SCROLLABLE);
+    if (state->drag_id >= 0 && state->drag_id < state->row_capacity && state->rows[state->drag_id])
+        lv_obj_clear_state(state->rows[state->drag_id], LV_STATE_USER_1);
+    state->active = false;
+    state->drag_id = -1;
+    state->indev = NULL;
+    state->list_was_scrollable = false;
+    state->changed = false;
     if (restore_ui) {
-        for (int id = 0; id < UI_DRAWER_COUNT; ++id)
-            ui_order_row_stop_translate(ui_order_rows[id]);
-    } else {
-        /* The committed order already matches the displayed child order. Let
-         * any in-flight row motion finish without repopulating and snapping it. */
-        ui_order_rows_animate_to_layout();
+        for (int id = 0; id < state->row_capacity; ++id)
+            ui_order_row_stop_translate(state->rows[id]);
+        if (state->restore) state->restore(state);
+    } else if (state->commit) {
+        /* Commit adapters may call Lua and reload the UI. State is fully
+         * detached from the active drag before control leaves this function. */
+        state->commit(state);
     }
-    ui_order_drag_active = false;
-    ui_order_drag_id = -1;
-    ui_order_drag_indev = NULL;
-    ui_order_drag_list_was_scrollable = false;
-    ui_order_drag_changed = false;
-    if (restore_ui && ui_order_screen && ui_order_list)
-        populate_ui_order_screen();
-}
-static void ui_order_screen_unloaded_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_SCREEN_UNLOAD_START &&
-        lv_event_get_code(e) != LV_EVENT_SCREEN_UNLOADED) return;
-    if (ui_order_drag_active) ui_order_drag_finish(false);
-    else for (int id = 0; id < UI_DRAWER_COUNT; ++id)
-        ui_order_row_stop_translate(ui_order_rows[id]);
 }
 static void ui_order_drag_timer_cb(lv_timer_t * timer) {
-    (void)timer;
-    if (!ui_order_drag_active || !ui_order_list) return;
-    if (lv_obj_get_screen(ui_order_list) != lv_screen_active() || !ui_order_drag_indev ||
-        lv_indev_get_state(ui_order_drag_indev) != LV_INDEV_STATE_PRESSED) {
-        ui_order_drag_finish(false); return;
+    ui_order_drag_state_t * state = lv_timer_get_user_data(timer);
+    if (!state || !state->active || !state->list) return;
+    if (lv_obj_get_screen(state->list) != lv_screen_active() || !state->indev ||
+        lv_indev_get_state(state->indev) != LV_INDEV_STATE_PRESSED) {
+        ui_order_drag_finish(state, false);
+        return;
     }
-    lv_point_t p; lv_indev_get_point(ui_order_drag_indev, &p); ui_order_drag_y = p.y;
-    lv_area_t list_area; lv_obj_get_coords(ui_order_list, &list_area);
+    lv_point_t p;
+    lv_indev_get_point(state->indev, &p);
+    state->pointer_y = p.y;
+    lv_area_t list_area;
+    lv_obj_get_coords(state->list, &list_area);
     int32_t edge = BOARD_SCALE_PX(36);
     if (p.y < list_area.y1 + edge) {
         int32_t scroll = list_area.y1 + edge - p.y;
         if (scroll > BOARD_SCALE_PX(24)) scroll = BOARD_SCALE_PX(24);
-        lv_obj_scroll_by_bounded(ui_order_list, 0, scroll, LV_ANIM_OFF);
+        lv_obj_scroll_by_bounded(state->list, 0, scroll, LV_ANIM_OFF);
     } else if (p.y > list_area.y2 - edge) {
         int32_t scroll = p.y - (list_area.y2 - edge);
         if (scroll > BOARD_SCALE_PX(24)) scroll = BOARD_SCALE_PX(24);
-        lv_obj_scroll_by_bounded(ui_order_list, 0, -scroll, LV_ANIM_OFF);
+        lv_obj_scroll_by_bounded(state->list, 0, -scroll, LV_ANIM_OFF);
     }
-    ui_order_drag_reorder();
+    if (ui_order_reorder_rows(state->list, state->rows, state->ids,
+                              state->drag_count, state->drag_id, state->pointer_y))
+        state->changed = true;
+}
+static void ui_order_drag_begin(ui_order_drag_state_t * state, int id) {
+    if (!state || state->active || !state->prepare || !state->list || !state->rows) return;
+    state->prepare(state, id);
+    if (state->count < 1 || state->count > PLUGIN_ORDER_EDITOR_MAX_ITEMS) return;
+    bool found = false;
+    for (int i = 0; i < state->count; ++i) if (state->ids[i] == id) { found = true; break; }
+    if (!found) return;
+    state->active = true;
+    state->drag_id = id;
+    state->drag_count = state->count;
+    state->indev = lv_indev_active();
+    if (!state->indev) { ui_order_drag_finish(state, false); return; }
+    lv_point_t p;
+    lv_indev_get_point(state->indev, &p);
+    state->pointer_y = p.y;
+    state->list_was_scrollable = lv_obj_has_flag(state->list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_stop_scroll_anim(state->list);
+    lv_obj_remove_flag(state->list, LV_OBJ_FLAG_SCROLLABLE);
+    if (id >= 0 && id < state->row_capacity && state->rows[id])
+        lv_obj_add_state(state->rows[id], LV_STATE_USER_1);
+    state->timer = lv_timer_create(ui_order_drag_timer_cb, 50, state);
+}
+static void ui_order_drag_event(ui_order_drag_state_t * state, int id, lv_event_t * e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_LONG_PRESSED) {
+        ui_order_drag_begin(state, id);
+    } else if (code == LV_EVENT_PRESSING && state->active && state->drag_id == id) {
+        if (state->indev) {
+            lv_point_t p;
+            lv_indev_get_point(state->indev, &p);
+            state->pointer_y = p.y;
+        }
+        if (ui_order_reorder_rows(state->list, state->rows, state->ids,
+                                  state->drag_count, state->drag_id, state->pointer_y))
+            state->changed = true;
+    } else if ((code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) &&
+               state->active && state->drag_id == id) {
+        ui_order_drag_finish(state, code == LV_EVENT_RELEASED);
+    }
 }
 static void ui_order_drag_handle_cb(lv_event_t * e) {
-    lv_event_code_t code = lv_event_get_code(e);
     int id = (int)(intptr_t)lv_event_get_user_data(e);
-    if (code == LV_EVENT_LONG_PRESSED) {
-        if (ui_order_drag_active) return;
-        ui_item_order_t * order = ui_saved_order();
-        ui_order_drag_count = 0;
-        for (unsigned i = 0; i < order->count; ++i)
-            if (order->ids[i] < UI_DRAWER_COUNT) ui_order_drag_ids[ui_order_drag_count++] = order->ids[i];
-        if (ui_order_drag_index(id) < 0) return;
-        ui_order_drag_active = true; ui_order_drag_id = id;
-        ui_order_drag_indev = lv_indev_active();
-        if (!ui_order_drag_indev) { ui_order_drag_finish(false); return; }
-        lv_point_t p; lv_indev_get_point(ui_order_drag_indev, &p); ui_order_drag_y = p.y;
-        ui_order_drag_list_was_scrollable = lv_obj_has_flag(ui_order_list, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_stop_scroll_anim(ui_order_list);
-        lv_obj_remove_flag(ui_order_list, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_state(ui_order_rows[id], LV_STATE_USER_1);
-        ui_order_drag_timer = lv_timer_create(ui_order_drag_timer_cb, 50, NULL);
-    } else if (code == LV_EVENT_PRESSING && ui_order_drag_active && ui_order_drag_id == id) {
-        if (ui_order_drag_indev) { lv_point_t p; lv_indev_get_point(ui_order_drag_indev, &p); ui_order_drag_y = p.y; }
-        ui_order_drag_reorder();
-    } else if ((code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) &&
-               ui_order_drag_active && ui_order_drag_id == id) {
-        ui_order_drag_finish(code == LV_EVENT_RELEASED);
-    }
+    ui_order_drag_event(&ui_order_drag_state, id, e);
+}
+static void ui_order_screen_unloaded_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_SCREEN_UNLOAD_START &&
+        lv_event_get_code(e) != LV_EVENT_SCREEN_UNLOADED) return;
+    ui_order_drag_finish(&ui_order_drag_state, false);
 }
 static void add_customization_help(lv_obj_t *list) {
     lv_obj_t *help = add_section_header(list, TR("Plugins can override these saved preferences."));
@@ -3924,6 +4007,12 @@ static void populate_ui_order_screen(void) {
 static lv_obj_t * build_ui_order_screen(void) {
     lv_obj_t * title_label;
     ui_order_screen = build_subsonic_list_screen(TR("Quick Drawer"), &title_label, &ui_order_list);
+    ui_order_drag_state.list = ui_order_list;
+    ui_order_drag_state.rows = ui_order_rows;
+    ui_order_drag_state.row_capacity = UI_DRAWER_COUNT;
+    ui_order_drag_state.prepare = ui_order_drag_prepare_drawer;
+    ui_order_drag_state.commit = ui_order_drag_commit_drawer;
+    ui_order_drag_state.restore = ui_order_drag_restore_drawer;
     memset(ui_order_rows, 0, sizeof(ui_order_rows));
     memset(ui_order_drag_handles, 0, sizeof(ui_order_drag_handles));
     memset(ui_order_visible_buttons, 0, sizeof(ui_order_visible_buttons));
@@ -3990,6 +4079,182 @@ static void ui_order_settings_row_cb(lv_event_t * e) {
     else populate_ui_order_screen();
     nav_push(ui_order_screen);
 }
+
+static void plugin_order_editor_emit_change(void) {
+    const char * keys[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+    const char * labels[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+    bool visible[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+    for (int i = 0; i < plugin_order_editor_count; ++i) {
+        int item = plugin_order_editor_order[i];
+        keys[i] = plugin_order_editor_items[item].key;
+        labels[i] = plugin_order_editor_items[item].label;
+        visible[i] = plugin_order_editor_items[item].visible;
+    }
+    plugin_manager_order_editor_changed(0, keys, labels, visible, plugin_order_editor_count);
+}
+
+static void plugin_order_editor_populate(void) {
+    if (!plugin_order_editor_list) return;
+    for (int id = 0; id < plugin_order_editor_count; ++id)
+        ui_order_row_stop_translate(plugin_order_editor_rows[id]);
+    for (int pos = 0; pos < plugin_order_editor_count; ++pos)
+        lv_obj_move_to_index(plugin_order_editor_rows[plugin_order_editor_order[pos]], pos);
+    lv_obj_update_layout(plugin_order_editor_list);
+    for (int id = 0; id < plugin_order_editor_count; ++id) {
+        bool visible = plugin_order_editor_items[id].visible;
+        if (visible) lv_obj_add_state(plugin_order_editor_switches[id], LV_STATE_CHECKED);
+        else lv_obj_clear_state(plugin_order_editor_switches[id], LV_STATE_CHECKED);
+    }
+}
+
+static void plugin_order_editor_prepare_drag(ui_order_drag_state_t * state, int id) {
+    (void)id;
+    state->count = plugin_order_editor_count;
+    memcpy(state->ids, plugin_order_editor_order,
+           (size_t)state->count * sizeof(state->ids[0]));
+}
+static void plugin_order_editor_commit_drag(ui_order_drag_state_t * state) {
+    bool changed = false;
+    for (int i = 0; i < plugin_order_editor_count; ++i)
+        if (plugin_order_editor_order[i] != state->ids[i]) { changed = true; break; }
+    if (!changed) return;
+    memcpy(plugin_order_editor_order, state->ids,
+           (size_t)plugin_order_editor_count * sizeof(plugin_order_editor_order[0]));
+    plugin_order_editor_emit_change();
+}
+static void plugin_order_editor_restore_drag(ui_order_drag_state_t * state) {
+    (void)state;
+    plugin_order_editor_populate();
+}
+static void plugin_order_editor_toggle_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+    if (plugin_order_editor_drag_state.active)
+        ui_order_drag_finish(&plugin_order_editor_drag_state, false);
+    int id = (int)(intptr_t)lv_event_get_user_data(e);
+    if (id < 0 || id >= plugin_order_editor_count) return;
+    plugin_order_editor_items[id].visible =
+        lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    plugin_order_editor_populate();
+    plugin_order_editor_emit_change();
+}
+static void plugin_order_editor_drag_handle_cb(lv_event_t * e) {
+    int id = (int)(intptr_t)lv_event_get_user_data(e);
+    ui_order_drag_event(&plugin_order_editor_drag_state, id, e);
+}
+
+static void plugin_order_editor_screen_unloaded_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_SCREEN_UNLOAD_START &&
+        lv_event_get_code(e) != LV_EVENT_SCREEN_UNLOADED) return;
+    ui_order_drag_finish(&plugin_order_editor_drag_state, false);
+    if (plugin_order_editor_screen && !gui_navigation_contains(plugin_order_editor_screen))
+        plugin_manager_order_editor_closed(0);
+}
+
+static void plugin_order_editor_build_rows(void) {
+    if (!plugin_order_editor_list) return;
+    for (int id = 0; id < PLUGIN_ORDER_EDITOR_MAX_ITEMS; ++id) {
+        if (plugin_order_editor_handles[id]) unregister_swipe_dead_zone(plugin_order_editor_handles[id]);
+    }
+    lv_obj_clean(plugin_order_editor_list);
+    memset(plugin_order_editor_rows, 0, sizeof(plugin_order_editor_rows));
+    memset(plugin_order_editor_handles, 0, sizeof(plugin_order_editor_handles));
+    memset(plugin_order_editor_switches, 0, sizeof(plugin_order_editor_switches));
+    for (int id = 0; id < plugin_order_editor_count; ++id) {
+        lv_obj_t * row = add_pill_row_base(plugin_order_editor_list, TR(plugin_order_editor_items[id].label));
+        plugin_order_editor_rows[id] = row;
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_style(row, &list_row_pressed_style, LV_STATE_USER_1);
+        int32_t handle_px = BOARD_SCALE_PX(72);
+        if (handle_px < 48) handle_px = 48;
+        int32_t switch_width = BOARD_SCALE_PX(50);
+        int32_t text_width = LIST_ROW_WIDTH - handle_px - switch_width - GUI_TEXT_INSET - BOARD_SCALE_PX(20);
+        lv_obj_t * text = lv_obj_get_child(row, 0);
+        lv_obj_set_width(text, text_width);
+        lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
+        lv_obj_remove_flag(text, LV_OBJ_FLAG_USER_3);
+        lv_obj_set_height(text, LV_SIZE_CONTENT);
+        lv_obj_set_style_pad_top(text, 0, 0);
+        lv_obj_align(text, LV_ALIGN_LEFT_MID, GUI_TEXT_INSET + handle_px, 0);
+
+        lv_obj_t * handle = lv_button_create(row);
+        plugin_order_editor_handles[id] = handle;
+        lv_obj_set_size(handle, handle_px, ui_list_row_height());
+        lv_obj_align(handle, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_add_flag(handle, LV_OBJ_FLAG_PRESS_LOCK);
+        lv_obj_remove_flag(handle, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_style(handle, &list_row_pressed_style, LV_STATE_PRESSED);
+        lv_obj_add_style(handle, &list_row_pressed_style, LV_STATE_USER_1);
+        lv_obj_set_style_radius(handle, BOARD_SCALE_PX(8), 0);
+        lv_obj_set_style_bg_opa(handle, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(handle, 0, 0);
+        lv_obj_set_style_shadow_width(handle, 0, 0);
+        lv_obj_set_style_pad_all(handle, 0, 0);
+        lv_obj_t * grip = lv_image_create(handle);
+        lv_obj_set_size(grip, BOARD_SCALE_PX(32), BOARD_SCALE_PX(32));
+        lv_image_set_src(grip, asset_path("navigation/reorder.png"));
+        lv_image_set_inner_align(grip, LV_IMAGE_ALIGN_CONTAIN);
+        lv_obj_add_style(grip, &style_theme_text_primary, 0);
+        lv_obj_center(grip);
+        lv_obj_remove_flag(grip, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(handle, plugin_order_editor_drag_handle_cb, LV_EVENT_ALL,
+                            (void *)(intptr_t)id);
+        register_swipe_dead_zone(handle);
+
+        lv_obj_t * visible_switch = lv_switch_create(row);
+        plugin_order_editor_switches[id] = visible_switch;
+        lv_obj_add_style(visible_switch, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+        lv_obj_set_size(visible_switch, switch_width, BOARD_SCALE_PX(28));
+        lv_obj_align(visible_switch, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(6), 0);
+        lv_obj_add_event_cb(visible_switch, plugin_order_editor_toggle_cb, LV_EVENT_VALUE_CHANGED,
+                            (void *)(intptr_t)id);
+    }
+    lv_obj_update_layout(plugin_order_editor_list);
+    for (int id = 0; id < plugin_order_editor_count; ++id) {
+        lv_obj_t * row = plugin_order_editor_rows[id];
+        lv_obj_t * text = lv_obj_get_child(row, 0);
+        int32_t height = lv_obj_get_height(text) + BOARD_SCALE_PX(18);
+        if (height < ui_list_row_height()) height = ui_list_row_height();
+        lv_obj_set_height(row, height);
+        lv_obj_set_height(plugin_order_editor_handles[id], height);
+    }
+    plugin_order_editor_populate();
+}
+
+int gui_plugin_show_order_editor(const char * title, const char * const * keys,
+                                 const char * const * labels, const bool * visible, int count) {
+    if (!keys || !labels || !visible || count < 1 || count > PLUGIN_ORDER_EDITOR_MAX_ITEMS) return -1;
+    if (plugin_order_editor_screen && gui_navigation_contains(plugin_order_editor_screen)) return -1;
+    if (!plugin_order_editor_screen) {
+        plugin_order_editor_screen = build_subsonic_list_screen(
+            title && title[0] ? title : TR("Plugin Order"), &plugin_order_editor_title,
+            &plugin_order_editor_list);
+        lv_obj_add_event_cb(plugin_order_editor_screen, plugin_order_editor_screen_unloaded_cb,
+                            LV_EVENT_SCREEN_UNLOAD_START, NULL);
+        lv_obj_add_event_cb(plugin_order_editor_screen, plugin_order_editor_screen_unloaded_cb,
+                            LV_EVENT_SCREEN_UNLOADED, NULL);
+        enable_gesture_bubble_recursive(plugin_order_editor_screen);
+    } else {
+        lv_label_set_text(plugin_order_editor_title,
+                          title && title[0] ? title : TR("Plugin Order"));
+    }
+    plugin_order_editor_drag_state.list = plugin_order_editor_list;
+    plugin_order_editor_drag_state.rows = plugin_order_editor_rows;
+    plugin_order_editor_drag_state.row_capacity = PLUGIN_ORDER_EDITOR_MAX_ITEMS;
+    plugin_order_editor_drag_state.prepare = plugin_order_editor_prepare_drag;
+    plugin_order_editor_drag_state.commit = plugin_order_editor_commit_drag;
+    plugin_order_editor_drag_state.restore = plugin_order_editor_restore_drag;
+    plugin_order_editor_count = count;
+    for (int i = 0; i < count; ++i) {
+        snprintf(plugin_order_editor_items[i].key, sizeof(plugin_order_editor_items[i].key), "%s", keys[i]);
+        snprintf(plugin_order_editor_items[i].label, sizeof(plugin_order_editor_items[i].label), "%s", labels[i]);
+        plugin_order_editor_items[i].visible = visible[i];
+        plugin_order_editor_order[i] = i;
+    }
+    plugin_order_editor_build_rows();
+    nav_push(plugin_order_editor_screen);
+    return 0;
+}
+
 static void quick_drawer_setting_toggle_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     int which = (int)(intptr_t)lv_event_get_user_data(e);
@@ -5036,7 +5301,7 @@ enum { HOME_JPEG_CACHE_MAX_BYTES = 4 * 1024 * 1024 };
 typedef struct {
     lv_image_dsc_t descriptor;
     uint16_t * pixels;
-} home_background_jpeg_t;
+} home_background_rgb565_t;
 
 typedef struct {
     struct timespec deadline;
@@ -5052,7 +5317,7 @@ static bool home_background_decode_should_cancel(void * user_data) {
 
 /* Read only small, native-display-sized JPEGs into a single RGB565
  * framebuffer. PNGs retain LVGL's decoder path so alpha remains intact. */
-static home_background_jpeg_t * home_background_decode_jpeg(const char * relative_path) {
+static home_background_rgb565_t * home_background_decode_jpeg(const char * relative_path) {
     const char * ext = strrchr(relative_path, '.');
     if (!ext || (strcasecmp(ext, ".jpg") != 0 && strcasecmp(ext, ".jpeg") != 0)) return NULL;
     const char * path = asset_path_plain(relative_path);
@@ -5105,7 +5370,7 @@ static home_background_jpeg_t * home_background_decode_jpeg(const char * relativ
         cancel.deadline.tv_nsec -= 1000000000L;
     }
 
-    home_background_jpeg_t * cache = calloc(1, sizeof(*cache));
+    home_background_rgb565_t * cache = calloc(1, sizeof(*cache));
     if (!cache) {
         free(bytes);
         return NULL;
@@ -5131,10 +5396,66 @@ static home_background_jpeg_t * home_background_decode_jpeg(const char * relativ
     return cache;
 }
 
-static void home_background_jpeg_delete_cb(lv_event_t * event) {
+/* LVGL's file decoder streams .bin rows from storage on this target. Read a
+ * validated, single-frame wallpaper into the same screen-owned RGB565 buffer
+ * used by the JPEG fast path so drawing never performs SD reads per row. */
+static home_background_rgb565_t * home_background_decode_bin(const char * relative_path) {
+    const char * path = asset_path_plain(relative_path);
+    if (!path) return NULL;
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    struct stat st;
+    bool valid = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= 0;
+    lv_image_header_t header;
+    memset(&header, 0, sizeof(header));
+    if (valid) {
+        size_t got = 0;
+        while (got < sizeof(header)) {
+            ssize_t n = read(fd, (uint8_t *)&header + got, sizeof(header) - got);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+        valid = got == sizeof(header);
+    }
+    lv_display_t * display = lv_display_get_default();
+    uint32_t width = (uint32_t)(display ? lv_display_get_horizontal_resolution(display) : BOARD_SCREEN_WIDTH);
+    uint32_t height = (uint32_t)(display ? lv_display_get_vertical_resolution(display) : BOARD_SCREEN_HEIGHT);
+    uint64_t frame_bytes = (uint64_t)width * height * 2u;
+    uint64_t expected = (uint64_t)sizeof(header) + frame_bytes;
+    valid = valid && width > 0 && height > 0 && frame_bytes <= UINT32_MAX &&
+            header.magic == LV_IMAGE_HEADER_MAGIC && header.cf == LV_COLOR_FORMAT_RGB565 &&
+            header.flags == 0 && header.reserved_2 == 0 &&
+            header.w == width && header.h == height && header.stride == width * 2u &&
+            st.st_size > 0 && (uint64_t)st.st_size == expected;
+    home_background_rgb565_t * cache = valid ? calloc(1, sizeof(*cache)) : NULL;
+    if (valid && !cache) valid = false;
+    if (valid) {
+        cache->pixels = malloc((size_t)frame_bytes);
+        if (!cache->pixels) valid = false;
+    }
+    size_t offset = 0;
+    while (valid && offset < (size_t)frame_bytes) {
+        ssize_t n = read(fd, (uint8_t *)cache->pixels + offset, (size_t)frame_bytes - offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) valid = false;
+        else offset += (size_t)n;
+    }
+    close(fd);
+    if (!valid) {
+        if (cache) { free(cache->pixels); free(cache); }
+        return NULL;
+    }
+    cache->descriptor.header = header;
+    cache->descriptor.data = (const uint8_t *)cache->pixels;
+    cache->descriptor.data_size = (uint32_t)frame_bytes;
+    return cache;
+}
+
+static void home_background_rgb565_delete_cb(lv_event_t * event) {
     if (lv_event_get_code(event) != LV_EVENT_DELETE) return;
     lv_obj_t * scr = lv_event_get_target(event);
-    home_background_jpeg_t * cache = lv_event_get_user_data(event);
+    home_background_rgb565_t * cache = lv_event_get_user_data(event);
     if (!scr || !cache) return;
     lv_obj_set_style_bg_image_src(scr, NULL, 0);
     lv_image_cache_drop(&cache->descriptor);
@@ -5153,9 +5474,14 @@ static void home_background_jpeg_delete_cb(lv_event_t * event) {
  * so a plugin-set background applies whether Home is tile or list mode. */
 static void apply_home_background_image(lv_obj_t * scr) {
     if (!home_layout_config.configured || !home_layout_config.has_background_image) return;
-    home_background_jpeg_t * cache = home_background_decode_jpeg(home_layout_config.background_image);
+    const char * ext = strrchr(home_layout_config.background_image, '.');
+    home_background_rgb565_t * cache = NULL;
+    if (ext && strcasecmp(ext, ".bin") == 0)
+        cache = home_background_decode_bin(home_layout_config.background_image);
+    else
+        cache = home_background_decode_jpeg(home_layout_config.background_image);
     if (cache) {
-        lv_obj_add_event_cb(scr, home_background_jpeg_delete_cb, LV_EVENT_DELETE, cache);
+        lv_obj_add_event_cb(scr, home_background_rgb565_delete_cb, LV_EVENT_DELETE, cache);
         lv_obj_set_style_bg_image_src(scr, &cache->descriptor, 0);
     } else {
         lv_obj_set_style_bg_image_src(scr, asset_path(home_layout_config.background_image), 0);
@@ -6607,7 +6933,7 @@ void gui_settings_teardown(void) {
     if (settings_sound_effects_screen) { lv_obj_delete(settings_sound_effects_screen); settings_sound_effects_screen = NULL; }
     if (settings_eq_profiles_menu_screen) { lv_obj_delete(settings_eq_profiles_menu_screen); settings_eq_profiles_menu_screen = NULL; }
     if (settings_appearance_screen) { lv_obj_delete(settings_appearance_screen); settings_appearance_screen = NULL; }
-    ui_order_drag_finish(false);
+    ui_order_drag_finish(&ui_order_drag_state, false);
     for (int id = 0; id < UI_DRAWER_COUNT; ++id)
         if (ui_order_drag_handles[id]) unregister_swipe_dead_zone(ui_order_drag_handles[id]);
     if (ui_order_screen) { lv_obj_delete(ui_order_screen); ui_order_screen = NULL; }
@@ -6615,6 +6941,19 @@ void gui_settings_teardown(void) {
     memset(ui_order_rows, 0, sizeof(ui_order_rows));
     memset(ui_order_drag_handles, 0, sizeof(ui_order_drag_handles));
     memset(ui_order_visible_buttons, 0, sizeof(ui_order_visible_buttons));
+    memset(&ui_order_drag_state, 0, sizeof(ui_order_drag_state));
+    ui_order_drag_state.drag_id = -1;
+    ui_order_drag_finish(&plugin_order_editor_drag_state, false);
+    for (int id = 0; id < PLUGIN_ORDER_EDITOR_MAX_ITEMS; ++id)
+        if (plugin_order_editor_handles[id]) unregister_swipe_dead_zone(plugin_order_editor_handles[id]);
+    if (plugin_order_editor_screen) { lv_obj_delete(plugin_order_editor_screen); plugin_order_editor_screen = NULL; }
+    plugin_order_editor_title = plugin_order_editor_list = NULL;
+    memset(plugin_order_editor_rows, 0, sizeof(plugin_order_editor_rows));
+    memset(plugin_order_editor_handles, 0, sizeof(plugin_order_editor_handles));
+    memset(plugin_order_editor_switches, 0, sizeof(plugin_order_editor_switches));
+    plugin_order_editor_count = 0;
+    memset(&plugin_order_editor_drag_state, 0, sizeof(plugin_order_editor_drag_state));
+    plugin_order_editor_drag_state.drag_id = -1;
     if (quick_drawer_settings_screen) { lv_obj_delete(quick_drawer_settings_screen); quick_drawer_settings_screen = NULL; }
     quick_drawer_settings_list = NULL;
     if (settings_topbar_screen) { lv_obj_delete(settings_topbar_screen); settings_topbar_screen = NULL; }

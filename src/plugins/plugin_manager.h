@@ -159,6 +159,10 @@
  * same truncate-don't-error convention as the row cap above. */
 #define PLUGIN_SETTINGS_LIST_MAX_SLIDERS 4
 
+/* One reusable plugin.show_order_editor() screen, bounded to the same size
+ * as plugin settings lists. */
+#define PLUGIN_ORDER_EDITOR_MAX_ITEMS 24
+
 /* ---- plugin.on(event, callback) -- lets a plugin react to a playback
  * lifecycle change it didn't itself cause (a scrobbler needs to know when a
  * track starts, for instance), rather than only ever running in response to
@@ -219,6 +223,7 @@ typedef struct {
     bool loaded;
     bool over_limit; /* enabled, but the last load hit PLUGIN_MAX_FILES first */
     bool player_layout; /* bundle contains at least one regular player layout XML */
+    bool theme_package; /* store record owns at least one native theme */
     char display_name[96];
 } plugin_available_entry_t;
 
@@ -413,6 +418,9 @@ void plugin_manager_settings_list_toggled(int slot, int row, bool new_value);
  * the slider's new integer value. Fired once on release, not on every drag
  * tick -- see gui.c's plugin_settings_slider_event_cb()'s own comment. */
 void plugin_manager_settings_list_slid(int slot, int row, int new_value);
+void plugin_manager_order_editor_changed(int slot, const char * const * keys,
+                                         const char * const * labels, const bool * visible, int count);
+void plugin_manager_order_editor_closed(int slot);
 
 /* ---- Dispatchers for plugin.on() event subscribers. Playback and suspend
  * transitions are called from gui.c at their transition points; volume and

@@ -7,6 +7,7 @@
 #include "player_layouts.h"
 #include "gui_lock_screen.h"
 #include "peq.h"
+#include "mseb.h"
 #include "led_control.h"
 #include "battery.h"
 #include "charge_limiter.h"
@@ -154,6 +155,7 @@ typedef struct {
 } plugin_instance_t;
 
 static plugin_instance_t plugin_instances[PLUGIN_MAX_FILES];
+static lua_State * mseb_owner;
 static int plugin_instance_count = 0;
 /* Enabled files the last init left unloaded because PLUGIN_MAX_FILES was
  * reached, kept as filename hashes for plugin_manager_scan_available(). */
@@ -368,6 +370,12 @@ typedef struct {
 static plugin_settings_list_row_ref_t
     plugin_settings_list_rows[PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE][PLUGIN_SETTINGS_LIST_MAX_ROWS];
 static int plugin_settings_list_row_counts[PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE];
+
+typedef struct {
+    lua_State * L;
+    int callback_ref;
+} plugin_order_editor_callback_t;
+static plugin_order_editor_callback_t plugin_order_editor_callback = { NULL, LUA_NOREF };
 
 /* ---- plugin.* C API, exposed as a global table `plugin` in every loaded
  * script's own lua_State (see register_plugin_api() below):
@@ -1467,6 +1475,94 @@ static int l_plugin_show_settings_list(lua_State * L) {
     return 0;
 }
 
+/* Opens the native drag-and-toggle order editor for plugin-owned settings.
+ * The UI owns copies of all strings/state; Lua only retains the callback. */
+static int l_plugin_show_order_editor(lua_State * L) {
+    if (lua_type(L, 1) != LUA_TSTRING)
+        return luaL_error(L, "plugin.show_order_editor: title must be a string");
+    size_t title_len = 0;
+    const char * title = lua_tolstring(L, 1, &title_len);
+    if (title_len > 127 || memchr(title, '\0', title_len))
+        return luaL_error(L, "plugin.show_order_editor: title must be at most 127 bytes and contain no NUL");
+    luaL_checktype(L, 2, LUA_TTABLE);
+    luaL_checktype(L, 3, LUA_TFUNCTION);
+    lua_Unsigned raw_n = lua_rawlen(L, 2);
+    if (raw_n < 1 || raw_n > PLUGIN_ORDER_EDITOR_MAX_ITEMS)
+        return luaL_error(L, "plugin.show_order_editor: items must contain 1 to %d entries",
+                          PLUGIN_ORDER_EDITOR_MAX_ITEMS);
+
+    int seen_count = 0;
+    lua_pushnil(L);
+    while (lua_next(L, 2) != 0) {
+        if (!lua_isinteger(L, -2))
+            return luaL_error(L, "plugin.show_order_editor: items must be a dense array");
+        lua_Integer index = lua_tointeger(L, -2);
+        if (index < 1 || index > (lua_Integer)raw_n)
+            return luaL_error(L, "plugin.show_order_editor: items must be a dense array");
+        ++seen_count;
+        lua_pop(L, 1);
+    }
+    if (seen_count != (int)raw_n)
+        return luaL_error(L, "plugin.show_order_editor: items must be a dense array");
+
+    char key_bufs[PLUGIN_ORDER_EDITOR_MAX_ITEMS][64];
+    char label_bufs[PLUGIN_ORDER_EDITOR_MAX_ITEMS][128];
+    const char * keys[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+    const char * labels[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+    bool visible[PLUGIN_ORDER_EDITOR_MAX_ITEMS];
+    int count = (int)raw_n;
+    for (int i = 0; i < count; ++i) {
+        lua_rawgeti(L, 2, i + 1);
+        if (!lua_istable(L, -1))
+            return luaL_error(L, "plugin.show_order_editor: item %d must be a table", i + 1);
+        lua_getfield(L, -1, "key");
+        size_t key_len = 0;
+        const char * key = lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &key_len) : NULL;
+        if (!key || key_len == 0 || key_len >= sizeof(key_bufs[i]) || memchr(key, '\0', key_len))
+            return luaL_error(L, "plugin.show_order_editor: item %d key must be 1 to %zu bytes",
+                              i + 1, sizeof(key_bufs[i]) - 1);
+        memcpy(key_bufs[i], key, key_len);
+        key_bufs[i][key_len] = '\0';
+        lua_pop(L, 1);
+        for (int j = 0; j < i; ++j)
+            if (strcmp(key_bufs[i], key_bufs[j]) == 0)
+                return luaL_error(L, "plugin.show_order_editor: duplicate key '%s'", key_bufs[i]);
+
+        lua_getfield(L, -1, "label");
+        size_t label_len = 0;
+        const char * label = lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &label_len) : NULL;
+        if (!label || label_len >= sizeof(label_bufs[i]) || memchr(label, '\0', label_len))
+            return luaL_error(L, "plugin.show_order_editor: item %d label must be at most %zu bytes",
+                              i + 1, sizeof(label_bufs[i]) - 1);
+        memcpy(label_bufs[i], label, label_len);
+        label_bufs[i][label_len] = '\0';
+        lua_pop(L, 1);
+
+        lua_getfield(L, -1, "visible");
+        if (!lua_isboolean(L, -1))
+            return luaL_error(L, "plugin.show_order_editor: item %d visible must be a boolean", i + 1);
+        visible[i] = lua_toboolean(L, -1);
+        lua_pop(L, 2); /* visible, item table */
+        keys[i] = key_bufs[i];
+        labels[i] = label_bufs[i];
+    }
+
+    lua_pushvalue(L, 3);
+    int new_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    int slot = gui_plugin_show_order_editor(title, keys, labels, visible, count);
+    if (slot != 0) {
+        luaL_unref(L, LUA_REGISTRYINDEX, new_ref);
+        return luaL_error(L, "plugin.show_order_editor: editor is already open or unavailable");
+    }
+    if (plugin_order_editor_callback.L &&
+        plugin_order_editor_callback.callback_ref != LUA_NOREF)
+        luaL_unref(plugin_order_editor_callback.L, LUA_REGISTRYINDEX,
+                   plugin_order_editor_callback.callback_ref);
+    plugin_order_editor_callback.L = plugin_main_state(L);
+    plugin_order_editor_callback.callback_ref = new_ref;
+    return 0;
+}
+
 static int l_plugin_list_dir(lua_State * L) {
     const char * path = check_plugin_external_path(L, 1, "plugin.list_dir");
     lua_newtable(L);
@@ -2149,8 +2245,9 @@ static void set_home_background_image(lua_State * L, const char * source_path, h
     if (dot && strcasecmp(dot, ".png") == 0) ext = ".png";
     else if (dot && strcasecmp(dot, ".jpg") == 0) ext = ".jpg";
     else if (dot && strcasecmp(dot, ".jpeg") == 0) ext = ".jpeg";
+    else if (dot && strcasecmp(dot, ".bin") == 0) ext = ".bin";
     if (!ext) {
-        luaL_error(L, "plugin.set_home_layout: options.background_image '%s' must be a .png, .jpg, or .jpeg file",
+        luaL_error(L, "plugin.set_home_layout: options.background_image '%s' must be a .png, .jpg, .jpeg, or valid RGB565 .bin file",
                    source_path);
         return; /* unreachable -- luaL_error() longjmps */
     }
@@ -2159,6 +2256,41 @@ static void set_home_background_image(lua_State * L, const char * source_path, h
     snprintf(relative_path, sizeof(relative_path), "home/background%s", ext);
     char dst_path[600];
     snprintf(dst_path, sizeof(dst_path), "%s%s", PLUGIN_THEME_OVERRIDE_ROOT, relative_path);
+
+    if (strcmp(ext, ".bin") == 0) {
+        int fd = open(source_path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        lv_image_header_t header;
+        memset(&header, 0, sizeof(header));
+        struct stat st;
+        memset(&st, 0, sizeof(st));
+        lv_display_t * display = lv_display_get_default();
+        int max_w = display ? lv_display_get_horizontal_resolution(display) : BOARD_SCREEN_WIDTH;
+        int max_h = display ? lv_display_get_vertical_resolution(display) : BOARD_SCREEN_HEIGHT;
+        bool valid = fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode);
+        if (valid) {
+            size_t got = 0;
+            while (got < sizeof(header)) {
+                ssize_t n = read(fd, (uint8_t *) &header + got, sizeof(header) - got);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) break;
+                got += (size_t) n;
+            }
+            valid = got == sizeof(header);
+        }
+        if (fd >= 0) close(fd);
+        uint64_t expected = (uint64_t) sizeof(header) + (uint64_t) header.stride * header.h;
+        valid = valid && header.magic == LV_IMAGE_HEADER_MAGIC && header.cf == LV_COLOR_FORMAT_RGB565 &&
+                header.flags == 0 && header.reserved_2 == 0 &&
+                header.w == (uint32_t) max_w && header.h == (uint32_t) max_h &&
+                header.stride == header.w * 2u &&
+                expected <= sizeof(header) + (uint64_t) max_w * (uint64_t) max_h * 2u &&
+                st.st_size >= 0 && (uint64_t) st.st_size == expected;
+        if (!valid) {
+            luaL_error(L, "plugin.set_home_layout: options.background_image '%s' is not a valid RGB565 LVGL image for this display",
+                       source_path);
+            return;
+        }
+    }
 
     /* Same best-effort two-level mkdir as l_plugin_set_icon() below. */
     mkdir(PLUGIN_THEME_OVERRIDE_ROOT, 0755);
@@ -3205,6 +3337,49 @@ static int l_plugin_eq_apply_state(lua_State * L) {
     }
     if (persist) peq_save();
     lua_pushboolean(L, true);
+    return 1;
+}
+
+/* Stock MSEB is a separate native DSP stage. Keep this bridge deliberately
+ * transactional: every field is validated before publishing a new config. */
+static const char * const mseb_value_fields[] = {
+    "temperature", "bass_ext", "bass_texture", "thickness", "vocal_pos",
+    "female_vocal", "sibilance_lf", "sibilance_hf", "impulse_tone", "air"
+};
+
+static int l_plugin_mseb_apply_state(lua_State * L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    mseb_config_t config = { 0 };
+    lua_getfield(L, 1, "enabled");
+    luaL_argcheck(L, lua_type(L, -1) == LUA_TBOOLEAN, 1, "enabled must be boolean");
+    config.enabled = lua_toboolean(L, -1); lua_pop(L, 1);
+    for (int i = 0; i < 10; i++) {
+        lua_getfield(L, 1, mseb_value_fields[i]);
+        luaL_argcheck(L, lua_isinteger(L, -1), 1, "all control values must be integers");
+        lua_Integer value = lua_tointeger(L, -1); lua_pop(L, 1);
+        luaL_argcheck(L, value >= -100 && value <= 100, 1, "all control values must be between -100 and 100");
+        config.values[i] = (int) value;
+    }
+    lua_getfield(L, 1, "width");
+    luaL_argcheck(L, lua_type(L, -1) == LUA_TNUMBER, 1, "width must be a number");
+    config.width = lua_tonumber(L, -1); lua_pop(L, 1);
+    luaL_argcheck(L, isfinite(config.width) && config.width >= 0.0 && config.width <= 2.0,
+                  1, "width must be finite and between 0 and 2");
+    if (!mseb_set_config(&config)) { lua_pushboolean(L, false); return 1; }
+    mseb_owner = config.enabled ? plugin_main_state(L) : NULL;
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int l_plugin_get_mseb_state(lua_State * L) {
+    mseb_config_t config;
+    mseb_get_config(&config);
+    lua_createtable(L, 0, 12);
+    lua_pushboolean(L, config.enabled); lua_setfield(L, -2, "enabled");
+    for (int i = 0; i < 10; i++) {
+        lua_pushinteger(L, config.values[i]); lua_setfield(L, -2, mseb_value_fields[i]);
+    }
+    lua_pushnumber(L, config.width); lua_setfield(L, -2, "width");
     return 1;
 }
 
@@ -5073,13 +5248,13 @@ static const char * const plugin_capabilities[] = {
     "ui.home_layout", "ui.theme_refresh", "ui.reload", "ui.home_tiles", "ui.launcher_layout",
     "audio.stereo_width", "audio.crossfeed", "audio.crossfeed.angle", "playback.speed", "ui.home_background", "audio.hw_volume_curve", "ui.lock_screen", "ui.quick_toggle",
     "data.zip", "data.html", "ui.text_view", "data.zip_image", "data.image_thumbnail", "data.wallpaper", "ui.list_grid", "ui.list_showing",
-    "ui.list_update", "ui.text_view_images", "ui.list_wrap", "ui.settings_list_wrap", "playback.transport_skip",
+    "ui.list_update", "ui.text_view_images", "ui.list_wrap", "ui.settings_list_wrap", "ui.order_editor", "playback.transport_skip",
     "ui.player_layout_xml", "storage.secrets_get", "playback.progress",
     "playback.format", "playback.output_info", "playback.silent_volume", "audio.peq.transient",
     "playback.output_events", "playback.settings", "playback.ab_loop", "playback.ab_switch", "playback.http_seek",
     "audio.peq.state", "library.track_metadata", "playback.transient_volume",
     "filesystem.file_ops", "ui.file_manager", "ui.player_menu", "ui.file_picker",
-    "ui.startup_image"
+    "ui.startup_image", "audio.mseb.stock"
 };
 
 static int l_plugin_has_capability(lua_State * L) {
@@ -5983,6 +6158,7 @@ static const luaL_Reg plugin_funcs[] = {
     { "show_list",                 l_plugin_show_list },
     { "is_list_showing",           l_plugin_is_list_showing },
     { "show_settings_list",        l_plugin_show_settings_list },
+    { "show_order_editor",         l_plugin_show_order_editor },
     { "list_dir",                  l_plugin_list_dir },
     { "sd_root",                   l_plugin_sd_root },
     { "playlist_list",             l_plugin_playlist_list },
@@ -6031,6 +6207,8 @@ static const luaL_Reg plugin_funcs[] = {
     { "eq_set_band_enabled",       l_plugin_eq_set_band_enabled },
     { "get_eq_state",              l_plugin_get_eq_state },
     { "eq_apply_state",             l_plugin_eq_apply_state },
+    { "mseb_apply_state",            l_plugin_mseb_apply_state },
+    { "get_mseb_state",              l_plugin_get_mseb_state },
     { "get_track_metadata",         l_plugin_get_track_metadata },
     { "set_hw_volume_curve",       l_plugin_set_hw_volume_curve },
     { "toggle_pause",              l_plugin_toggle_pause },
@@ -6438,6 +6616,16 @@ static void discard_failed_plugin_intervals(lua_State * L, bool aborted) {
 }
 
 static void discard_failed_plugin_resources(lua_State * L, bool aborted) {
+    if (failed_load_owner_matches(plugin_order_editor_callback.L, L, aborted)) {
+        if (!aborted && plugin_order_editor_callback.callback_ref != LUA_NOREF)
+            luaL_unref(L, LUA_REGISTRYINDEX, plugin_order_editor_callback.callback_ref);
+        plugin_order_editor_callback.L = NULL;
+        plugin_order_editor_callback.callback_ref = LUA_NOREF;
+    }
+    if (failed_load_owner_matches(mseb_owner, L, aborted)) {
+        mseb_reset();
+        mseb_owner = NULL;
+    }
     for (int i = 0; i < PLUGIN_MAX_FILES; ++i) {
         plugin_instance_t *inst = &plugin_instances[i];
         if (!failed_load_owner_matches(inst->L, L, aborted)) continue;
@@ -6782,6 +6970,7 @@ static void fill_available_entry(plugin_available_entry_t * e, const char * file
     e->loaded = false;
     e->over_limit = false;
     e->player_layout = false;
+    e->theme_package = false;
     uint64_t h = plugin_filename_hash(filename);
     for (int j = 0; j < plugin_over_limit_count; j++) {
         if (plugin_over_limit[j] == h) {
@@ -6882,16 +7071,19 @@ int plugin_manager_scan_available(plugin_available_entry_t * out, int max) {
     if (count > 0) {
         const char ** filenames = calloc((size_t) count, sizeof(*filenames));
         bool * layout_flags = calloc((size_t) count, sizeof(*layout_flags));
+        bool * theme_flags = calloc((size_t) count, sizeof(*theme_flags));
         if (filenames && layout_flags) {
             for (int i = 0; i < count; i++) {
                 filenames[i] = out[i].filename;
                 layout_flags[i] = out[i].player_layout;
             }
-            plugin_store_classify_layout_loaders(filenames, layout_flags, (size_t) count);
+            plugin_store_classify_loaders(filenames, layout_flags, theme_flags, (size_t) count);
             for (int i = 0; i < count; i++) out[i].player_layout = layout_flags[i];
         }
+        if (theme_flags) for (int i = 0; i < count; i++) out[i].theme_package = theme_flags[i];
         free(filenames);
         free(layout_flags);
+        free(theme_flags);
     }
     free(names);
     return count;
@@ -6982,6 +7174,13 @@ static void plugin_manager_mark_disposing(void) {
 void plugin_manager_deinit(void) {
     advance_list_registry_generation();
     plugin_manager_mark_disposing();
+    if (plugin_order_editor_callback.L && plugin_order_editor_callback.callback_ref != LUA_NOREF)
+        luaL_unref(plugin_order_editor_callback.L, LUA_REGISTRYINDEX,
+                   plugin_order_editor_callback.callback_ref);
+    plugin_order_editor_callback.L = NULL;
+    plugin_order_editor_callback.callback_ref = LUA_NOREF;
+    mseb_reset();
+    mseb_owner = NULL;
     ui_customization_set_override(NULL);
     ui_layout_sequence = 0;
     plugin_progress_reset();
@@ -7479,6 +7678,40 @@ void plugin_manager_settings_list_slid(int slot, int row, int new_value) {
         fprintf(stderr, "[plugins] show_settings_list on_change error: %s\n", err ? err : "unknown error");
         lua_pop(L, 1);
     }
+}
+
+void plugin_manager_order_editor_changed(int slot, const char * const * keys,
+                                         const char * const * labels, const bool * visible, int count) {
+    if (slot != 0 || !plugin_order_editor_callback.L ||
+        plugin_order_editor_callback.callback_ref == LUA_NOREF ||
+        !keys || !labels || !visible || count < 1 || count > PLUGIN_ORDER_EDITOR_MAX_ITEMS) return;
+    lua_State * L = plugin_order_editor_callback.L;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, plugin_order_editor_callback.callback_ref);
+    lua_createtable(L, count, 0);
+    for (int i = 0; i < count; ++i) {
+        lua_createtable(L, 0, 3);
+        lua_pushstring(L, keys[i] ? keys[i] : "");
+        lua_setfield(L, -2, "key");
+        lua_pushstring(L, labels[i] ? labels[i] : "");
+        lua_setfield(L, -2, "label");
+        lua_pushboolean(L, visible[i]);
+        lua_setfield(L, -2, "visible");
+        lua_rawseti(L, -2, i + 1);
+    }
+    if (plugin_call(L, 1, 0, 0) != LUA_OK) {
+        const char * err = lua_tostring(L, -1);
+        fprintf(stderr, "[plugins] show_order_editor on_change error: %s\n", err ? err : "unknown error");
+        lua_pop(L, 1);
+    }
+}
+
+void plugin_manager_order_editor_closed(int slot) {
+    if (slot != 0) return;
+    if (plugin_order_editor_callback.L && plugin_order_editor_callback.callback_ref != LUA_NOREF)
+        luaL_unref(plugin_order_editor_callback.L, LUA_REGISTRYINDEX,
+                   plugin_order_editor_callback.callback_ref);
+    plugin_order_editor_callback.L = NULL;
+    plugin_order_editor_callback.callback_ref = LUA_NOREF;
 }
 
 void plugin_manager_notify_track_started(const char * title, const char * artist, const char * album,

@@ -12,6 +12,7 @@
 #include "gui_network.h"
 #include "gui_lyrics.h"
 #include "gui_shell.h"
+#include "gui_plugin_manage.h"
 #include "gui_books.h"
 #include "gui_lock_screen.h"
 #include "gui_text_input.h"
@@ -1388,6 +1389,75 @@ void gui_navigation_init(void) {
      * shown on Home from cold boot until the first real navigation away and
      * back corrected it. */
     sync_home_indicator_visibility(gui_shell_get_home_screen());
+}
+
+bool gui_navigation_capture_plugin_manager_path(gui_nav_reload_state_t * state) {
+    if (!state) return false;
+    memset(state, 0, sizeof(*state));
+
+    lv_obj_t * home = gui_shell_get_home_screen();
+    lv_obj_t * more = gui_shell_get_dac_home_screen();
+    lv_obj_t * plugin_manager = gui_plugin_manage_get_screen();
+    lv_obj_t * settings = gui_settings_get_screen();
+    lv_obj_t * system = gui_settings_get_system_screen();
+
+    if (nav_depth == 3 && nav_stack[0] == home && nav_stack[1] == more &&
+        nav_stack[2] == plugin_manager) {
+        state->pages[0] = GUI_NAV_PAGE_HOME;
+        state->pages[1] = GUI_NAV_PAGE_MORE;
+        state->pages[2] = GUI_NAV_PAGE_PLUGIN_MANAGER;
+        state->depth = 3;
+    } else if (nav_depth == 4 && nav_stack[0] == home && nav_stack[1] == settings &&
+               nav_stack[2] == system && nav_stack[3] == plugin_manager) {
+        state->pages[0] = GUI_NAV_PAGE_HOME;
+        state->pages[1] = GUI_NAV_PAGE_SETTINGS;
+        state->pages[2] = GUI_NAV_PAGE_SETTINGS_SYSTEM;
+        state->pages[3] = GUI_NAV_PAGE_PLUGIN_MANAGER;
+        state->depth = 4;
+    } else {
+        return false;
+    }
+
+    state->plugin_manager_scroll_y = gui_plugin_manage_scroll_y();
+    return true;
+}
+
+static lv_obj_t * gui_navigation_resolve_reload_page(gui_nav_page_id_t page) {
+    switch (page) {
+        case GUI_NAV_PAGE_HOME: return gui_shell_get_home_screen();
+        case GUI_NAV_PAGE_MORE: return gui_shell_get_dac_home_screen();
+        case GUI_NAV_PAGE_SETTINGS: return gui_settings_get_screen();
+        case GUI_NAV_PAGE_SETTINGS_SYSTEM: return gui_settings_get_system_screen();
+        case GUI_NAV_PAGE_PLUGIN_MANAGER: return gui_plugin_manage_get_screen();
+        default: return NULL;
+    }
+}
+
+bool gui_navigation_restore_path(const gui_nav_reload_state_t * state) {
+    if (!state || state->depth < 1 || state->depth > GUI_NAV_RELOAD_PATH_MAX ||
+        state->pages[0] != GUI_NAV_PAGE_HOME ||
+        state->pages[state->depth - 1] != GUI_NAV_PAGE_PLUGIN_MANAGER) return false;
+
+    lv_obj_t * rebuilt[GUI_NAV_RELOAD_PATH_MAX] = {0};
+    for (int i = 0; i < state->depth; i++) {
+        rebuilt[i] = gui_navigation_resolve_reload_page(state->pages[i]);
+        if (!rebuilt[i]) return false;
+    }
+
+    bool valid_path = (state->depth == 3 && state->pages[1] == GUI_NAV_PAGE_MORE) ||
+                      (state->depth == 4 && state->pages[1] == GUI_NAV_PAGE_SETTINGS &&
+                       state->pages[2] == GUI_NAV_PAGE_SETTINGS_SYSTEM);
+    if (!valid_path) return false;
+
+    for (int i = 0; i < NAV_STACK_MAX; i++) nav_stack[i] = NULL;
+    for (int i = 0; i < state->depth; i++) nav_stack[i] = rebuilt[i];
+    nav_depth = state->depth;
+    lv_obj_update_layout(rebuilt[state->depth - 1]);
+    lv_screen_load(rebuilt[state->depth - 1]);
+    sync_player_topbar_visibility(rebuilt[state->depth - 1]);
+    sync_home_indicator_visibility(rebuilt[state->depth - 1]);
+    gui_plugin_manage_restore_scroll_y(state->plugin_manager_scroll_y);
+    return true;
 }
 
 

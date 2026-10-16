@@ -69,9 +69,9 @@ static void plugin_manage_reload_row_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     /* Triggers a soft reload to rescan plugins from disk, displaying a toast
      * notification that survives the screen rebuild. */
+    if (!gui_reload_request_preserving_plugin_manager_page()) return;
     manage_changes_dirty = false;
     show_info_toast(TR("Refreshing plugins..."));
-    gui_reload_request();
 }
 
 static lv_obj_t * plugin_manage_screen;
@@ -136,7 +136,7 @@ lv_obj_t * gui_plugin_manage_build_screen(void) {
     int count = 2;
     for (int i = 0; i < manage_entry_count; i++) {
         const plugin_available_entry_t * en = &manage_entries[i];
-        if (en->player_layout || plugin_manage_is_support_module(en->filename)) continue;
+        if (en->player_layout || en->theme_package || plugin_manage_is_support_module(en->filename)) continue;
         plugin_manage_format_label(i, en);
         items[count++] = (pill_list_item_t){
             manage_labels[i], PILL_ACCESSORY_TOGGLE,
@@ -154,6 +154,32 @@ lv_obj_t * gui_plugin_manage_build_screen(void) {
 
 void gui_plugin_manage_init(void) {
     plugin_manage_screen = gui_plugin_manage_build_screen();
+}
+
+lv_obj_t * gui_plugin_manage_get_screen(void) {
+    return plugin_manage_screen;
+}
+
+static lv_obj_t * plugin_manage_scroll_container(void) {
+    if (!plugin_manage_screen) return NULL;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(plugin_manage_screen); i++) {
+        lv_obj_t * child = lv_obj_get_child(plugin_manage_screen, (int32_t)i);
+        if (child && lv_obj_has_flag(child, LV_OBJ_FLAG_SCROLLABLE) &&
+            lv_obj_get_scroll_dir(child) == LV_DIR_VER) return child;
+    }
+    return NULL;
+}
+
+int32_t gui_plugin_manage_scroll_y(void) {
+    lv_obj_t * list = plugin_manage_scroll_container();
+    return list ? lv_obj_get_scroll_y(list) : 0;
+}
+
+void gui_plugin_manage_restore_scroll_y(int32_t scroll_y) {
+    lv_obj_t * list = plugin_manage_scroll_container();
+    if (!list) return;
+    lv_obj_update_layout(plugin_manage_screen);
+    lv_obj_scroll_to_y(list, scroll_y > 0 ? scroll_y : 0, LV_ANIM_OFF);
 }
 
 void gui_plugin_manage_teardown(void) {
