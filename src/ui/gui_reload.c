@@ -102,6 +102,8 @@
 #include "gui_settings.h"
 #include "gui_books.h"
 #include "gui_file_manager.h"
+#include "gui_emulator_store.h"
+#include "gui_emulators.h"
 #include "gui_queue.h"
 #include "gui_plugins.h"
 #include "plugin_manager.h"
@@ -190,6 +192,10 @@ static void gui_soft_reload_with_artwork(bool preserve_artwork,
     gui_file_manager_teardown();
     reload_diag("gui_books_teardown: before");
     gui_books_teardown();
+    reload_diag("gui_emulators_teardown: before");
+    gui_emulators_teardown();
+    reload_diag("gui_emulator_store_teardown: before");
+    gui_emulator_store_teardown();
     reload_diag("gui_queue_teardown: before");
     gui_queue_teardown();
     reload_diag("gui_plugins_teardown: before");
@@ -242,6 +248,8 @@ static void gui_soft_reload_with_artwork(bool preserve_artwork,
     gui_plugin_manage_init();
     reload_diag("gui_plugin_store_init: before");
     gui_plugin_store_init();
+    reload_diag("gui_emulator_store_init: before");
+    gui_emulator_store_init();
     reload_diag("gui_lock_screen_init: before");
     gui_lock_screen_init();
     reload_diag("gui_books_init: before");

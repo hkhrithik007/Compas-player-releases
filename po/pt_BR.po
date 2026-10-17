@@ -28,7 +28,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-16 00:10-0600\n"
+"POT-Creation-Date: 2026-10-17 10:56-0600\n"
 "PO-Revision-Date: 2026-10-01 00:00+0000\n"
 "Last-Translator: Machine draft\n"
 "Language-Team: Portuguese (Brazil)\n"
@@ -336,6 +336,43 @@ msgstr "Nenhum arquivo de áudio reproduzível encontrado"
 msgid "Open a folder containing supported audio files."
 msgstr "Abra uma pasta com arquivos de áudio compatíveis."
 
+msgid "Unexpected reply from GitHub."
+msgstr "Resposta inesperada do GitHub."
+
+msgid "Insert an SD card to change emulators."
+msgstr "Insira um cartão SD para alterar os emuladores."
+
+msgid "Cannot create the emulator folder."
+msgstr "Não foi possível criar a pasta de emuladores."
+
+msgid "The emulator folder is not writable."
+msgstr "A pasta de emuladores não permite gravação."
+
+msgid "Not enough free space on the player."
+msgstr "Espaço livre insuficiente no player."
+
+msgid "Could not read the emulator list from GitHub."
+msgstr "Não foi possível ler a lista de emuladores do GitHub."
+
+msgid "This emulator needs a newer player version."
+msgstr "Este emulador precisa de uma versão mais nova do player."
+
+msgid "Disconnect USB storage from the host before changing emulators."
+msgstr "Desconecte o armazenamento USB do computador antes de alterar os emuladores."
+
+msgid "Could not install the emulator."
+msgstr "Não foi possível instalar o emulador."
+
+msgid "The emulator download failed verification. Try again."
+msgstr "O download do emulador falhou na verificação. Tente de novo."
+
+msgid "Could not start the emulator operation"
+msgstr "Não foi possível iniciar a operação do emulador"
+
+#
+msgid "Could not remove the emulator."
+msgstr "Não foi possível remover o emulador."
+
 msgid "Unexpected reply from GitHub"
 msgstr "Resposta inesperada do GitHub"
 
@@ -438,9 +475,6 @@ msgstr "Já há uma atualização em andamento."
 msgid "Could not start the installation."
 msgstr "Não foi possível iniciar a instalação."
 
-msgid "Unexpected reply from GitHub."
-msgstr "Resposta inesperada do GitHub."
-
 msgid "Disconnect USB storage from the host before changing plugins."
 msgstr "Desconecte o armazenamento USB do computador antes de alterar os plugins."
 
@@ -453,11 +487,11 @@ msgstr "O cartão SD está somente para leitura. Verifique a proteção contra g
 msgid "Plugin storage is unavailable."
 msgstr "O armazenamento dos plugins está indisponível."
 
-msgid "Could not read the plugin list from GitHub."
-msgstr "Não foi possível ler a lista de plugins do GitHub."
-
 msgid "The SD card changed during the operation."
 msgstr "O cartão SD mudou durante a operação."
+
+msgid "Could not read the plugin list from GitHub."
+msgstr "Não foi possível ler a lista de plugins do GitHub."
 
 msgid "Insert an SD card to install plugins."
 msgstr "Insira um cartão SD para instalar plugins."
@@ -604,6 +638,141 @@ msgstr "Abra um livro e toque no ícone de marcador para salvá-lo aqui."
 
 msgid "Add .txt files to the Books folder, then refresh the library."
 msgstr "Adicione arquivos .txt à pasta Livros e atualize a biblioteca."
+
+msgid "Needs newer firmware"
+msgstr "Precisa de firmware mais novo"
+
+#, c-format
+msgid "Update available · %s"
+msgstr "Atualização disponível · %s"
+
+#, c-format
+msgid "Installed · %s"
+msgstr "Instalado · %s"
+
+#, c-format
+msgid "Available · %s"
+msgstr "Disponível · %s"
+
+msgid "Install"
+msgstr "Instalar"
+
+msgid "Remove"
+msgstr "Remover"
+
+msgid "Bundled games and their saves will be removed. Games in SD/Games are kept."
+msgstr ""
+
+#, fuzzy
+msgid "No description"
+msgstr "Posição"
+
+#, c-format
+msgid "By %s"
+msgstr "Por %s"
+
+#, c-format
+msgid "License: %s"
+msgstr "Licença: %s"
+
+#, c-format
+msgid "Size: %s"
+msgstr "Tamanho: %s"
+
+msgid "Updating replaces bundled games and their saves. Games in SD/Games are kept."
+msgstr ""
+
+msgid "Update"
+msgstr "Atualizar"
+
+msgid "No emulators are available in the catalog."
+msgstr "Nenhum emulador disponível no catálogo."
+
+msgid "Refresh emulator catalog"
+msgstr "Atualizar catálogo de emuladores"
+
+msgid "Updates"
+msgstr "Atualizações"
+
+msgid "Installed"
+msgstr "Instalado"
+
+msgid "Available"
+msgstr "Disponível"
+
+msgid "Installing emulator"
+msgstr "Instalando emulador"
+
+msgid "Updating emulator"
+msgstr "Atualizando emulador"
+
+msgid "Removing emulator"
+msgstr "Removendo emulador"
+
+msgid "This may take a while"
+msgstr "Isso pode demorar"
+
+#, c-format
+msgid "Remove %s?"
+msgstr "Remover %s?"
+
+msgid "No network detected. Connect to a network to download emulators."
+msgstr "Nenhuma rede detectada. Conecte-se a uma rede para baixar emuladores."
+
+msgid "Turn on Wi-Fi and connect first"
+msgstr "Ligue o Wi-Fi e conecte primeiro"
+
+msgid "Emulator operation failed"
+msgstr "Falha na operação do emulador"
+
+msgid "An emulator operation is already in progress"
+msgstr "Já existe uma operação de emulador em andamento"
+
+msgid "Loading emulators"
+msgstr "Carregando emuladores"
+
+msgid "Download emulators"
+msgstr "Baixar emuladores"
+
+msgid "Games run on the player only."
+msgstr "Os jogos só funcionam no player."
+
+msgid "Emulator store is busy."
+msgstr "A loja de emuladores está ocupada."
+
+msgid "Check the SD card and disconnect USB storage before playing."
+msgstr "Verifique o cartão SD e desconecte o armazenamento USB antes de jogar."
+
+msgid "Turn off DAC mode to play games."
+msgstr "Desative o modo DAC para jogar."
+
+msgid "USB storage is busy."
+msgstr "O armazenamento USB está ocupado."
+
+msgid "Audio is still active; cannot start the game."
+msgstr "O áudio ainda está ativo; não é possível iniciar o jogo."
+
+msgid "Could not start the game."
+msgstr "Não foi possível iniciar o jogo."
+
+msgid "The game closed unexpectedly."
+msgstr "O jogo foi encerrado inesperadamente."
+
+#, c-format
+msgid "Copy games to the %s folder on the SD card."
+msgstr "Copie os jogos para a pasta %s do cartão SD."
+
+msgid "No games found"
+msgstr "Nenhum jogo encontrado"
+
+msgid "Emulators"
+msgstr "Emuladores"
+
+msgid "No emulators installed"
+msgstr "Nenhum emulador instalado"
+
+msgid "Download an emulator to play games."
+msgstr "Baixe um emulador para jogar."
 
 #
 msgid "Disconnect USB storage from the computer before changing files."
@@ -1014,9 +1183,6 @@ msgstr "Atualizar banco de dados de música?"
 
 msgid "Files on the card may have changed."
 msgstr "Os arquivos do cartão podem ter mudado."
-
-msgid "Update"
-msgstr "Atualizar"
 
 msgid "Use Settings > Update Music Database"
 msgstr "Use Configurações > Atualizar banco de dados de música"
@@ -1552,9 +1718,6 @@ msgstr "Falha na conexão"
 msgid "Paired"
 msgstr "Pareado"
 
-msgid "Available"
-msgstr "Disponível"
-
 msgid "When on, this device stays visible and pairable to other Bluetooth devices, so a phone or computer can stream audio TO it and play through this device's own output -- using it as an external DAC."
 msgstr "Quando ligado, este aparelho fica visível e pode ser pareado por outros dispositivos Bluetooth, para que um celular ou computador envie áudio PARA ele e toque pela saída do próprio aparelho -- usando-o como DAC externo."
 
@@ -1931,14 +2094,8 @@ msgstr "Baixar temas"
 msgid "Extension updates"
 msgstr "Atualizações de extensões"
 
-msgid "Install"
-msgstr "Instalar"
-
 msgid "Replace"
 msgstr "Substituir"
-
-msgid "Remove"
-msgstr "Remover"
 
 msgid "Its settings stay on the card."
 msgstr "As configurações dele ficam no cartão."
@@ -1949,14 +2106,8 @@ msgstr "Atualizar individualmente"
 msgid "Choose plugins"
 msgstr "Escolher plugins"
 
-msgid "Needs newer firmware"
-msgstr "Precisa de firmware mais novo"
-
 msgid "Update available"
 msgstr "Atualização disponível"
-
-msgid "Installed"
-msgstr "Instalado"
 
 msgid "Removed"
 msgstr "Removido"
@@ -1965,28 +2116,8 @@ msgid "Installed manually"
 msgstr "Instalado manualmente"
 
 #, c-format
-msgid "Update available · %s"
-msgstr "Atualização disponível · %s"
-
-#, c-format
-msgid "Installed · %s"
-msgstr "Instalado · %s"
-
-#, c-format
-msgid "Available · %s"
-msgstr "Disponível · %s"
-
-#, c-format
 msgid "Version %s · %s"
 msgstr "Versão %s · %s"
-
-#, c-format
-msgid "By %s"
-msgstr "Por %s"
-
-#, fuzzy
-msgid "No description"
-msgstr "Posição"
 
 msgid "Close"
 msgstr "Fechar"
@@ -2007,9 +2138,6 @@ msgstr "Já existe uma operação de plugin em andamento"
 msgid "Updating plugins"
 msgstr "Atualizando plugins"
 
-msgid "This may take a while"
-msgstr "Isso pode demorar"
-
 msgid "No network detected. Connect to a network to download plugins."
 msgstr "Nenhuma rede detectada. Conecte-se a uma rede para baixar plugins."
 
@@ -2018,9 +2146,6 @@ msgstr "Nenhuma atualização disponível."
 
 msgid "Refresh plugin catalog"
 msgstr "Atualizar catálogo de plugins"
-
-msgid "Updates"
-msgstr "Atualizações"
 
 msgid "Update All"
 msgstr "Atualizar tudo"
@@ -2044,18 +2169,11 @@ msgstr "Instalando plugin"
 msgid "Removing plugin"
 msgstr "Removendo plugin"
 
-#, c-format
-msgid "Remove %s?"
-msgstr "Remover %s?"
-
 msgid "Update these plugins individually"
 msgstr "Atualize estes plugins individualmente"
 
 msgid "Not enough memory to load the plugin store"
 msgstr "Memória insuficiente para carregar a loja de plugins"
-
-msgid "Turn on Wi-Fi and connect first"
-msgstr "Ligue o Wi-Fi e conecte primeiro"
 
 msgid "Could not start the plugin refresh"
 msgstr "Não foi possível iniciar a atualização do catálogo"
@@ -2260,6 +2378,9 @@ msgstr "Buscar atualização online"
 msgid "Install from SD card"
 msgstr "Instalar do cartão SD"
 
+msgid "Update the Player only, retaining current drivers, kernel and bootloader."
+msgstr "Atualiza apenas o player, mantendo os drivers, o kernel e o bootloader atuais."
+
 #, fuzzy
 msgid "Download & Install"
 msgstr "Falha no download"
@@ -2327,6 +2448,9 @@ msgstr "Baixando atualização"
 #, fuzzy
 msgid "Update saved. Connect to Wi-Fi, then install from Firmware Update > Install from SD card."
 msgstr "Atualização salva. Instale quando quiser em Atualização de firmware > Instalar do cartão SD."
+
+msgid "Update the entire CompásOS. Flashing firmware contains Bootloader, Player, Kernel and Drivers."
+msgstr "Atualiza todo o CompásOS. O firmware contém bootloader, player, kernel e drivers."
 
 msgid "Download"
 msgstr "Baixar"
@@ -2773,6 +2897,9 @@ msgstr "Plugins podem substituir estas preferências salvas."
 
 msgid "Quick Drawer"
 msgstr "Painel rápido"
+
+msgid "Plugin Order"
+msgstr "Ordem dos plugins"
 
 msgid "Enabled"
 msgstr "Ativado"
@@ -3541,6 +3668,9 @@ msgstr "Controles de energia"
 
 msgid "Playback and device actions"
 msgstr "Ações de reprodução e do aparelho"
+
+#~ msgid "Saved games stay on the SD card."
+#~ msgstr "Os jogos salvos ficam no cartão SD."
 
 #~ msgid "Parametric EQ"
 #~ msgstr "EQ paramétrico"

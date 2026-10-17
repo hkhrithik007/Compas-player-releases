@@ -66,6 +66,8 @@
 #include "plugin_manager.h"
 #include "gui_plugin_manage.h"
 #include "gui_plugin_store.h"
+#include "gui_emulator_store.h"
+#include "emulator_store.h"
 #include "led_control.h"
 #include "charge_limiter.h"
 #include "idle_shutdown.h"
@@ -331,13 +333,89 @@ static bool screen_off_playback_active = false;
  * is checked to prevent idle suspend or radio disconnect while receiving USB audio. */
 static bool idle_shutdown_attempted = false;
 
+/* Set when gui_release_memory_for_external_session() dropped the snapshots,
+ * so the resume rebuilds them only after a session that freed them. */
+static bool external_session_released_memory;
+
+/* Memory counters of this process for the emulator launch log; a field the
+ * kernel does not report stays -1. */
+static void process_memory_kb(long * rss, long * data, long * swap) {
+    *rss = *data = *swap = -1;
+    FILE * f = fopen("/proc/self/status", "r");
+    if (!f) return;
+    char line[160];
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "VmRSS: %ld kB", rss) == 1) continue;
+        if (sscanf(line, "VmData: %ld kB", data) == 1) continue;
+        (void) sscanf(line, "VmSwap: %ld kB", swap);
+    }
+    fclose(f);
+}
+
+/* Called on the UI thread right before an emulator is spawned. The emulator
+ * can need as much memory as the player holds (only emulators whose manifest
+ * sets free_player_memory ask for this), and on a 64 MB device the
+ * kernel would otherwise swap the player out. Frees every cache that is
+ * rebuilt on use: transition and drawer snapshots, decoded images, thumbnails
+ * and lock screen art. The library, plugins and audio stay. The screen is
+ * repainted afterwards, and gui_resume_after_external_session() restarts the
+ * snapshot rebuilds. Large buffers are mmap-sized in musl's allocator and go
+ * back to the kernel on free; there is no malloc_trim in this musl. */
+void gui_release_memory_for_external_session(void) {
+    long rss_before = -1, data_before = -1, swap_before = -1;
+    if (db_log_enabled()) process_memory_kb(&rss_before, &data_before, &swap_before);
+    external_session_released_memory = true;
+    gui_navigation_release_snapshots();
+    transition_compositor_discard_vertical_base();
+    gui_shell_release_memory_for_external_session();
+    gui_player_release_memory_for_external_session();
+    gui_library_release_memory_for_external_session();
+    gui_lock_screen_release_memory_for_external_session();
+    gui_lyrics_release_memory_for_external_session();
+    /* Last, once no widget points at a descriptor that may be cached. */
+    lv_image_cache_drop(NULL);
+    if (db_log_enabled()) {
+        long rss_after, data_after, swap_after;
+        process_memory_kb(&rss_after, &data_after, &swap_after);
+        db_log("EMULATOR", "release_memory rss_kb=%ld->%ld data_kb=%ld->%ld swap_kb=%ld->%ld",
+               rss_before, rss_after, data_before, data_after, swap_before, swap_after);
+        db_log_flush();
+    }
+}
+
+/* Called on the UI thread after an external full-screen session (an
+ * emulator) that blocked it and owned the framebuffer and input devices. The
+ * session consumed the user's attention without any input reaching LVGL, so
+ * inactivity, dimming and idle-shutdown state restart from now; button and
+ * screenshot events queued by the evdev threads are stale; and the whole
+ * screen is repainted over whatever the session left in the framebuffer. */
+void gui_resume_after_external_session(void) {
+    main_loop_discard_elapsed_time();
+    gui_reset_interactive_timeout_baseline();
+    backlight_set_dimmed(false);
+    inactivity_dimmed = false;
+    idle_shutdown_attempted = false;
+    hw_button_event_t event;
+    while (hw_buttons_consume_event(&event)) {}
+    (void) hw_buttons_consume_screenshot();
+    /* Rebuilds the snapshots gui_release_memory_for_external_session() freed
+     * (static screens in sliced timer passes, the rest asynchronously), and
+     * the drawer's. */
+    if (external_session_released_memory) {
+        external_session_released_memory = false;
+        gui_navigation_invalidate_theme_snapshots();
+        quick_drawer_mark_snapshot_dirty();
+    }
+    full_redraw_async_cb(NULL);
+}
+
 
 static bool shutdown_background_work_active(void) {
     return gui_lock_screen_has_background_work(true) || gui_library_has_background_work() || gui_subsonic_has_background_work() ||
            gui_network_has_background_work() || gui_lyrics_has_background_work() ||
            gui_player_has_background_work() || gui_shell_has_background_work() ||
            plugin_manager_has_background_work() || playlist_files_has_active_write() ||
-           gui_player_queue_write_busy() || screenshot_is_busy() || firmware_ota_busy() || plugin_store_busy();
+           gui_player_queue_write_busy() || screenshot_is_busy() || firmware_ota_busy() || plugin_store_busy() || emulator_store_busy();
 }
 
 /* Grace window after resuming from suspend. hw_buttons queues a tap event
@@ -1345,6 +1423,7 @@ static void update_timer_cb(lv_timer_t * timer) {
     poll_subsonic_download();
     poll_firmware_ota();
     poll_plugin_store();
+    poll_emulator_store();
     gui_plugin_manage_poll();
     poll_subsonic_library_download();
     poll_dlna_control();
@@ -2006,6 +2085,7 @@ void gui_init(uint32_t screen_width, uint32_t screen_height) {
 #ifndef HOST_BUILD
     boot_checkpoint("gui_plugin_store_init done");
 #endif
+    gui_emulator_store_init();
     gui_books_init();
     build_power_off_countdown_popup();
     gui_queue_init();

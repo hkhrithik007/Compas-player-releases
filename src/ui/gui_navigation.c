@@ -567,6 +567,22 @@ static void back_target_cache_discard(void) {
     if (back_target_cache_screen) lv_async_call(back_target_cache_rebuild_cb, NULL);
 }
 
+/* Frees every cached screen snapshot (about 0.75 MiB each) while an external
+ * process owns the machine. Screen pointers stay registered; no async work is
+ * queued here. Until gui_navigation_invalidate_theme_snapshots() runs again,
+ * transitions fall back to a fresh render, as after any other invalidation. */
+void gui_navigation_release_snapshots(void) {
+    for (int i = 0; i < STATIC_SNAPSHOT_SCREEN_COUNT; i++) {
+        if (static_snapshot_buf[i]) lv_draw_buf_destroy(static_snapshot_buf[i]);
+        static_snapshot_buf[i] = NULL;
+    }
+    if (player_transition_cache_buf) lv_draw_buf_destroy(player_transition_cache_buf);
+    player_transition_cache_buf = NULL;
+    player_transition_cache_dirty = true;
+    if (back_target_cache_buf) lv_draw_buf_destroy(back_target_cache_buf);
+    back_target_cache_buf = NULL;
+}
+
 void gui_navigation_invalidate_back_snapshot(lv_obj_t * screen) {
     if (screen && back_target_cache_screen == screen) back_target_cache_discard();
 }

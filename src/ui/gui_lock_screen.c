@@ -804,6 +804,33 @@ void gui_lock_screen_init(void) {
     current_mode = LOCK_SCREEN_MODE_OFF;
 }
 
+/* Frees the full-screen backdrop and photo (about 0.75 MiB each) before an
+ * external session. Clearing the cache keys makes the next show regenerate
+ * them through update_lock_art(). Skipped while the lock screen is showing or
+ * its art job runs. */
+void gui_lock_screen_release_memory_for_external_session(void) {
+    if (!lock_screen || gui_lock_screen_is_showing() || lock_art_running ||
+        (!lock_photo_pixels && !lock_backdrop_pixels)) return;
+    if (lock_image_obj && lv_image_get_src(lock_image_obj) == &lock_photo_dsc) {
+        lv_image_set_src(lock_image_obj, NULL);
+        lv_obj_add_flag(lock_image_obj, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_image_set_src(lock_backdrop, NULL);
+    lv_obj_add_flag(lock_backdrop, LV_OBJ_FLAG_HIDDEN);
+    lv_image_set_src(lock_metadata_image, NULL);
+    lv_obj_add_flag(lock_metadata_image, LV_OBJ_FLAG_HIDDEN);
+    lv_image_cache_drop(&lock_photo_dsc);
+    lv_image_cache_drop(&lock_backdrop_dsc);
+    free(lock_photo_pixels);
+    free(lock_backdrop_pixels);
+    lock_photo_pixels = NULL;
+    lock_backdrop_pixels = NULL;
+    memset(&lock_photo_dsc, 0, sizeof(lock_photo_dsc));
+    memset(&lock_backdrop_dsc, 0, sizeof(lock_backdrop_dsc));
+    lock_photo_cache_valid = false;
+    lock_cached_art_mode = LOCK_SCREEN_MODE_OFF;
+}
+
 /* Called from gui_soft_reload() (gui_reload.c), after gui_navigation_teardown()
  * has already zeroed nav_stack/nav_depth -- calling nav_pop() here (as an
  * earlier version of this function did) would read nav_stack[-1], the exact

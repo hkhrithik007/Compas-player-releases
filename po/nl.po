@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-16 00:10-0600\n"
+"POT-Creation-Date: 2026-10-17 10:56-0600\n"
 "PO-Revision-Date: 2026-10-11 13:10-0600\n"
 "Last-Translator: Machine draft; pending native review\n"
 "Language-Team: Dutch\n"
@@ -305,6 +305,42 @@ msgstr "Geen afspeelbare audiobestanden gevonden"
 msgid "Open a folder containing supported audio files."
 msgstr "Open een map met ondersteunde audiobestanden."
 
+msgid "Unexpected reply from GitHub."
+msgstr "Onverwacht antwoord van GitHub."
+
+msgid "Insert an SD card to change emulators."
+msgstr "Plaats een SD-kaart om emulators te wijzigen."
+
+msgid "Cannot create the emulator folder."
+msgstr "Kan de emulatormap niet aanmaken."
+
+msgid "The emulator folder is not writable."
+msgstr "De emulatormap is niet beschrijfbaar."
+
+msgid "Not enough free space on the player."
+msgstr "Onvoldoende vrije ruimte op de speler."
+
+msgid "Could not read the emulator list from GitHub."
+msgstr "Kan de emulatorlijst van GitHub niet lezen."
+
+msgid "This emulator needs a newer player version."
+msgstr "Deze emulator vereist een nieuwere versie van de speler."
+
+msgid "Disconnect USB storage from the host before changing emulators."
+msgstr "Koppel de USB-opslag los van de computer voordat je emulators wijzigt."
+
+msgid "Could not install the emulator."
+msgstr "Kan de emulator niet installeren."
+
+msgid "The emulator download failed verification. Try again."
+msgstr "De emulator-download is niet geverifieerd. Probeer opnieuw."
+
+msgid "Could not start the emulator operation"
+msgstr "Kan de emulatorbewerking niet starten"
+
+msgid "Could not remove the emulator."
+msgstr "Kan de emulator niet verwijderen."
+
 msgid "Unexpected reply from GitHub"
 msgstr "Onverwacht antwoord van GitHub"
 
@@ -404,9 +440,6 @@ msgstr "Er wordt al een firmware-update uitgevoerd."
 msgid "Could not start the installation."
 msgstr "Kan de installatie niet starten."
 
-msgid "Unexpected reply from GitHub."
-msgstr "Onverwacht antwoord van GitHub."
-
 msgid "Disconnect USB storage from the host before changing plugins."
 msgstr "Koppel de USB-opslag los van de computer voordat je plugins wijzigt."
 
@@ -419,11 +452,11 @@ msgstr "De SD-kaart is alleen-lezen. Controleer de schrijfbeveiliging."
 msgid "Plugin storage is unavailable."
 msgstr "Pluginopslag is niet beschikbaar."
 
-msgid "Could not read the plugin list from GitHub."
-msgstr "Kan de pluginlijst van GitHub niet lezen."
-
 msgid "The SD card changed during the operation."
 msgstr "De SD-kaart is tijdens de bewerking gewijzigd."
+
+msgid "Could not read the plugin list from GitHub."
+msgstr "Kan de pluginlijst van GitHub niet lezen."
 
 msgid "Insert an SD card to install plugins."
 msgstr "Plaats een SD-kaart om plugins te installeren."
@@ -548,7 +581,7 @@ msgid "Books refreshed"
 msgstr "Boeken bijgewerkt"
 
 msgid "Could not read the Books folder"
-msgstr "Kan de map Boeken niet lezen"
+msgstr "Kan de map Books niet lezen"
 
 msgid "Could not refresh books"
 msgstr "Kan boeken niet bijwerken"
@@ -569,7 +602,141 @@ msgid "Open a book and tap the bookmark icon to save it here."
 msgstr "Open een boek en tik op het bladwijzerpictogram om het hier op te slaan."
 
 msgid "Add .txt files to the Books folder, then refresh the library."
-msgstr "Voeg .txt-bestanden toe aan de map Boeken en werk daarna de bibliotheek bij."
+msgstr "Voeg .txt-bestanden toe aan de map Books en werk daarna de bibliotheek bij."
+
+msgid "Needs newer firmware"
+msgstr "Vereist nieuwere firmware"
+
+#, c-format
+msgid "Update available · %s"
+msgstr "Update beschikbaar · %s"
+
+#, c-format
+msgid "Installed · %s"
+msgstr "Geïnstalleerd · %s"
+
+#, c-format
+msgid "Available · %s"
+msgstr "Beschikbaar · %s"
+
+msgid "Install"
+msgstr "Installeren"
+
+msgid "Remove"
+msgstr "Verwijderen"
+
+msgid "Bundled games and their saves will be removed. Games in SD/Games are kept."
+msgstr ""
+
+msgid "No description"
+msgstr "Geen beschrijving"
+
+#, c-format
+msgid "By %s"
+msgstr "Door %s"
+
+#, c-format
+msgid "License: %s"
+msgstr "Licentie: %s"
+
+#, c-format
+msgid "Size: %s"
+msgstr "Grootte: %s"
+
+msgid "Updating replaces bundled games and their saves. Games in SD/Games are kept."
+msgstr ""
+
+msgid "Update"
+msgstr "Bijwerken"
+
+msgid "No emulators are available in the catalog."
+msgstr "Er zijn geen emulators beschikbaar in de catalogus."
+
+msgid "Refresh emulator catalog"
+msgstr "Emulatorcatalogus vernieuwen"
+
+msgid "Updates"
+msgstr "Updates"
+
+msgid "Installed"
+msgstr "Geïnstalleerd"
+
+msgid "Available"
+msgstr "Beschikbaar"
+
+msgid "Installing emulator"
+msgstr "Emulator installeren"
+
+msgid "Updating emulator"
+msgstr "Emulator bijwerken"
+
+msgid "Removing emulator"
+msgstr "Emulator verwijderen"
+
+msgid "This may take a while"
+msgstr "Dit kan even duren"
+
+#, c-format
+msgid "Remove %s?"
+msgstr "%s verwijderen?"
+
+msgid "No network detected. Connect to a network to download emulators."
+msgstr "Geen netwerk gevonden. Maak verbinding met een netwerk om emulators te downloaden."
+
+msgid "Turn on Wi-Fi and connect first"
+msgstr "Schakel wifi in en maak eerst verbinding"
+
+msgid "Emulator operation failed"
+msgstr "Emulatorbewerking mislukt"
+
+msgid "An emulator operation is already in progress"
+msgstr "Er wordt al een emulatorbewerking uitgevoerd"
+
+msgid "Loading emulators"
+msgstr "Emulators laden"
+
+msgid "Download emulators"
+msgstr "Emulators downloaden"
+
+msgid "Games run on the player only."
+msgstr "Games werken alleen op de speler."
+
+msgid "Emulator store is busy."
+msgstr "De emulatorwinkel is bezig."
+
+msgid "Check the SD card and disconnect USB storage before playing."
+msgstr "Controleer de SD-kaart en koppel de USB-opslag los voordat je speelt."
+
+msgid "Turn off DAC mode to play games."
+msgstr "Schakel de DAC-modus uit om games te spelen."
+
+msgid "USB storage is busy."
+msgstr "De USB-opslag is bezig."
+
+msgid "Audio is still active; cannot start the game."
+msgstr "Audio is nog actief; het spel kan niet starten."
+
+msgid "Could not start the game."
+msgstr "De game kon niet worden gestart."
+
+msgid "The game closed unexpectedly."
+msgstr "De game is onverwacht gesloten."
+
+#, c-format
+msgid "Copy games to the %s folder on the SD card."
+msgstr "Kopieer games naar de map %s op de SD-kaart."
+
+msgid "No games found"
+msgstr "Geen games gevonden"
+
+msgid "Emulators"
+msgstr "Emulators"
+
+msgid "No emulators installed"
+msgstr "Geen emulators geïnstalleerd"
+
+msgid "Download an emulator to play games."
+msgstr "Download een emulator om games te spelen."
 
 msgid "Disconnect USB storage from the computer before changing files."
 msgstr "Koppel de USB-opslag los van de computer voordat je bestanden wijzigt."
@@ -954,9 +1121,6 @@ msgstr "Muziekdatabase bijwerken?"
 
 msgid "Files on the card may have changed."
 msgstr "Bestanden op de kaart zijn mogelijk gewijzigd."
-
-msgid "Update"
-msgstr "Bijwerken"
 
 msgid "Use Settings > Update Music Database"
 msgstr "Gebruik Instellingen > Muziekdatabase bijwerken"
@@ -1485,9 +1649,6 @@ msgstr "Verbinding mislukt"
 msgid "Paired"
 msgstr "Gekoppeld"
 
-msgid "Available"
-msgstr "Beschikbaar"
-
 msgid "When on, this device stays visible and pairable to other Bluetooth devices, so a phone or computer can stream audio TO it and play through this device's own output -- using it as an external DAC."
 msgstr "Als deze optie aanstaat, blijft dit apparaat zichtbaar en koppelbaar voor andere Bluetooth-apparaten. Een telefoon of computer kan er audio naartoe streamen en afspelen via de eigen uitgang van dit apparaat, als externe DAC."
 
@@ -1861,14 +2022,8 @@ msgstr "Thema's downloaden"
 msgid "Extension updates"
 msgstr "Uitbreidingsupdates"
 
-msgid "Install"
-msgstr "Installeren"
-
 msgid "Replace"
 msgstr "Vervangen"
-
-msgid "Remove"
-msgstr "Verwijderen"
 
 msgid "Its settings stay on the card."
 msgstr "De instellingen blijven op de kaart staan."
@@ -1879,14 +2034,8 @@ msgstr "Afzonderlijk bijwerken"
 msgid "Choose plugins"
 msgstr "Plugins kiezen"
 
-msgid "Needs newer firmware"
-msgstr "Vereist nieuwere firmware"
-
 msgid "Update available"
 msgstr "Update beschikbaar"
-
-msgid "Installed"
-msgstr "Geïnstalleerd"
 
 msgid "Removed"
 msgstr "Verwijderd"
@@ -1895,27 +2044,8 @@ msgid "Installed manually"
 msgstr "Handmatig geïnstalleerd"
 
 #, c-format
-msgid "Update available · %s"
-msgstr "Update beschikbaar · %s"
-
-#, c-format
-msgid "Installed · %s"
-msgstr "Geïnstalleerd · %s"
-
-#, c-format
-msgid "Available · %s"
-msgstr "Beschikbaar · %s"
-
-#, c-format
 msgid "Version %s · %s"
 msgstr "Versie %s · %s"
-
-#, c-format
-msgid "By %s"
-msgstr "Door %s"
-
-msgid "No description"
-msgstr "Geen beschrijving"
 
 msgid "Close"
 msgstr "Sluiten"
@@ -1935,9 +2065,6 @@ msgstr "Er wordt al een pluginbewerking uitgevoerd"
 msgid "Updating plugins"
 msgstr "Plugins bijwerken"
 
-msgid "This may take a while"
-msgstr "Dit kan even duren"
-
 msgid "No network detected. Connect to a network to download plugins."
 msgstr "Geen netwerk gevonden. Maak verbinding met een netwerk om plugins te downloaden."
 
@@ -1946,9 +2073,6 @@ msgstr "Geen updates beschikbaar."
 
 msgid "Refresh plugin catalog"
 msgstr "Plugin-catalogus vernieuwen"
-
-msgid "Updates"
-msgstr "Updates"
 
 msgid "Update All"
 msgstr "Alles bijwerken"
@@ -1971,18 +2095,11 @@ msgstr "Plugin installeren"
 msgid "Removing plugin"
 msgstr "Plugin verwijderen"
 
-#, c-format
-msgid "Remove %s?"
-msgstr "%s verwijderen?"
-
 msgid "Update these plugins individually"
 msgstr "Werk deze plugins afzonderlijk bij"
 
 msgid "Not enough memory to load the plugin store"
 msgstr "Onvoldoende geheugen om de pluginwinkel te laden"
-
-msgid "Turn on Wi-Fi and connect first"
-msgstr "Schakel wifi in en maak eerst verbinding"
 
 msgid "Could not start the plugin refresh"
 msgstr "Kan het vernieuwen van plugins niet starten"
@@ -2185,6 +2302,9 @@ msgstr "Online-update controleren"
 msgid "Install from SD card"
 msgstr "Installeren vanaf SD-kaart"
 
+msgid "Update the Player only, retaining current drivers, kernel and bootloader."
+msgstr "Werkt alleen de speler bij. Huidige stuurprogramma's, kernel en bootloader blijven behouden."
+
 #, fuzzy
 msgid "Download & Install"
 msgstr "Download mislukt"
@@ -2250,6 +2370,9 @@ msgstr "Update downloaden"
 
 msgid "Update saved. Connect to Wi-Fi, then install from Firmware Update > Install from SD card."
 msgstr "Update opgeslagen. Maak verbinding met wifi en installeer deze via Firmware-update > Installeren vanaf SD-kaart."
+
+msgid "Update the entire CompásOS. Flashing firmware contains Bootloader, Player, Kernel and Drivers."
+msgstr "Werkt heel CompásOS bij. De firmware bevat bootloader, speler, kernel en stuurprogramma's."
 
 msgid "Download"
 msgstr "Downloaden"
@@ -2693,6 +2816,9 @@ msgstr "Plugins kunnen deze opgeslagen voorkeuren overschrijven."
 
 msgid "Quick Drawer"
 msgstr "Snelpaneel"
+
+msgid "Plugin Order"
+msgstr "Pluginvolgorde"
 
 msgid "Enabled"
 msgstr "Ingeschakeld"
@@ -3460,6 +3586,9 @@ msgstr "Voedingsbediening"
 
 msgid "Playback and device actions"
 msgstr "Afspelen en apparaatacties"
+
+#~ msgid "Saved games stay on the SD card."
+#~ msgstr "Opgeslagen games blijven op de SD-kaart staan."
 
 #~ msgid "Parametric EQ"
 #~ msgstr "Parametrische equalizer"

@@ -57,6 +57,12 @@ void favorite_icon_event_cb(lv_event_t * e);
 int gui_player_get_playlist_count(void);
 int gui_player_get_playlist_index(void);
 bool gui_player_has_active_track(void);
+/* Stop playback before an external process takes the audio device, retaining
+ * the current queue position for an explicit Play action afterward. */
+void gui_player_stop_for_external_session(void);
+/* Frees the player's rebuildable caches before an external process runs; they
+ * refill on use. */
+void gui_player_release_memory_for_external_session(void);
 /* Defer visual refresh work while the lyrics pane is moving. */
 bool gui_player_lyrics_animation_in_progress(void);
 const char * gui_player_get_current_track_path(void);
@@ -140,6 +146,7 @@ bool gui_player_volume_control_hit_test(lv_point_t point);
 const char * playlist_path_at(int index);
 void free_playlist(void);
 void on_file_selected(char ** new_playlist, int count, int selected_index);
+void on_file_selected_stay(char ** new_playlist, int count, int selected_index);
 void on_file_selected_at(char ** new_playlist, int count, int selected_index, double start_seconds);
 void on_file_selected_lazy_all_songs(int selected_index);
 void on_file_selected_lazy_recently_added(int selected_index);

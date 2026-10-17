@@ -31,3 +31,8 @@ DAC reuse the existing usb.png and bluetooth.png originals above.
 genres.png uses the regular tag glyph from @phosphor-icons/core 2.1.1
 (assets/regular/tag.svg), coral vertical gradient (#ffb4a2 to #ee7c83),
 rendered at 176px and Lanczos-scaled to 44px. See LICENSE for MIT terms.
+
+emulators.png uses the regular game-controller glyph from @phosphor-icons/core
+2.1.1 (assets/regular/game-controller.svg), coral-to-violet vertical gradient
+(#ee7c83 to #a36be4), rendered at 176px and Lanczos-scaled to 44px. See
+LICENSE for MIT terms.

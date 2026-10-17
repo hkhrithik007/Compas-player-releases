@@ -13,7 +13,7 @@ for board in BOARD_R1 BOARD_R3PROII BOARD_R3II_2025; do
         -I"$repo_root/mbedtls/include" -I"$repo_root/cJSON" -I"$repo_root/lua/src" \
         -I"$repo_root/lvgl" -I"$repo_root/lvgl/src" \
         "$repo_root/src/network/plugin_store_theme_test.c" \
-        "$repo_root/cJSON/cJSON.c" "$repo_root/src/ui/i18n.c" "$repo_root/src/ui/i18n_catalog.c" \
+        "$repo_root/src/network/store_common.c" "$repo_root/cJSON/cJSON.c" "$repo_root/src/ui/i18n.c" "$repo_root/src/ui/i18n_catalog.c" \
         -Wl,--gc-sections -lpthread -lm -o "$build_dir/theme_store_test_$board"
     "$build_dir/theme_store_test_$board"
 done

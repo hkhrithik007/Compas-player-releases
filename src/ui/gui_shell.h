@@ -54,6 +54,9 @@ void refresh_wifi_topbar(void);
 void refresh_volume_topbar(int32_t percent);
 void gui_shell_apply_topbar_settings(void);
 void quick_drawer_mark_snapshot_dirty(void);
+/* Frees the drawer's cached full-screen frames; quick_drawer_mark_snapshot_dirty()
+ * rebuilds them. Used before an emulator runs. */
+void gui_shell_release_memory_for_external_session(void);
 void gui_shell_refresh_quick_drawer_volume_visibility(void);
 /* Reflows the existing Quick Drawer widgets to the current saved/plugin UI
  * customization. Safe before the drawer is built. */

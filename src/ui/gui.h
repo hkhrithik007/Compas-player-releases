@@ -50,6 +50,15 @@ void gui_show_boot_splash(void);
 void gui_reset_interactive_timeout_baseline(void);
 #endif
 
+/* Tells the main loop (main.c) to drop the real time elapsed while the UI
+ * thread was blocked on purpose, so LVGL's clock does not jump. */
+void main_loop_discard_elapsed_time(void);
+
+/* UI-thread cleanup after an emulator process returns; see gui.c. */
+void gui_resume_after_external_session(void);
+/* UI-thread release of rebuildable caches before an emulator runs; see gui.c. */
+void gui_release_memory_for_external_session(void);
+
 /* ---- Bridge for src/plugins/plugin_manager.c ----
  * plugin_manager.c owns Lua state/script lifecycle and has no LVGL code of
  * its own; these let a plugin's C API calls (plugin.show_list/play_file/
@@ -109,8 +118,9 @@ int gui_plugin_show_order_editor(const char * title, const char * const * keys,
 /* Starts playback of a brand-new playlist built from `paths[0..count)`,
  * starting at paths[start_index] -- same "starting something new clears
  * Up Next" semantics as every other play-launch path (on_file_selected()).
- * Copies paths/strings itself; caller retains ownership of its own array. */
-void gui_plugin_play_paths(const char * const * paths, int count, int start_index);
+ * Copies paths/strings itself; caller retains ownership of its own array.
+ * open_player false keeps the current screen instead of opening Now Playing. */
+void gui_plugin_play_paths(const char * const * paths, int count, int start_index, bool open_player);
 
 /* Same as gui_plugin_play_paths() above, for a remote-provider queue (see
  * remote_track.h) -- each track's synthetic "remote://" key becomes the
@@ -278,6 +288,8 @@ int gui_plugin_library_get_songs(const char * query, const char * artist, const 
 int gui_plugin_library_search(const char * query, int limit, song_row_t * out_rows);
 
 bool gui_plugin_library_get_song(int64_t id, song_row_t * out_row);
+
+bool gui_plugin_library_album_cover(int64_t song_id, int size_px, char * out, size_t out_size);
 
 /* offset/limit here are a plain slice over metadata_db_get_groups_page()'s
  * own keyset-paginated result (fetched internally up to offset+limit,

@@ -974,6 +974,13 @@ static void layout_radio_topbar_image(lv_obj_t * image) {
     layout_lucide_topbar_image(image, 1, 1, 22, 22);
 }
 
+/* Connected strengths share the full-signal arcs' bounds, which leave the
+ * top of the canvas empty; sizing them by the off glyph's square made the
+ * arcs visibly smaller than the neighboring icons. */
+static void layout_wifi_connected_topbar_image(lv_obj_t * image) {
+    layout_lucide_topbar_image(image, 1, 4, 22, 17);
+}
+
 /* Theme2 codec sprites share a 30 px canvas, but their visible alpha bounds
  * vary substantially. Measure the solid glyph (alpha >= 128), not faint
  * antialiasing fringes, and keep it on the common status-band centerline. */
@@ -1910,10 +1917,11 @@ static void render_wifi_icon(void) {
         if (level < 0) level = 0;
         if (level > 3) level = 3;
         lv_image_set_src(wifi_icon, asset_path(assets[level]));
+        layout_wifi_connected_topbar_image(wifi_icon);
     } else {
         lv_image_set_src(wifi_icon, asset_path("topbar/lucide_wifi_off.png"));
+        layout_radio_topbar_image(wifi_icon);
     }
-    layout_radio_topbar_image(wifi_icon);
 }
 
 static void poll_wifi_status(void) {
@@ -2853,6 +2861,25 @@ static void quick_drawer_mark_geometry_dirty(void) {
 void quick_drawer_mark_snapshot_dirty(void) {
     quick_drawer_expansion_art_dirty = true;
     quick_drawer_mark_geometry_dirty();
+}
+
+/* Frees the drawer's full-screen motion snapshot and expansion frames for an
+ * external session. Skipped while the drawer is open or moving, when they are
+ * in use. quick_drawer_mark_snapshot_dirty() rebuilds them afterwards, the
+ * same way any drawer change does; until then drags follow the live panel. */
+void gui_shell_release_memory_for_external_session(void) {
+    if (!quick_drawer || quick_drawer_open || quick_drawer_bitmap_motion || quick_drawer_expansion_motion) return;
+    if (quick_drawer_motion_image) {
+        lv_image_set_src(quick_drawer_motion_image, NULL);
+        lv_obj_add_flag(quick_drawer_motion_image, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (quick_drawer_motion_buf) {
+        lv_image_cache_drop(quick_drawer_motion_buf);
+        lv_draw_buf_destroy(quick_drawer_motion_buf);
+        quick_drawer_motion_buf = NULL;
+    }
+    quick_drawer_discard_expansion_art();
+    quick_drawer_snapshot_dirty = true;
 }
 
 void gui_shell_refresh_quick_drawer_volume_visibility(void) {

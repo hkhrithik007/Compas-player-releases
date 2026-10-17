@@ -17,6 +17,9 @@
 static char ** playlist = NULL;
 static int playlist_count = 0;
 static int playlist_index = -1;
+/* Set by on_file_selected_stay(): the next explicit start plays without
+ * opening the player screen (a plugin starting audio from its own screen). */
+static bool stay_on_screen_once;
 static char transport_skip_directory[PATH_MAX];
 static int transport_skip_seconds;
 static bool transport_skip_manual(int direction);
@@ -5828,6 +5831,36 @@ void set_play_button_state(bool is_playing) {
     gui_shell_update_quick_drawer_play_state(is_playing);
 }
 
+void gui_player_stop_for_external_session(void) {
+    if (gui_player_has_active_track()) {
+        /* A deferred resume has the authoritative checkpoint when no audio
+         * is currently loaded; do not replace it with audio's idle position. */
+        if (!(deferred_resume_pending && audio_is_idle())) {
+            double pos = audio_get_resume_position_seconds();
+            deferred_resume_position = (pos > 0.0) ? pos : 0.0;
+        }
+        deferred_resume_pending = true;
+    }
+    set_play_button_state(false);
+    plugin_manager_notify_stopped();
+    audio_stop();
+}
+
+/* Frees the player's rebuildable image caches for an external session: the
+ * lyrics-animation cover snapshot (rebuilt on the next lyrics transition),
+ * the scaled-cover intermediates (rebuilt by the idle service once a lyrics
+ * transition publishes a source again), the generated-cover raster cache
+ * (refilled by the next cover decode) and the lyrics backdrop frames. The
+ * visible cover and its reflection stay. */
+void gui_player_release_memory_for_external_session(void) {
+    cover_raster_cache_clear();
+    if (player_lyrics_animating) return;
+    lv_draw_sw_image_cache_set_transition_active(false);
+    lv_draw_sw_image_cache_set_intermediate_source(NULL);
+    player_timeline_cover_cache_invalidate();
+    player_lyrics_backdrop_release_frames();
+}
+
 /* resolve_replaygain moved to gui_player.c */
 
 /* Tells audio.c what comes after `index` (per the current play mode -- see
@@ -6223,7 +6256,8 @@ static void play_track_at_from_internal(int index, double start_seconds, bool pu
     /* Manual next/previous and a deferred startup resume can already be on
      * the player screen.  Do not stack a duplicate copy of the same screen
      * just because playback is being (re)started there. */
-    if (push_nav && lv_screen_active() != player_screen) nav_push(player_screen);
+    if (push_nav && !stay_on_screen_once && lv_screen_active() != player_screen) nav_push(player_screen);
+    stay_on_screen_once = false;
 
     /* A remote track's stream_url can expire or be single-use -- resuming
      * into it blind on next launch can't work the way resuming a local
@@ -6293,6 +6327,13 @@ void on_file_selected(char ** new_playlist, int count, int selected_index) {
     queued_pending_count = 0;
     queue_next_insert_index = -1;
     play_track_at(selected_index);
+}
+
+/* on_file_selected() without opening the player screen. */
+void on_file_selected_stay(char ** new_playlist, int count, int selected_index) {
+    stay_on_screen_once = true;
+    on_file_selected(new_playlist, count, selected_index);
+    stay_on_screen_once = false;
 }
 
 /* Same as on_file_selected() above, but for a tap that needs to start

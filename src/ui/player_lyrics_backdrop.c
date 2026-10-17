@@ -808,6 +808,12 @@ void player_lyrics_backdrop_invalidate(void) {
     backdrop_schedule_warm();
 }
 
+void player_lyrics_backdrop_release_frames(void) {
+    if (!backdrop_wrapper || backdrop_active || backdrop_busy) return;
+    if (!backdrop_closed && !backdrop_open && !backdrop_frame) return;
+    player_lyrics_backdrop_invalidate();
+}
+
 void player_lyrics_backdrop_set_busy(bool busy) {
     backdrop_busy = busy;
     if (!busy) backdrop_schedule_warm();
