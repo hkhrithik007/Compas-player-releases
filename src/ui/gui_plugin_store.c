@@ -207,18 +207,7 @@ static void store_action_cb(lv_event_t * e);
 
 static lv_obj_t * add_action_row(lv_obj_t * popup, const char * text, lv_color_t color,
                                  store_action_t action) {
-    lv_obj_t * row = lv_obj_create(popup);
-    style_popup_action_row(row);
-    lv_obj_add_event_cb(row, store_action_cb, LV_EVENT_CLICKED, (void *) (intptr_t) action);
-    lv_obj_t * label = lv_label_create(row);
-    lv_obj_set_width(label, lv_pct(100));
-    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(label, text);
-    lv_obj_set_style_text_color(label, color, 0);
-    lv_obj_set_style_text_font(label, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
-    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    return row;
+    return add_popup_action_row(popup, text, color, store_action_cb, (void *) (intptr_t) action);
 }
 
 static void popup_backdrop_cb(lv_event_t * e) {
@@ -232,39 +221,7 @@ static void popup_backdrop_cb(lv_event_t * e) {
 
 static void create_popup(gui_popup_t * popup, lv_obj_t ** title_out, lv_obj_t ** body_out,
                          bool with_body) {
-    popup->popup = build_popup_surface(popup_backdrop_cb, &popup->backdrop);
-    /* A long description scrolls inside the popup instead of pushing the
-     * buttons off a small screen. */
-
-    lv_obj_t * title = lv_label_create(popup->popup);
-    lv_label_set_text(title, "");
-    lv_obj_set_width(title, lv_pct(100));
-    lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_add_style(title, &style_theme_text_primary, 0);
-    lv_obj_set_style_text_font(title, gui_theme_font(GUI_FONT_ROLE_ROW), 0);
-    if (title_out) *title_out = title;
-
-    if (with_body) {
-        lv_obj_t * scroll = lv_obj_create(popup->popup);
-        lv_obj_remove_style_all(scroll);
-        lv_obj_set_width(scroll, lv_pct(100));
-        lv_obj_set_height(scroll, LV_SIZE_CONTENT);
-        lv_obj_set_style_max_height(scroll, BOARD_SCALE_PX(180), 0);
-        lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
-        lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scrollbar_mode(scroll, LV_SCROLLBAR_MODE_AUTO);
-        lv_obj_t * body = lv_label_create(scroll);
-        lv_label_set_text(body, "");
-        lv_obj_set_width(body, lv_pct(100));
-        lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
-        lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_add_style(body, &style_theme_text_muted, 0);
-        lv_obj_set_style_text_font(body, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
-        if (body_out) *body_out = body;
-        lv_obj_remove_flag(popup->popup, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scroll_dir(popup->popup, LV_DIR_NONE);
-    }
+    build_titled_popup(popup, popup_backdrop_cb, title_out, with_body ? body_out : NULL);
 }
 
 static void build_popups(void) {

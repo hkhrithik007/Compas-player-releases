@@ -119,6 +119,7 @@ loop is stopped. File reads through Lua's own file handles do count.
 | --- | --- | --- |
 | A row in a native list | `register_list_item` | 16 in Playback & Controls or Sound; 8 in other lists, all plugins together |
 | An action in the now-playing menu | `register_list_item` | 8 actions, all plugins together; requires `ui.player_menu` |
+| A row in More | `register_list_item` | 4 rows, all plugins together; requires `ui.more_menu` |
 | A tile in Stream Media | `register_stream_media_tile` | 5 tiles |
 | A tile on Home | `register_home_tile` | 6 tiles, shown only when a Home layout lists them |
 | An on/off tile in the quick drawer | `register_quick_toggle` | 4 tiles |
@@ -128,6 +129,7 @@ The lists that accept rows:
 | `list_id` | Where the row appears | Good for |
 | --- | --- | --- |
 | `"player"` | Now Playing > three-dot menu, after Information | Track tools and playback actions |
+| `"more"` | More, after the built-in entries (limit 4) | Standalone tools and launchers |
 | `"books"` | Books | Readers, audiobooks, reference tools |
 | `"settings"` | Settings > System > Additional Tools | General plugin settings |
 | `"display"` | Settings > Display | Themes and visual tools |
@@ -148,6 +150,12 @@ row. Its callback runs when the action is tapped and may open a plugin screen
 or perform an action. The player menu scrolls when its built-in and plugin
 actions exceed the available height. This is additive and does not require a
 newer API version.
+
+Use `plugin.has_capability("ui.more_menu")` before registering a `"more"` row.
+It is shown after Emulators with the same look as the built-in entries; the
+`icon` option is resolved like for other rows (absolute path, or relative to
+`.plugins/`) and drawn at the native 44 px size. At most 4 `"more"` rows are
+shown in total. This is additive and does not require a newer API version.
 
 ## Identity and compatibility
 
@@ -184,7 +192,7 @@ plugin.define({
   | Storage | `storage.namespaced`, `storage.secrets`, `storage.secrets_get` |
   | Network | `network.http.sync`, `network.http.async`, `network.http.download`, `network.http.download_progress` |
   | Data | `data.json`, `crypto.md5`, `data.zip`, `data.zip_image`, `data.image_thumbnail`, `data.wallpaper`, `data.html` |
-  | Library | `library.artist_albums`, `library.paged`, `library.refresh`, `library.track_metadata` |
+  | Library | `library.album_cover`, `library.artist_albums`, `library.paged`, `library.refresh`, `library.track_metadata` |
 
 - LEDs depend on the model: check `plugin.led_available()` instead.
 - `plugin.get_app_info()` returns `{ version, build, platform, plugin_api }`.
@@ -858,11 +866,15 @@ and [Mountain Sunset](https://github.com/Starnished66/compas-plugins/tree/main/p
 
 ### Playing files
 
-- `plugin.play_file(path)`: plays one file (absolute path) or stream URL as a
-  new queue, replacing Up Next like tapping a song does.
-- `plugin.play_list(paths [, start_index])`: plays a list of paths or URLs as
-  a new queue, starting at the 1-based `start_index` (default 1, out-of-range
-  values are clamped). Up to 500 entries.
+- `plugin.play_file(path [, options])`: plays one file (absolute path) or
+  stream URL as a new queue, replacing Up Next like tapping a song does.
+- `plugin.play_list(paths [, start_index [, options]])`: plays a list of paths
+  or URLs as a new queue, starting at the 1-based `start_index` (default 1,
+  out-of-range values are clamped). Up to 500 entries.
+- `options.open_player = false` starts playback without opening Now Playing,
+  for a plugin that plays audio from its own screen. Check
+  `plugin.has_capability("playback.stay_on_screen")` first; older players
+  ignore the table and open Now Playing.
 
 **Stream URLs** (`http://` or `https://`) support live streams and finite files:
 
@@ -1020,6 +1032,15 @@ and is capped at, 200; use `offset` to page. Check `library.paged`.
 - `plugin.library_get_artists([offset], [limit])`: artist groups.
 - `plugin.library_get_albums([offset], [limit], [artist])`: album groups,
   optionally only those whose artist or album artist is `artist`.
+- `plugin.library_album_cover_async(song_id, size, callback)` (check
+  `library.album_cover`): the album cover of a song, at `size` 72 or 480 (any
+  other size is an error currently). Use a group's `first_song_id`. `callback(path)` is
+  called on a later player tick with the absolute path of a BMP, which
+  `show_list` accepts as an `icon`. If the library has not generated that cover
+  yet, `callback(nil, "not_generated")` is called instead. This call never
+  creates a cover: covers come from Settings > Update Music Database. Returns
+  `true`, or `nil, "busy"` while 32 requests are pending. Unloading the plugin
+  drops its pending callbacks.
 
 A **song** is `{ id, path, title, artist, album, album_artist }`. Its `id`
 survives rescans: keep it to look the song up later with

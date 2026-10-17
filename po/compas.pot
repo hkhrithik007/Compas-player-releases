@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-16 00:10-0600\n"
+"POT-Creation-Date: 2026-10-17 10:56-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -298,6 +298,42 @@ msgstr ""
 msgid "Open a folder containing supported audio files."
 msgstr ""
 
+msgid "Unexpected reply from GitHub."
+msgstr ""
+
+msgid "Insert an SD card to change emulators."
+msgstr ""
+
+msgid "Cannot create the emulator folder."
+msgstr ""
+
+msgid "The emulator folder is not writable."
+msgstr ""
+
+msgid "Not enough free space on the player."
+msgstr ""
+
+msgid "Could not read the emulator list from GitHub."
+msgstr ""
+
+msgid "This emulator needs a newer player version."
+msgstr ""
+
+msgid "Disconnect USB storage from the host before changing emulators."
+msgstr ""
+
+msgid "Could not install the emulator."
+msgstr ""
+
+msgid "The emulator download failed verification. Try again."
+msgstr ""
+
+msgid "Could not start the emulator operation"
+msgstr ""
+
+msgid "Could not remove the emulator."
+msgstr ""
+
 msgid "Unexpected reply from GitHub"
 msgstr ""
 
@@ -406,9 +442,6 @@ msgstr ""
 msgid "Could not start the installation."
 msgstr ""
 
-msgid "Unexpected reply from GitHub."
-msgstr ""
-
 msgid "Disconnect USB storage from the host before changing plugins."
 msgstr ""
 
@@ -421,10 +454,10 @@ msgstr ""
 msgid "Plugin storage is unavailable."
 msgstr ""
 
-msgid "Could not read the plugin list from GitHub."
+msgid "The SD card changed during the operation."
 msgstr ""
 
-msgid "The SD card changed during the operation."
+msgid "Could not read the plugin list from GitHub."
 msgstr ""
 
 msgid "Insert an SD card to install plugins."
@@ -568,6 +601,142 @@ msgid "Open a book and tap the bookmark icon to save it here."
 msgstr ""
 
 msgid "Add .txt files to the Books folder, then refresh the library."
+msgstr ""
+
+msgid "Needs newer firmware"
+msgstr ""
+
+#, c-format
+msgid "Update available · %s"
+msgstr ""
+
+#, c-format
+msgid "Installed · %s"
+msgstr ""
+
+#, c-format
+msgid "Available · %s"
+msgstr ""
+
+msgid "Install"
+msgstr ""
+
+msgid "Remove"
+msgstr ""
+
+msgid ""
+"Bundled games and their saves will be removed. Games in SD/Games are kept."
+msgstr ""
+
+msgid "No description"
+msgstr ""
+
+#, c-format
+msgid "By %s"
+msgstr ""
+
+#, c-format
+msgid "License: %s"
+msgstr ""
+
+#, c-format
+msgid "Size: %s"
+msgstr ""
+
+msgid ""
+"Updating replaces bundled games and their saves. Games in SD/Games are kept."
+msgstr ""
+
+msgid "Update"
+msgstr ""
+
+msgid "No emulators are available in the catalog."
+msgstr ""
+
+msgid "Refresh emulator catalog"
+msgstr ""
+
+msgid "Updates"
+msgstr ""
+
+msgid "Installed"
+msgstr ""
+
+msgid "Available"
+msgstr ""
+
+msgid "Installing emulator"
+msgstr ""
+
+msgid "Updating emulator"
+msgstr ""
+
+msgid "Removing emulator"
+msgstr ""
+
+msgid "This may take a while"
+msgstr ""
+
+#, c-format
+msgid "Remove %s?"
+msgstr ""
+
+msgid "No network detected. Connect to a network to download emulators."
+msgstr ""
+
+msgid "Turn on Wi-Fi and connect first"
+msgstr ""
+
+msgid "Emulator operation failed"
+msgstr ""
+
+msgid "An emulator operation is already in progress"
+msgstr ""
+
+msgid "Loading emulators"
+msgstr ""
+
+msgid "Download emulators"
+msgstr ""
+
+msgid "Games run on the player only."
+msgstr ""
+
+msgid "Emulator store is busy."
+msgstr ""
+
+msgid "Check the SD card and disconnect USB storage before playing."
+msgstr ""
+
+msgid "Turn off DAC mode to play games."
+msgstr ""
+
+msgid "USB storage is busy."
+msgstr ""
+
+msgid "Audio is still active; cannot start the game."
+msgstr ""
+
+msgid "Could not start the game."
+msgstr ""
+
+msgid "The game closed unexpectedly."
+msgstr ""
+
+#, c-format
+msgid "Copy games to the %s folder on the SD card."
+msgstr ""
+
+msgid "No games found"
+msgstr ""
+
+msgid "Emulators"
+msgstr ""
+
+msgid "No emulators installed"
+msgstr ""
+
+msgid "Download an emulator to play games."
 msgstr ""
 
 msgid "Disconnect USB storage from the computer before changing files."
@@ -953,9 +1122,6 @@ msgid "Update music database?"
 msgstr ""
 
 msgid "Files on the card may have changed."
-msgstr ""
-
-msgid "Update"
 msgstr ""
 
 msgid "Use Settings > Update Music Database"
@@ -1464,9 +1630,6 @@ msgstr ""
 msgid "Paired"
 msgstr ""
 
-msgid "Available"
-msgstr ""
-
 msgid ""
 "When on, this device stays visible and pairable to other Bluetooth devices, "
 "so a phone or computer can stream audio TO it and play through this device's "
@@ -1850,13 +2013,7 @@ msgstr ""
 msgid "Extension updates"
 msgstr ""
 
-msgid "Install"
-msgstr ""
-
 msgid "Replace"
-msgstr ""
-
-msgid "Remove"
 msgstr ""
 
 msgid "Its settings stay on the card."
@@ -1868,13 +2025,7 @@ msgstr ""
 msgid "Choose plugins"
 msgstr ""
 
-msgid "Needs newer firmware"
-msgstr ""
-
 msgid "Update available"
-msgstr ""
-
-msgid "Installed"
 msgstr ""
 
 msgid "Removed"
@@ -1884,26 +2035,7 @@ msgid "Installed manually"
 msgstr ""
 
 #, c-format
-msgid "Update available · %s"
-msgstr ""
-
-#, c-format
-msgid "Installed · %s"
-msgstr ""
-
-#, c-format
-msgid "Available · %s"
-msgstr ""
-
-#, c-format
 msgid "Version %s · %s"
-msgstr ""
-
-#, c-format
-msgid "By %s"
-msgstr ""
-
-msgid "No description"
 msgstr ""
 
 msgid "Close"
@@ -1924,9 +2056,6 @@ msgstr ""
 msgid "Updating plugins"
 msgstr ""
 
-msgid "This may take a while"
-msgstr ""
-
 msgid "No network detected. Connect to a network to download plugins."
 msgstr ""
 
@@ -1934,9 +2063,6 @@ msgid "No updates available."
 msgstr ""
 
 msgid "Refresh plugin catalog"
-msgstr ""
-
-msgid "Updates"
 msgstr ""
 
 msgid "Update All"
@@ -1960,17 +2086,10 @@ msgstr ""
 msgid "Removing plugin"
 msgstr ""
 
-#, c-format
-msgid "Remove %s?"
-msgstr ""
-
 msgid "Update these plugins individually"
 msgstr ""
 
 msgid "Not enough memory to load the plugin store"
-msgstr ""
-
-msgid "Turn on Wi-Fi and connect first"
 msgstr ""
 
 msgid "Could not start the plugin refresh"
@@ -2170,6 +2289,10 @@ msgstr ""
 msgid "Install from SD card"
 msgstr ""
 
+msgid ""
+"Update the Player only, retaining current drivers, kernel and bootloader."
+msgstr ""
+
 msgid "Download & Install"
 msgstr ""
 
@@ -2230,6 +2353,11 @@ msgstr ""
 msgid ""
 "Update saved. Connect to Wi-Fi, then install from Firmware Update > Install "
 "from SD card."
+msgstr ""
+
+msgid ""
+"Update the entire CompásOS. Flashing firmware contains Bootloader, Player, "
+"Kernel and Drivers."
 msgstr ""
 
 msgid "Download"
@@ -2674,6 +2802,9 @@ msgid "Plugins can override these saved preferences."
 msgstr ""
 
 msgid "Quick Drawer"
+msgstr ""
+
+msgid "Plugin Order"
 msgstr ""
 
 msgid "Enabled"

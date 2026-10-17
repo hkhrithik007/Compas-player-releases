@@ -429,6 +429,10 @@ lv_obj_t * build_launcher_menu_screen(const char * title, lv_event_cb_t back_btn
  * paths share one retained decoded buffer across rows/screens; it is released
  * when the last referencing image is deleted. */
 void decorate_category_row(lv_obj_t * row, const char * icon_asset, const char * bg_asset);
+/* Same native category look for a plugin-supplied icon: absolute path or
+ * relative to <SD>/.plugins/ (pill_row_apply_icon()). NULL or a path that
+ * cannot be used leaves the row as a plain decorated row without icon. */
+void decorate_category_row_plugin_icon(lv_obj_t * row, const char * plugin_icon);
 /* Adds a passive accent-colored Play All marker to an existing row and
  * returns its circle so pooled label rows can realign it after padding changes. */
 lv_obj_t * decorate_play_all_row(lv_obj_t * row);
@@ -670,6 +674,13 @@ void gui_popup_hide(gui_popup_t * p);
 void gui_popup_teardown(gui_popup_t * p);
 bool gui_popup_is_visible(const gui_popup_t * p);
 unsigned gui_popup_visible_count(void);
+/* Full-width tappable action (Install, Remove, Cancel) at the end of a popup. */
+lv_obj_t * add_popup_action_row(lv_obj_t * popup, const char * text, lv_color_t color,
+                                lv_event_cb_t cb, void * user_data);
+/* A popup surface with a centered title and, when body_out is given, a
+ * scrolling description under it. Action rows are added by the caller. */
+void build_titled_popup(gui_popup_t * popup, lv_event_cb_t backdrop_cb, lv_obj_t ** title_out,
+                        lv_obj_t ** body_out);
 
 lv_obj_t * add_pill_row_base(lv_obj_t * parent, const char * label_text);
 lv_obj_t * add_pill_toggle_row(lv_obj_t * parent, const char * label_text, bool checked, lv_event_cb_t on_click);

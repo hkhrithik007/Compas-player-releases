@@ -17,6 +17,8 @@ enum {
     COVER_CARD_PREVIEW_MAX_FILE_BYTES = 512 * 1024,
     COVER_CARD_PREVIEW_MAX_WIDTH = 240,
     COVER_CARD_PREVIEW_MAX_HEIGHT = 400,
+    COVER_CARD_PREVIEW_MAX_BMP_BYTES = 2 * 1024 * 1024,
+    COVER_CARD_PREVIEW_MAX_BMP_SIDE = 500,
     COVER_CARD_PREVIEW_MAX_PIXELS_BYTES = 2 * 1024 * 1024,
 };
 
@@ -94,7 +96,7 @@ static void cover_card_preview_delete_cb(lv_event_t * event) {
     free(data);
 }
 
-static bool cover_card_preview_read_png(const char * resolved_src,
+static bool cover_card_preview_read_image(const char * resolved_src,
                                         uint8_t ** out_data, size_t * out_size) {
     static const uint8_t png_signature[8] = {
         0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'
@@ -109,7 +111,7 @@ static bool cover_card_preview_read_png(const char * resolved_src,
 
     struct stat st;
     bool valid = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-                 st.st_size >= 24 && st.st_size <= COVER_CARD_PREVIEW_MAX_FILE_BYTES;
+                 st.st_size >= 24 && st.st_size <= COVER_CARD_PREVIEW_MAX_BMP_BYTES;
     uint8_t * bytes = valid ? malloc((size_t)st.st_size) : NULL;
     if (valid && !bytes) valid = false;
 
@@ -127,11 +129,18 @@ static bool cover_card_preview_read_png(const char * resolved_src,
 
     if (valid) {
         int native_w = 0, native_h = 0;
-        valid = memcmp(bytes, png_signature, sizeof(png_signature)) == 0 &&
-                cover_card_preview_png_is_opaque(bytes, (size_t)st.st_size) &&
-                image_thumb_native_size(bytes, (size_t)st.st_size, &native_w, &native_h) &&
-                native_w > 0 && native_w <= COVER_CARD_PREVIEW_MAX_WIDTH &&
-                native_h > 0 && native_h <= COVER_CARD_PREVIEW_MAX_HEIGHT;
+        if (bytes[0] == 'B' && bytes[1] == 'M') { // BMP
+            valid = image_thumb_native_size(bytes, (size_t)st.st_size, &native_w, &native_h) &&
+                    native_w > 0 && native_w <= COVER_CARD_PREVIEW_MAX_BMP_SIDE &&
+                    native_h > 0 && native_h <= COVER_CARD_PREVIEW_MAX_BMP_SIDE;
+        } else { // assume PNG
+            valid = st.st_size <= COVER_CARD_PREVIEW_MAX_FILE_BYTES &&
+                    memcmp(bytes, png_signature, sizeof(png_signature)) == 0 &&
+                    cover_card_preview_png_is_opaque(bytes, (size_t)st.st_size) &&
+                    image_thumb_native_size(bytes, (size_t)st.st_size, &native_w, &native_h) &&
+                    native_w > 0 && native_w <= COVER_CARD_PREVIEW_MAX_WIDTH &&
+                    native_h > 0 && native_h <= COVER_CARD_PREVIEW_MAX_HEIGHT;
+        }
     }
     if (!valid) {
         free(bytes);
@@ -150,7 +159,7 @@ bool cover_card_preview_set(lv_obj_t * image, const char * resolved_src,
 
     uint8_t * compressed = NULL;
     size_t compressed_size = 0;
-    if (!cover_card_preview_read_png(resolved_src, &compressed, &compressed_size)) return false;
+    if (!cover_card_preview_read_image(resolved_src, &compressed, &compressed_size)) return false;
 
     int native_w = 0, native_h = 0;
     int target_w = 0, target_h = 0;

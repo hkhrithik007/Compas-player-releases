@@ -50,7 +50,7 @@ flags=(-O2 -Wall -ffunction-sections -fdata-sections "-D$define"
        "-I$repo/mbedtls/include")
 native_sources=(
     src/bootloader/main.c src/bootloader/rockbox_bridge.c src/bootloader/fb_draw.c src/bootloader/boot_tuning.c
-    src/core/startup_splash.c
+    src/core/startup_splash.c src/core/glyph5x7.c
     src/bootloader/scanner.c src/bootloader/installer.c src/bootloader/internal_storage.c
     src/bootloader/selector_controller.c src/bootloader/selector_input.c
     src/bootloader/selector_ui.c src/bootloader/selector_request.c

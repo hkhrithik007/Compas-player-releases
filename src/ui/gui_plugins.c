@@ -576,7 +576,7 @@ bool gui_plugin_list_is_top(int slot) {
            gui_navigation_is_top(plugin_list_screens[slot]);
 }
 
-void gui_plugin_play_paths(const char * const * paths, int count, int start_index) {
+void gui_plugin_play_paths(const char * const * paths, int count, int start_index, bool open_player) {
     if (count <= 0) return;
     if (start_index < 0) start_index = 0;
     if (start_index >= count) start_index = count - 1;
@@ -586,7 +586,8 @@ void gui_plugin_play_paths(const char * const * paths, int count, int start_inde
     for (int i = 0; i < count; i++) {
         new_playlist[i] = paths[i] ? strdup(paths[i]) : strdup("");
     }
-    on_file_selected(new_playlist, count, start_index);
+    if (open_player) on_file_selected(new_playlist, count, start_index);
+    else on_file_selected_stay(new_playlist, count, start_index);
 }
 
 /* Same shape as gui_plugin_play_paths() above, for a remote-provider queue
@@ -1302,6 +1303,10 @@ int gui_plugin_library_search(const char * query, int limit, song_row_t * out_ro
 
 bool gui_plugin_library_get_song(int64_t id, song_row_t * out_row) {
     return metadata_db_get_song_by_id(id, out_row);
+}
+
+bool gui_plugin_library_album_cover(int64_t song_id, int size_px, char * out, size_t out_size) {
+    return gui_library_album_cover_cached(song_id, size_px, out, out_size);
 }
 
 /* Fetches a page of artists with offset and clamped limit directly from the database. */

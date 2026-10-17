@@ -47,5 +47,7 @@ void gui_lock_screen_reset_drag_state(void);
 /* Lifecycle functions for gui_reload.c */
 void gui_lock_screen_init(void);
 void gui_lock_screen_teardown(void);
+/* Frees the cached lock screen images before an external session; the next show regenerates them. */
+void gui_lock_screen_release_memory_for_external_session(void);
 
 #endif /* GUI_LOCK_SCREEN_H */

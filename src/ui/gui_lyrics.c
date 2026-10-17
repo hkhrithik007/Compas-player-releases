@@ -655,6 +655,22 @@ void gui_lyrics_prepare_exit(void) {
     lv_obj_add_flag(lyrics_backdrop_img, LV_OBJ_FLAG_HIDDEN);
 }
 
+/* Frees the cached full-screen backdrop (about 0.75 MiB) before an external
+ * session. open_lyrics_screen() decodes it again, since the cached index and
+ * generation no longer match. Skipped while the lyrics screen is on the nav
+ * stack or a decode is in flight. */
+void gui_lyrics_release_memory_for_external_session(void) {
+    if (!current_lyrics_backdrop_bytes || lyrics_backdrop_active || gui_navigation_contains(lyrics_screen)) return;
+    lv_image_set_src(lyrics_backdrop_img, NULL);
+    lv_obj_add_flag(lyrics_backdrop_img, LV_OBJ_FLAG_HIDDEN);
+    lv_image_cache_drop(&current_lyrics_backdrop_dsc);
+    free(current_lyrics_backdrop_bytes);
+    current_lyrics_backdrop_bytes = NULL;
+    memset(&current_lyrics_backdrop_dsc, 0, sizeof(current_lyrics_backdrop_dsc));
+    current_lyrics_backdrop_for_index = -1;
+    current_lyrics_backdrop_generation = -1;
+}
+
 static void close_lyrics_screen(void) {
     gui_lyrics_prepare_exit();
     nav_pop();

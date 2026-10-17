@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: compas-player\n"
 "Report-Msgid-Bugs-To: none\n"
-"POT-Creation-Date: 2026-10-16 00:10-0600\n"
+"POT-Creation-Date: 2026-10-17 10:56-0600\n"
 "PO-Revision-Date: 2026-10-11 13:10-0600\n"
 "Last-Translator: Machine draft; pending native review\n"
 "Language-Team: Finnish\n"
@@ -305,6 +305,42 @@ msgstr "Toistettavia äänitiedostoja ei löytynyt"
 msgid "Open a folder containing supported audio files."
 msgstr "Avaa kansio, jossa on tuettuja äänitiedostoja."
 
+msgid "Unexpected reply from GitHub."
+msgstr "Odottamaton vastaus GitHubilta."
+
+msgid "Insert an SD card to change emulators."
+msgstr "Aseta SD-kortti muuttaaksesi emulaattoreita."
+
+msgid "Cannot create the emulator folder."
+msgstr "Emulaattorikansiota ei voi luoda."
+
+msgid "The emulator folder is not writable."
+msgstr "Emulaattorikansioon ei voi kirjoittaa."
+
+msgid "Not enough free space on the player."
+msgstr "Soittimessa ei ole riittävästi vapaata tilaa."
+
+msgid "Could not read the emulator list from GitHub."
+msgstr "GitHubin emulaattoriluettelon lukeminen epäonnistui."
+
+msgid "This emulator needs a newer player version."
+msgstr "Tämä emulaattori vaatii soittimen uudemman version."
+
+msgid "Disconnect USB storage from the host before changing emulators."
+msgstr "Irrota USB-tallennustila tietokoneesta ennen emulaattorien muuttamista."
+
+msgid "Could not install the emulator."
+msgstr "Emulaattorin asennus epäonnistui."
+
+msgid "The emulator download failed verification. Try again."
+msgstr "Emulaattorin latauksen varmennus epäonnistui. Yritä uudelleen."
+
+msgid "Could not start the emulator operation"
+msgstr "Emulaattoritoiminnon käynnistys epäonnistui"
+
+msgid "Could not remove the emulator."
+msgstr "Emulaattorin poistaminen epäonnistui."
+
 msgid "Unexpected reply from GitHub"
 msgstr "Odottamaton vastaus GitHubilta"
 
@@ -404,9 +440,6 @@ msgstr "Laiteohjelmiston päivitys on jo käynnissä."
 msgid "Could not start the installation."
 msgstr "Asennuksen käynnistys epäonnistui."
 
-msgid "Unexpected reply from GitHub."
-msgstr "Odottamaton vastaus GitHubilta."
-
 msgid "Disconnect USB storage from the host before changing plugins."
 msgstr "Irrota USB-tallennus tietokoneesta ennen liitännäisten muuttamista."
 
@@ -419,11 +452,11 @@ msgstr "SD-kortti on vain luku -tilassa. Tarkista kirjoitussuojaus."
 msgid "Plugin storage is unavailable."
 msgstr "Liitännäistallennus ei ole käytettävissä."
 
-msgid "Could not read the plugin list from GitHub."
-msgstr "GitHub-liitännäisluettelon lukeminen epäonnistui."
-
 msgid "The SD card changed during the operation."
 msgstr "SD-kortti muuttui toiminnon aikana."
+
+msgid "Could not read the plugin list from GitHub."
+msgstr "GitHub-liitännäisluettelon lukeminen epäonnistui."
 
 msgid "Insert an SD card to install plugins."
 msgstr "Aseta SD-kortti liitännäisten asentamista varten."
@@ -570,6 +603,140 @@ msgstr "Avaa kirja ja tallenna se tähän napauttamalla kirjanmerkkikuvaketta."
 
 msgid "Add .txt files to the Books folder, then refresh the library."
 msgstr "Lisää .txt-tiedostot Kirjat-kansioon ja päivitä sitten kirjasto."
+
+msgid "Needs newer firmware"
+msgstr "Vaatii uudemman laiteohjelmiston"
+
+#, c-format
+msgid "Update available · %s"
+msgstr "Päivitys saatavilla · %s"
+
+#, c-format
+msgid "Installed · %s"
+msgstr "Asennettu · %s"
+
+#, c-format
+msgid "Available · %s"
+msgstr "Saatavilla · %s"
+
+msgid "Install"
+msgstr "Asenna"
+
+msgid "Remove"
+msgstr "Poista"
+
+msgid "Bundled games and their saves will be removed. Games in SD/Games are kept."
+msgstr ""
+
+msgid "No description"
+msgstr "Ei kuvausta"
+
+#, c-format
+msgid "By %s"
+msgstr "Tekijä %s"
+
+#, c-format
+msgid "License: %s"
+msgstr "Lisenssi: %s"
+
+#, c-format
+msgid "Size: %s"
+msgstr "Koko: %s"
+
+msgid "Updating replaces bundled games and their saves. Games in SD/Games are kept."
+msgstr ""
+
+msgid "Update"
+msgstr "Päivitä"
+
+msgid "No emulators are available in the catalog."
+msgstr "Luettelossa ei ole saatavilla emulaattoreita."
+
+msgid "Refresh emulator catalog"
+msgstr "Päivitä emulaattoriluettelo"
+
+msgid "Updates"
+msgstr "Päivitykset"
+
+msgid "Installed"
+msgstr "Asennettu"
+
+msgid "Available"
+msgstr "Käytettävissä"
+
+msgid "Installing emulator"
+msgstr "Asennetaan emulaattoria"
+
+msgid "Updating emulator"
+msgstr "Päivitetään emulaattoria"
+
+msgid "Removing emulator"
+msgstr "Poistetaan emulaattoria"
+
+msgid "This may take a while"
+msgstr "Tämä voi kestää hetken"
+
+#, c-format
+msgid "Remove %s?"
+msgstr "Poistetaanko %s?"
+
+msgid "No network detected. Connect to a network to download emulators."
+msgstr "Verkkoa ei havaittu. Yhdistä verkkoon ladataksesi emulaattoreita."
+
+msgid "Turn on Wi-Fi and connect first"
+msgstr "Ota Wi-Fi käyttöön ja muodosta ensin yhteys"
+
+msgid "Emulator operation failed"
+msgstr "Emulaattoritoiminto epäonnistui"
+
+msgid "An emulator operation is already in progress"
+msgstr "Emulaattoritoiminto on jo käynnissä"
+
+msgid "Loading emulators"
+msgstr "Ladataan emulaattoreita"
+
+msgid "Download emulators"
+msgstr "Lataa emulaattoreita"
+
+msgid "Games run on the player only."
+msgstr "Pelit toimivat vain soittimessa."
+
+msgid "Emulator store is busy."
+msgstr "Emulaattorikauppa on varattu."
+
+msgid "Check the SD card and disconnect USB storage before playing."
+msgstr "Tarkista SD-kortti ja irrota USB-tallennustila ennen pelaamista."
+
+msgid "Turn off DAC mode to play games."
+msgstr "Poista DAC-tila käytöstä pelataksesi pelejä."
+
+msgid "USB storage is busy."
+msgstr "USB-tallennustila on varattu."
+
+msgid "Audio is still active; cannot start the game."
+msgstr "Ääni on yhä käytössä; peliä ei voi käynnistää."
+
+msgid "Could not start the game."
+msgstr "Peliä ei voitu käynnistää."
+
+msgid "The game closed unexpectedly."
+msgstr "Peli sulkeutui odottamattomasti."
+
+#, c-format
+msgid "Copy games to the %s folder on the SD card."
+msgstr "Kopioi pelit SD-kortin kansioon %s."
+
+msgid "No games found"
+msgstr "Pelejä ei löytynyt"
+
+msgid "Emulators"
+msgstr "Emulaattorit"
+
+msgid "No emulators installed"
+msgstr "Emulaattoreita ei ole asennettu"
+
+msgid "Download an emulator to play games."
+msgstr "Lataa emulaattori pelataksesi pelejä."
 
 msgid "Disconnect USB storage from the computer before changing files."
 msgstr "Irrota USB-tallennus tietokoneesta ennen tiedostojen muuttamista."
@@ -954,9 +1121,6 @@ msgstr "Päivitetäänkö musiikkitietokanta?"
 
 msgid "Files on the card may have changed."
 msgstr "Kortin tiedostot ovat saattaneet muuttua."
-
-msgid "Update"
-msgstr "Päivitä"
 
 msgid "Use Settings > Update Music Database"
 msgstr "Valitse Asetukset > Päivitä musiikkitietokanta"
@@ -1485,9 +1649,6 @@ msgstr "Yhteys epäonnistui"
 msgid "Paired"
 msgstr "Pariliitetty"
 
-msgid "Available"
-msgstr "Käytettävissä"
-
 msgid "When on, this device stays visible and pairable to other Bluetooth devices, so a phone or computer can stream audio TO it and play through this device's own output -- using it as an external DAC."
 msgstr "Kun tämä on käytössä, laite näkyy muille Bluetooth-laitteille ja niihin voi muodostaa pariliitoksen. Puhelin tai tietokone voi suoratoistaa ääntä tähän laitteeseen ja toistaa sen laitteen oman ulostulon kautta ulkoisena DAC-muuntimena."
 
@@ -1863,14 +2024,8 @@ msgstr "Lataa teemoja"
 msgid "Extension updates"
 msgstr "Laajennuspäivitykset"
 
-msgid "Install"
-msgstr "Asenna"
-
 msgid "Replace"
 msgstr "Korvaa"
-
-msgid "Remove"
-msgstr "Poista"
 
 msgid "Its settings stay on the card."
 msgstr "Sen asetukset säilyvät kortilla."
@@ -1881,14 +2036,8 @@ msgstr "Päivitä yksitellen"
 msgid "Choose plugins"
 msgstr "Valitse liitännäiset"
 
-msgid "Needs newer firmware"
-msgstr "Vaatii uudemman laiteohjelmiston"
-
 msgid "Update available"
 msgstr "Päivitys saatavilla"
-
-msgid "Installed"
-msgstr "Asennettu"
 
 msgid "Removed"
 msgstr "Poistettu"
@@ -1897,27 +2046,8 @@ msgid "Installed manually"
 msgstr "Asennettu manuaalisesti"
 
 #, c-format
-msgid "Update available · %s"
-msgstr "Päivitys saatavilla · %s"
-
-#, c-format
-msgid "Installed · %s"
-msgstr "Asennettu · %s"
-
-#, c-format
-msgid "Available · %s"
-msgstr "Saatavilla · %s"
-
-#, c-format
 msgid "Version %s · %s"
 msgstr "Versio %s · %s"
-
-#, c-format
-msgid "By %s"
-msgstr "Tekijä %s"
-
-msgid "No description"
-msgstr "Ei kuvausta"
 
 msgid "Close"
 msgstr "Sulje"
@@ -1937,9 +2067,6 @@ msgstr "Liitännäistoiminto on jo käynnissä"
 msgid "Updating plugins"
 msgstr "Päivitetään liitännäisiä"
 
-msgid "This may take a while"
-msgstr "Tämä voi kestää hetken"
-
 msgid "No network detected. Connect to a network to download plugins."
 msgstr "Verkkoa ei havaittu. Yhdistä verkkoon ladataksesi liitännäisiä."
 
@@ -1948,9 +2075,6 @@ msgstr "Päivityksiä ei ole saatavilla."
 
 msgid "Refresh plugin catalog"
 msgstr "Päivitä liitännäisluettelo"
-
-msgid "Updates"
-msgstr "Päivitykset"
 
 msgid "Update All"
 msgstr "Päivitä kaikki"
@@ -1973,18 +2097,11 @@ msgstr "Asennetaan liitännäistä"
 msgid "Removing plugin"
 msgstr "Poistetaan liitännäistä"
 
-#, c-format
-msgid "Remove %s?"
-msgstr "Poistetaanko %s?"
-
 msgid "Update these plugins individually"
 msgstr "Päivitä nämä liitännäiset yksitellen"
 
 msgid "Not enough memory to load the plugin store"
 msgstr "Liitännäiskaupan lataamiseen ei ole riittävästi muistia"
-
-msgid "Turn on Wi-Fi and connect first"
-msgstr "Ota Wi-Fi käyttöön ja muodosta ensin yhteys"
 
 msgid "Could not start the plugin refresh"
 msgstr "Liitännäisten päivityksen käynnistys epäonnistui"
@@ -2187,6 +2304,9 @@ msgstr "Tarkista verkkopäivitys"
 msgid "Install from SD card"
 msgstr "Asenna SD-kortilta"
 
+msgid "Update the Player only, retaining current drivers, kernel and bootloader."
+msgstr "Päivittää vain soittimen. Nykyiset ajurit, ydin ja käynnistyslatain säilyvät."
+
 #, fuzzy
 msgid "Download & Install"
 msgstr "Lataus epäonnistui"
@@ -2252,6 +2372,9 @@ msgstr "Ladataan päivitystä"
 
 msgid "Update saved. Connect to Wi-Fi, then install from Firmware Update > Install from SD card."
 msgstr "Päivitys tallennettu. Yhdistä Wi-Fi-verkkoon ja asenna valitsemalla Laiteohjelmistopäivitys > Asenna SD-kortilta."
+
+msgid "Update the entire CompásOS. Flashing firmware contains Bootloader, Player, Kernel and Drivers."
+msgstr "Päivittää koko CompásOS:n. Laiteohjelmisto sisältää käynnistyslataimen, soittimen, ytimen ja ajurit."
 
 msgid "Download"
 msgstr "Lataa"
@@ -2695,6 +2818,9 @@ msgstr "Lisäosat voivat ohittaa nämä tallennetut asetukset."
 
 msgid "Quick Drawer"
 msgstr "Pikavalikko"
+
+msgid "Plugin Order"
+msgstr "Liitännäisten järjestys"
 
 msgid "Enabled"
 msgstr "Käytössä"
@@ -3462,6 +3588,9 @@ msgstr "Virtatoiminnot"
 
 msgid "Playback and device actions"
 msgstr "Toisto- ja laitetoiminnot"
+
+#~ msgid "Saved games stay on the SD card."
+#~ msgstr "Tallennetut pelit säilyvät SD-kortilla."
 
 #~ msgid "Parametric EQ"
 #~ msgstr "Parametrinen taajuuskorjain"

@@ -20,6 +20,10 @@ void player_lyrics_backdrop_bind(lv_obj_t * wrapper, lv_obj_t * dim, lv_obj_t * 
  * pointer or descriptor key, so callers own this invalidation contract. */
 void player_lyrics_backdrop_invalidate(void);
 void player_lyrics_backdrop_set_busy(bool busy);
+/* Frees the cached frames and schedules the normal delayed recapture, which
+ * cannot run while the UI thread is blocked. No-op while a transition is
+ * active or nothing is cached. */
+void player_lyrics_backdrop_release_frames(void);
 bool player_lyrics_backdrop_begin(bool opening);
 /* Finish the current transition. Pass true only for a completed settled
  * transition; it retains a validated narrow static image binding for the next

@@ -99,6 +99,10 @@
  * existing vertical scroll area. */
 #define PLUGIN_MAX_PLAYER_LIST_ITEMS 8
 
+/* Rows appended to the More screen (build_dac_home_screen()) after its
+ * native entries, for plugin.register_list_item("more", ...). */
+#define PLUGIN_MAX_MORE_LIST_ITEMS 4
+
 /* Upper bound on how many tiles all plugins combined may register via
  * plugin.register_stream_media_tile() -- sizes plugin_manager.c's own
  * internal plugin_stream_tiles[] array. Stream Media has exactly one
@@ -359,6 +363,14 @@ const char * plugin_manager_get_system_list_item_label(int index);
 void plugin_manager_system_list_item_clicked(int index);
 void plugin_manager_get_system_list_item_options(int index, const char ** out_icon, int32_t * out_height,
                                                   int32_t * out_width, const char ** out_text_size);
+
+/* Same shape again, for plugin.register_list_item("more", ...) -- gui_settings.c's
+ * build_dac_home_screen() appends these after its own built-in rows. */
+int plugin_manager_get_more_list_item_count(void);
+const char * plugin_manager_get_more_list_item_label(int index);
+void plugin_manager_more_list_item_clicked(int index);
+void plugin_manager_get_more_list_item_options(int index, const char ** out_icon, int32_t * out_height,
+                                                int32_t * out_width, const char ** out_text_size);
 
 /* Rows appended to the now-playing three-dot menu after Information. */
 int plugin_manager_get_player_list_item_count(void);

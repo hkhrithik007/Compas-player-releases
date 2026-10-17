@@ -26,6 +26,134 @@ patch_bootloader_wrapper() {
         ! grep -Eq '^[[:space:]]*(exec[[:space:]]+)?/usr/bin/(open_hiby_bootloader|compas_bootloader)[[:space:]]*$' "$wrapper"
 }
 
+# Raise the touch controller to two simultaneous contacts (R1 only). The stock
+# loader passes a limit of one, so the kernel never reports a second finger.
+# Fail closed if the loader no longer has the expected shape. Already-2 is
+# accepted so the edit is idempotent.
+raise_touch_contact_limit() {
+    local driver_dir=$1
+    python3 - "$driver_dir/cst8xx_touch.sh" cst8xx_touch.ko cst_max_touch_number <<'PY'
+import pathlib, re, sys
+
+path, module, key = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+if path.is_symlink() or not path.is_file():
+    raise SystemExit(f"Touch loader is missing or not a regular file: {path}")
+text = path.read_text()
+if len(re.findall(r"(?:^|\s)insmod\s+" + re.escape(module) + r"(?=\s|$)", text)) != 1:
+    raise SystemExit(f"Unsupported touch loader (expected one insmod {module}): {path}")
+pattern = r"((?:^|\s)" + key + r"=)([0-9]+)(?=\s|$)"
+if len(re.findall(pattern, text)) != 1:
+    raise SystemExit(f"Missing or duplicate {key} in {path}")
+text, count = re.subn(pattern, r"\g<1>2", text)
+if count != 1:
+    raise SystemExit(f"Could not set {key}=2 in {path}")
+path.write_text(text)
+PY
+}
+
+# R3 Pro II: install the open gt9xx_touch.ko (five contacts) in place of the
+# OEM one, which drops multi-contact frames, and load it with
+# gtp_max_touch_number=5. Everything is pinned in
+# firmware/kernel/open-modules/r3proii.json: the module, the OEM module and
+# loader being replaced, and the kernel the module was built against. The
+# module has no modversions, so only the kernel build can guarantee it matches;
+# an unlisted kernel is refused. Also writes the record (it names the GPL
+# source commit) into the image. Mode "install" edits the tree; mode "verify"
+# only re-checks the installed result, for use right before packaging.
+open_touch_module() {
+    local mode=$1 root=$2 kernel=$3
+    python3 - "$root" "$kernel" "$repo/firmware/kernel/open-modules/r3proii.json" "$repo" "$mode" <<'PY'
+import hashlib, json, pathlib, re, shutil, sys
+
+root, kernel, record_path, repo = map(pathlib.Path, sys.argv[1:5])
+mode = sys.argv[5]
+
+def sha(path):
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+def regular(path, label):
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit(f"{label} is missing or not a regular file: {path}")
+
+regular(record_path, "Open module record")
+record = json.loads(record_path.read_text())
+entry = record["modules"]["gt9xx_touch.ko"]
+built = record["built_against"]
+source = repo / entry["path"]
+regular(source, "Open gt9xx_touch.ko")
+if sha(source) != entry["sha256"]:
+    raise SystemExit("Open gt9xx_touch.ko does not match its recorded SHA-256")
+regular(kernel, "Kernel image")
+if sha(kernel) not in built["kernel_xImage_sha256_allowed"]:
+    raise SystemExit("Base kernel is not one the open gt9xx_touch.ko was built against; rebuild it for this kernel and update the record")
+
+drivers = root / "module_driver"
+if drivers.is_symlink() or not drivers.is_dir():
+    raise SystemExit("Base OTA has an unsafe or missing /module_driver directory")
+module, loader, utils = drivers / "gt9xx_touch.ko", drivers / "gt9xx_touch.sh", drivers / "utils.ko"
+for path in (module, loader, utils):
+    regular(path, "Touch driver file")
+
+# The module has no modversions, so utils.ko must be exactly the build whose
+# exports were inspected. The symbol and vermagic checks below repeat what the
+# pin already implies, as documentation of what the open module needs.
+pinned_utils = built.get("utils_ko_sha256_inspected")
+if not pinned_utils:
+    raise SystemExit("Open module record has no utils_ko_sha256_inspected")
+if sha(utils) != pinned_utils:
+    raise SystemExit("utils.ko is not the build the open gt9xx_touch.ko was checked against")
+utils_bytes = utils.read_bytes()
+for symbol in entry["imports_from_utils"]:
+    if b"\0__ksymtab_" + symbol.encode() + b"\0" not in utils_bytes:
+        raise SystemExit(f"utils.ko does not export {symbol} needed by the open gt9xx_touch.ko")
+def vermagic_of(data):
+    found = re.findall(rb"(?:^|\0)vermagic=([^\0]*)\0", data)
+    return found[0].decode().rstrip() if len(found) == 1 else None  # the kernel pads it with a space
+if vermagic_of(source.read_bytes()) != entry["vermagic"] or vermagic_of(utils_bytes) != entry["vermagic"]:
+    raise SystemExit("utils.ko and the open gt9xx_touch.ko do not share the recorded vermagic")
+
+loader_text = loader.read_text()
+loader_sha = sha(loader)
+if mode == "verify":
+    if sha(module) != entry["sha256"] or loader_sha != entry["installed_loader_sha256"]:
+        raise SystemExit("Touch driver files changed after the open module was installed")
+    installed_record = root / "usr/share/compas/open-modules.json"
+    regular(installed_record, "Installed open module record")
+    if installed_record.read_bytes() != record_path.read_bytes():
+        raise SystemExit("Installed open module record differs from firmware/kernel/open-modules/r3proii.json")
+    raise SystemExit(0)
+if sha(module) == entry["sha256"] and loader_sha == entry["installed_loader_sha256"]:
+    pass  # already installed
+elif sha(module) == entry["replaces_oem_sha256"] and loader_sha == entry["oem_loader_sha256"]:
+    pattern = r"((?:^|\s)gtp_max_touch_number=)1(?=\s|$)"
+    loader_text, count = re.subn(pattern, r"\g<1>5", loader_text)
+    if count != 1:
+        raise SystemExit(f"Could not set gtp_max_touch_number=5 in {loader}")
+    loader.write_text(loader_text)
+    if sha(loader) != entry["installed_loader_sha256"]:
+        raise SystemExit("Edited gt9xx_touch.sh does not match the recorded loader")
+    shutil.copyfile(source, module)
+else:
+    raise SystemExit("Base gt9xx_touch.ko or gt9xx_touch.sh is not the expected OEM pair")
+if sha(module) != entry["sha256"]:
+    raise SystemExit("Installed gt9xx_touch.ko hash mismatch")
+
+target = root / "usr/share/compas"
+for parent in (root / "usr", root / "usr/share", target):
+    if parent.exists() and (parent.is_symlink() or not parent.is_dir()):
+        raise SystemExit(f"Unsafe directory in base OTA: {parent.relative_to(root)}")
+target.mkdir(parents=True, exist_ok=True)
+out = target / "open-modules.json"
+if out.is_symlink():
+    raise SystemExit("Open module record target is an unexpected symlink")
+shutil.copyfile(record_path, out)
+PY
+}
+
 board=${BOARD:-r1}
 vendor_drivers=""
 board_seen=0
@@ -420,6 +548,14 @@ PY
         preserved_charge_current=70
     fi
 
+    # Allow two simultaneous fingers on the R1. Done after the stock source
+    # manifest was taken and before the installed manifest, so the manifests
+    # record the stock and the edited hash and the final integrity check still
+    # matches. Only the R1 has vendor driver pins; the R3 touch policy below
+    # is not wired into this path.
+    [[ $board == r1 ]] || { echo "Vendor driver refresh is only supported for the R1" >&2; exit 1; }
+    raise_touch_contact_limit "$vendor_root/module_driver"
+
     # Never write through existing destination links. These two directories
     # are the complete board-specific driver payload being replaced.
     for rel in module_driver lib/firmware; do
@@ -669,6 +805,46 @@ fi
 # runtime overlays, so those overlays cannot restore an unstandardized wrapper.
 "$repo/scripts/standardize_boot_pipeline.sh" --board "$board" "$work/root"
 
+# Touch policy for a base image that keeps its own driver tree. This is the
+# last writer of the touched files: both overlays are already in place, and an
+# overlay that carries one of them is refused instead of being overwritten or
+# silently overwriting the edit. (--vendor-drivers applies the R1 edit inside
+# the vendor refresh and is covered by its whole-tree check above.)
+touch_files=()
+touch_hash_r1=""
+if [[ -z $vendor_drivers ]]; then
+    [[ -d "$work/root/module_driver" && ! -L "$work/root/module_driver" ]] || {
+        echo "Base OTA has an unsafe or missing /module_driver directory" >&2
+        exit 1
+    }
+    case $board in
+        r1) touch_files=(cst8xx_touch.sh) ;;
+        r3proii) touch_files=(gt9xx_touch.ko gt9xx_touch.sh utils.ko) ;;
+        # R3 II 2025 keeps its stock touch loader unchanged
+        # (gtp_max_touch_number=1). Its OEM gt9xx_touch.ko drops multi-contact
+        # frames, so raising the parameter would not give multitouch, and no
+        # open module has been built or analyzed for that board.
+        r3ii_2025) ;;
+        *) echo "No touch policy for board $board" >&2; exit 1 ;;
+    esac
+    for overlay_dir in "$overlay" "${runtime_overlay:-}"; do
+        [[ -n $overlay_dir ]] || continue
+        for name in "${touch_files[@]}"; do
+            if [[ -e "$overlay_dir/module_driver/$name" || -L "$overlay_dir/module_driver/$name" ]]; then
+                echo "Overlay $overlay_dir carries module_driver/$name, which the touch policy owns" >&2
+                exit 1
+            fi
+        done
+    done
+    case $board in
+        r1)
+            raise_touch_contact_limit "$work/root/module_driver"
+            touch_hash_r1=$(sha256sum "$work/root/module_driver/cst8xx_touch.sh" | awk '{print $1}')
+            ;;
+        r3proii) open_touch_module install "$work/root" "$work/xImage" ;;
+    esac
+fi
+
 if [[ -n $vendor_drivers ]]; then
     # Check the final tree after both overlays and boot standardization, then
     # write provenance from the exact bytes that will enter the squashfs.
@@ -875,6 +1051,18 @@ if ! (cd "$work/root" && sha256sum -c "$font_manifest"); then
     exit 1
 fi
 
+# Last look at the touch files before they are packed.
+if [[ -z $vendor_drivers ]]; then
+    case $board in
+        r1)
+            [[ $(sha256sum "$work/root/module_driver/cst8xx_touch.sh" | awk '{print $1}') == "$touch_hash_r1" ]] || {
+                echo "cst8xx_touch.sh changed after the contact limit was raised" >&2
+                exit 1
+            }
+            ;;
+        r3proii) open_touch_module verify "$work/root" "$work/xImage" ;;
+    esac
+fi
 mksquashfs "$work/root" "$work/new-rootfs.squashfs" \
     -comp lzo -all-root -noappend -no-xattrs >/dev/null
 

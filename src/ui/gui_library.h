@@ -84,6 +84,8 @@ bool gui_library_generate_player_cover(const char * track_path, const char * art
                                        artwork_cancel_fn cancel_cb, void * user_data,
                                        uint16_t ** out_pixels, bool * out_no_art_confirmed);
 
+bool gui_library_album_cover_cached(int64_t song_id, int size_px, char * out, size_t out_size);
+
 void open_add_to_playlist_for(const char * path);
 void gui_library_poll_playlists(void);
 /* Nonblocking duration/codec completion polling; updates only the current page. */
@@ -132,4 +134,6 @@ bool gui_library_navigation_blocked(void);
  * Layout-only reloads may retain decoded artwork; full reloads invalidate it. */
 void gui_library_prepare_for_ui_reload(bool preserve_artwork);
 void gui_library_cancel_background_work(void);
+/* Frees the decoded thumbnail cache before an external session; rows refill it on demand. */
+void gui_library_release_memory_for_external_session(void);
 void gui_library_cancel_scan(void);

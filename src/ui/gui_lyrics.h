@@ -56,5 +56,7 @@ void gui_lyrics_refresh_layout(void);
  * (which does its own stack-only pop and defers the actual screen load to
  * the settle animation's completion). */
 void gui_lyrics_prepare_exit(void);
+/* Frees the cached backdrop before an external session; the next open decodes it again. */
+void gui_lyrics_release_memory_for_external_session(void);
 
 #endif

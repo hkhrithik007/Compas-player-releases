@@ -534,6 +534,26 @@ static void sigint_handler(int sig) {
 }
 #endif
 
+/* Set while a callback blocks the UI thread on purpose (an emulator session).
+ * The runtime LVGL clock advances by the real time since the previous loop
+ * pass, so without this the whole blocked period would arrive as one jump:
+ * every inactivity and timer check would see it as idle time and the screen
+ * would time out the moment the game exits. */
+static volatile sig_atomic_t discard_blocked_time;
+
+void main_loop_discard_elapsed_time(void) {
+    discard_blocked_time = 1;
+}
+
+/* Milliseconds to add to LVGL's clock for the real time `now` since `last`. */
+static uint32_t main_loop_tick_gap(uint32_t now, uint32_t last) {
+    if (discard_blocked_time) {
+        discard_blocked_time = 0;
+        return 0;
+    }
+    return now - last;
+}
+
 int main(int argc, char ** argv) {
     /* Ignore SIGPIPE process-wide: a Bluetooth disconnect during playback
      * kills the `aplay -D bluealsa` child audio_output.c writes into, and
@@ -853,7 +873,7 @@ int main(int argc, char ** argv) {
     while (1) {
 #endif
         uint32_t real_tick = custom_tick_get();
-        lv_tick_inc(real_tick - last_real_tick);
+        lv_tick_inc(main_loop_tick_gap(real_tick, last_real_tick));
         last_real_tick = real_tick;
 #ifdef UI_PERF_TRACE
         uint64_t perf_handler_start_us = perf_now_us();
@@ -936,7 +956,7 @@ int main(int argc, char ** argv) {
                 /* Advance ticks before dispatch: gestures must see real event
                  * time even after an idle wait. The handler accounts the rest. */
                 uint32_t input_tick = custom_tick_get();
-                lv_tick_inc(input_tick - last_real_tick);
+                lv_tick_inc(main_loop_tick_gap(input_tick, last_real_tick));
                 last_real_tick = input_tick;
                 if ((ready & UI_WAKE_TOUCH_ERROR) && event_touch) {
                     /* Persistent error readiness cannot be consumed as data. */

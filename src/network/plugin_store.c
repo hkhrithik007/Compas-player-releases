@@ -1,4 +1,5 @@
 #include "plugin_store.h"
+#include "store_common.h"
 #include "i18n.h"
 #include "http_client.h"
 #include "storage_paths.h"
@@ -47,9 +48,6 @@
 #define STORE_FILE_LIMIT (1u << 20)
 #define STORE_MARGIN (2u << 20)
 #define STORE_WORK STORE_COMPAS_ROOT "/store"
-#define STORE_TIMEOUT_CONNECT 10000
-#define STORE_TIMEOUT_READ 20000
-#define STORE_DEST_LIMIT 255
 /* Installed-record entries. Larger than the catalog cap so retired plugins
  * still installed do not make the record unreadable after catalog turnover;
  * new installs stop at this limit instead. */
@@ -87,83 +85,12 @@ static void error_text(char * out, size_t size, const char * text) {
     }
 }
 
-static bool ascii_digit(char c) {
-    return c >= '0' && c <= '9';
-}
-
-static bool ascii_lower(char c) {
-    return c >= 'a' && c <= 'z';
-}
-
-static bool ascii_alpha(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-}
-
-static bool ascii_alnum(char c) {
-    return ascii_alpha(c) || ascii_digit(c);
-}
-
 static bool regex_id(const char * s) {
-    if (!s || !*s || strlen(s) > 63 || (!ascii_lower(*s) && !ascii_digit(*s))) {
+    if (!s || !*s || strlen(s) > 63 || (!store_ascii_lower(*s) && !store_ascii_digit(*s))) {
         return false;
     }
     for (; *s; s++) {
-        if (!ascii_lower(*s) && !ascii_digit(*s) && *s != '_' && *s != '.' && *s != '-') {
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool regex_token(const char * s, size_t max, bool dot) {
-    if (!s || !*s || strlen(s) > max) {
-        return false;
-    }
-    for (; *s; s++) {
-        if (!ascii_alnum(*s) && *s != '_' && *s != '-' && (!dot || *s != '.')) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool version_valid(const char * s) {
-    if (!s || !*s || strlen(s) >= 32) {
-        return false;
-    }
-    int dots = 0;
-    bool digit = false;
-    for (; *s; s++) {
-        if (ascii_digit(*s)) {
-            digit = true;
-        } else if (*s == '.' && digit && dots < 3) {
-            dots++;
-            digit = false;
-        } else {
-            return false;
-        }
-    }
-    return digit;
-}
-
-static bool sha_valid(const char * s) {
-    if (!s || strlen(s) != 64) {
-        return false;
-    }
-    for (int i = 0; i < 64; i++) {
-        if (!ascii_digit(s[i]) && !(s[i] >= 'a' && s[i] <= 'f')) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool safe_text(const char * s, size_t max, bool allow_empty) {
-    if (!s || strlen(s) > max || (!allow_empty && !*s)) {
-        return false;
-    }
-    for (; *s; s++) {
-        if ((unsigned char) *s < 32 || (unsigned char) *s == 127) {
+        if (!store_ascii_lower(*s) && !store_ascii_digit(*s) && *s != '_' && *s != '.' && *s != '-') {
             return false;
         }
     }
@@ -171,31 +98,12 @@ static bool safe_text(const char * s, size_t max, bool allow_empty) {
 }
 
 bool plugin_store_dest_valid(const char * dest) {
-    if (!dest || !*dest || dest[0] == '/' || strlen(dest) > STORE_DEST_LIMIT) {
+    if (!store_dest_path_valid(dest)) {
         return false;
     }
-    for (const char * p = dest; *p; p++) {
-        if (!(ascii_alnum(*p) || *p == '.' || *p == '_' || *p == ' ' ||
-              *p == '/' || *p == '-')) {
-            return false;
-        }
-    }
-    const char * seg = dest;
-    for (const char * p = dest; ; p++) {
-        if (*p == '/' || *p == '\0') {
-            size_t n = (size_t)(p - seg);
-            if (!n || (n == 1 && seg[0] == '.') ||
-                (n == 2 && seg[0] == '.' && seg[1] == '.')) {
-                return false;
-            }
-            if (seg == dest && n == 7 && strncasecmp(seg, ".compas", n) == 0) {
-                return false;
-            }
-            if (!*p) {
-                break;
-            }
-            seg = p + 1;
-        }
+    /* The player's own folder is never a plugin destination. */
+    if (strncasecmp(dest, ".compas", 7) == 0 && (dest[7] == '/' || dest[7] == '\0')) {
+        return false;
     }
     /* Dot files in .plugins are the player's own (the store record and its
      * temporary file, the disabled list). */
@@ -207,66 +115,18 @@ bool plugin_store_dest_valid(const char * dest) {
 }
 
 int plugin_store_version_compare(const char * a, const char * b) {
-    while (*a || *b) {
-        const char * a_end = a;
-        const char * b_end = b;
-        while (ascii_digit(*a_end)) {
-            a_end++;
-        }
-        while (ascii_digit(*b_end)) {
-            b_end++;
-        }
-        const char * a_num = a;
-        const char * b_num = b;
-        while (a_num < a_end && *a_num == '0') {
-            a_num++;
-        }
-        while (b_num < b_end && *b_num == '0') {
-            b_num++;
-        }
-        size_t a_len = (size_t) (a_end - a_num);
-        size_t b_len = (size_t) (b_end - b_num);
-        if (a_len != b_len) {
-            return a_len < b_len ? -1 : 1;
-        }
-        int cmp = a_len ? memcmp(a_num, b_num, a_len) : 0;
-        if (cmp) {
-            return cmp < 0 ? -1 : 1;
-        }
-        a = *a_end == '.' ? a_end + 1 : a_end;
-        b = *b_end == '.' ? b_end + 1 : b_end;
-    }
-    return 0;
-}
-
-static const cJSON * field(const cJSON * o, const char * name) {
-    return cJSON_GetObjectItemCaseSensitive(o, name);
-}
-
-static const char * string_field(const cJSON * o, const char * name) {
-    const cJSON * v = field(o, name);
-    return cJSON_IsString(v) ? v->valuestring : NULL;
-}
-
-static bool integer_field(const cJSON * o, const char * name, uint32_t min, uint32_t max, uint32_t * out) {
-    const cJSON * v = field(o, name);
-    if (!cJSON_IsNumber(v) || v->valuedouble < min || v->valuedouble > max ||
-        v->valuedouble != (double) (uint32_t) v->valuedouble) {
-        return false;
-    }
-    *out = (uint32_t) v->valuedouble;
-    return true;
+    return store_version_compare(a, b);
 }
 
 static bool parse_preview_metadata(const cJSON * value, plugin_store_preview_t * out) {
     if (!cJSON_IsObject(value)) return false;
-    const char * asset = string_field(value, "asset");
-    const char * sha = string_field(value, "sha256");
+    const char * asset = store_json_string(value, "asset");
+    const char * sha = store_json_string(value, "sha256");
     plugin_store_preview_t parsed = {0};
-    if (!regex_token(asset, 127, true) || !sha_valid(sha) ||
-        !integer_field(value, "size", 1, STORE_PREVIEW_LIMIT, &parsed.size) ||
-        !integer_field(value, "width", 1, 240, &parsed.width) ||
-        !integer_field(value, "height", 1, 400, &parsed.height)) {
+    if (!store_token_valid(asset, 127, true) || !store_sha_valid(sha) ||
+        !store_json_uint(value, "size", 1, STORE_PREVIEW_LIMIT, &parsed.size) ||
+        !store_json_uint(value, "width", 1, 240, &parsed.width) ||
+        !store_json_uint(value, "height", 1, 400, &parsed.height)) {
         return false;
     }
     snprintf(parsed.asset, sizeof(parsed.asset), "%s", asset);
@@ -284,7 +144,7 @@ static bool parse_plugin_preview(const cJSON * preview, plugin_store_preview_t *
     plugin_store_preview_t candidates[4];
     if (!parse_preview_metadata(preview, &candidates[0])) return false;
 
-    const cJSON * variants = field(preview, "variants");
+    const cJSON * variants = store_json_field(preview, "variants");
     int variant_count = 0;
     if (variants) {
         if (!cJSON_IsArray(variants)) return false;
@@ -320,19 +180,6 @@ static bool same_dest(const char * a, const char * b) {
     return strcasecmp(a, b) == 0;
 }
 
-/* Two destinations that cannot both exist: the same path, or one is a
- * folder the other lives in ("Data/a" and "Data/a/b"). */
-static bool dests_collide(const char * a, const char * b) {
-    size_t la = strlen(a), lb = strlen(b);
-    if (la == lb) {
-        return strcasecmp(a, b) == 0;
-    }
-    const char * shorter = la < lb ? a : b;
-    const char * longer = la < lb ? b : a;
-    size_t n = la < lb ? la : lb;
-    return strncasecmp(shorter, longer, n) == 0 && longer[n] == '/';
-}
-
 /* The plugin script: a .lua file directly in .plugins. Case-insensitive,
  * since the card is FAT: ".PLUGINS/x.lua" lands in the same folder. */
 static bool script_dest(const char * dest) {
@@ -362,10 +209,10 @@ bool plugin_store_parse_index(const char * json, size_t length, plugin_store_plu
     cJSON * root = cJSON_ParseWithLength(json, length);
     plugin_store_plugin_t * parsed = NULL;
     uint32_t schema;
-    const char * tag = string_field(root, "tag");
-    const cJSON * plugins = field(root, "plugins");
-    if (!cJSON_IsObject(root) || !integer_field(root, "schema", 1, 1, &schema) ||
-        !tag || !regex_token(tag, 63, true) || !cJSON_IsArray(plugins) ||
+    const char * tag = store_json_string(root, "tag");
+    const cJSON * plugins = store_json_field(root, "plugins");
+    if (!cJSON_IsObject(root) || !store_json_uint(root, "schema", 1, 1, &schema) ||
+        !tag || !store_token_valid(tag, 63, true) || !cJSON_IsArray(plugins) ||
         cJSON_GetArraySize(plugins) > PLUGIN_STORE_MAX_PLUGINS) {
         goto fail;
     }
@@ -380,16 +227,16 @@ bool plugin_store_parse_index(const char * json, size_t length, plugin_store_plu
         plugin_store_plugin_t * d = &parsed[i];
         memset(d, 0, sizeof(*d));
 
-        const char * id = string_field(p, "id");
-        const char * name = string_field(p, "name");
-        const char * ver = string_field(p, "version");
-        const char * desc = string_field(p, "description");
-        const char * cat = string_field(p, "category");
-        const char * author = string_field(p, "author");
-        if (!cJSON_IsObject(p) || !regex_id(id) || !safe_text(name,64,false) || !version_valid(ver) ||
-            !safe_text(desc,400,true) || !safe_text(cat,32,true) || !safe_text(author,64,true) ||
-            !integer_field(p, "api_min", 1, UINT32_MAX, &d->api_min) ||
-            !integer_field(p, "size", 0, UINT32_MAX, &d->size)) {
+        const char * id = store_json_string(p, "id");
+        const char * name = store_json_string(p, "name");
+        const char * ver = store_json_string(p, "version");
+        const char * desc = store_json_string(p, "description");
+        const char * cat = store_json_string(p, "category");
+        const char * author = store_json_string(p, "author");
+        if (!cJSON_IsObject(p) || !regex_id(id) || !store_safe_text(name,64,false) || !store_version_valid(ver) ||
+            !store_safe_text(desc,400,true) || !store_safe_text(cat,32,true) || !store_safe_text(author,64,true) ||
+            !store_json_uint(p, "api_min", 1, UINT32_MAX, &d->api_min) ||
+            !store_json_uint(p, "size", 0, UINT32_MAX, &d->size)) {
             goto fail;
         }
         snprintf(d->id, sizeof(d->id), "%s", id);
@@ -399,12 +246,12 @@ bool plugin_store_parse_index(const char * json, size_t length, plugin_store_plu
         snprintf(d->category, sizeof(d->category), "%s", cat);
         snprintf(d->author, sizeof(d->author), "%s", author);
 
-        const cJSON * preview = field(p, "preview");
+        const cJSON * preview = store_json_field(p, "preview");
         if (preview && !parse_plugin_preview(preview, &d->preview)) {
             goto fail;
         }
 
-        const cJSON * files = field(p, "files");
+        const cJSON * files = store_json_field(p, "files");
         int file_count = cJSON_GetArraySize(files);
         if (!cJSON_IsArray(files) || file_count < 1 || file_count > PLUGIN_STORE_MAX_FILES) {
             goto fail;
@@ -415,14 +262,14 @@ bool plugin_store_parse_index(const char * json, size_t length, plugin_store_plu
         for (int j = 0; j < file_count; j++) {
             const cJSON * f = cJSON_GetArrayItem(files, j);
             plugin_store_file_t * df = &d->files[j];
-            const char * asset = string_field(f, "asset");
-            const char * dest = string_field(f, "dest");
-            const char * sha = string_field(f, "sha256");
+            const char * asset = store_json_string(f, "asset");
+            const char * dest = store_json_string(f, "dest");
+            const char * sha = store_json_string(f, "sha256");
             uint32_t size;
-            const cJSON * keep = field(f, "keep");
-            if (!cJSON_IsObject(f) || !regex_token(asset, 127, true) ||
-                !plugin_store_dest_valid(dest) || !sha_valid(sha) ||
-                !integer_field(f, "size", 1, STORE_FILE_LIMIT, &size) ||
+            const cJSON * keep = store_json_field(f, "keep");
+            if (!cJSON_IsObject(f) || !store_token_valid(asset, 127, true) ||
+                !plugin_store_dest_valid(dest) || !store_sha_valid(sha) ||
+                !store_json_uint(f, "size", 1, STORE_FILE_LIMIT, &size) ||
                 (keep && !cJSON_IsBool(keep))) {
                 goto fail;
             }
@@ -440,13 +287,13 @@ bool plugin_store_parse_index(const char * json, size_t length, plugin_store_plu
                 has_script = true;
             }
             for (int k = 0; k < j; k++) {
-                if (dests_collide(df->dest, d->files[k].dest)) {
+                if (store_dests_collide(df->dest, d->files[k].dest)) {
                     goto fail;
                 }
             }
             for (int a = 0; a < i; a++) {
                 for (int b = 0; b < parsed[a].file_count; b++) {
-                    if (dests_collide(df->dest, parsed[a].files[b].dest)) {
+                    if (store_dests_collide(df->dest, parsed[a].files[b].dest)) {
                         goto fail;
                     }
                 }
@@ -660,39 +507,6 @@ static bool parent_dirs_safe(const char * root, const char * dest, bool create) 
     return true;
 }
 
-static bool hash_file(const char * path, uint64_t * size, char hex[65]) {
-    FILE * f = fopen(path, "rb");
-    if (!f) {
-        return false;
-    }
-    mbedtls_sha256_context c;
-    mbedtls_sha256_init(&c);
-    bool ok = mbedtls_sha256_starts(&c, 0) == 0;
-    uint8_t buf[8192], dig[32];
-    uint64_t total = 0;
-    size_t n;
-    while (ok && (n = fread(buf, 1, sizeof(buf), f)) > 0) {
-        ok = mbedtls_sha256_update(&c, buf, n) == 0;
-        total += n;
-    }
-    if (ferror(f)) {
-        ok = false;
-    }
-    fclose(f);
-    if (ok) {
-        ok = mbedtls_sha256_finish(&c, dig) == 0;
-    }
-    mbedtls_sha256_free(&c);
-    if (!ok) {
-        return false;
-    }
-    for (int i = 0; i < 32; i++) {
-        snprintf(hex + i * 2, 3, "%02x", dig[i]);
-    }
-    *size = total;
-    return true;
-}
-
 /* A file belongs to plugin owner only when the record lists it under that
  * plugin with the same hash. Another plugin's file is a conflict: replacing
  * it needs confirmation, and the record then moves it to owner. */
@@ -812,7 +626,7 @@ size_t plugin_store_record_read(const char * root, plugin_store_plugin_t * plugi
             char id[64], ver[32], extra;
             if ((count && plugins[count - 1].file_count == 0) ||
                 sscanf(line, "P %63s %31s %c", id, ver, &extra) != 2 ||
-                !regex_id(id) || !version_valid(ver) || count >= cap) {
+                !regex_id(id) || !store_version_valid(ver) || count >= cap) {
                 valid = false;
                 break;
             }
@@ -848,7 +662,7 @@ size_t plugin_store_record_read(const char * root, plugin_store_plugin_t * plugi
             errno = 0;
             long keep_value = strtol(tab2, &end, 10);
             int keep = (int) keep_value;
-            if (!plugin_store_dest_valid(dest) || !sha_valid(tab) || errno || end == tab2 ||
+            if (!plugin_store_dest_valid(dest) || !store_sha_valid(tab) || errno || end == tab2 ||
                 *end != '\0' || (keep != 0 && keep != 1) ||
                 plugins[count - 1].file_count >= PLUGIN_STORE_MAX_FILES) {
                 valid = false;
@@ -1020,7 +834,7 @@ static bool plugin_store_commit_local_internal(const char * root, const char * s
             existed[i] = true;
             char sha[65];
             uint64_t sz;
-            if (!S_ISREG(st.st_mode) || !hash_file(dests[i], &sz, sha)) {
+            if (!S_ISREG(st.st_mode) || !store_hash_file(dests[i], &sz, sha)) {
                 goto fail;
             }
             if (!tracked_same(f->dest, sha, p->id, rec, vers, rn) && !force) {
@@ -1032,7 +846,7 @@ static bool plugin_store_commit_local_internal(const char * root, const char * s
         char part[PATH_MAX], sha[65];
         uint64_t size;
         snprintf(part, sizeof(part), "%s/%zu.part", stage, i);
-        if (!hash_file(part, &size, sha) || size != f->size || strcmp(sha, f->sha256) != 0) {
+        if (!store_hash_file(part, &size, sha) || size != f->size || strcmp(sha, f->sha256) != 0) {
             goto fail;
         }
     }
@@ -1099,7 +913,7 @@ static bool plugin_store_commit_local_internal(const char * root, const char * s
                 storage_path_writable(root, NULL, 0) &&
                 (!commit_card || card_still(commit_card)) &&
                 lstat(old_path, &old_stat) == 0 && S_ISREG(old_stat.st_mode) &&
-                hash_file(old_path, &old_size, old_sha) &&
+                store_hash_file(old_path, &old_size, old_sha) &&
                 strcmp(old_sha, old_file->sha256) == 0) {
                 unlink(old_path);
             }
@@ -1198,19 +1012,6 @@ static void finish(plugin_store_state_t state, const char * error, bool changed)
     pthread_mutex_unlock(&store_mutex);
 }
 
-static const char * http_error(const char * e) {
-    if (e && strcmp(e, HTTP_ERR_TLS) == 0) {
-        return TR("Secure connection failed. Check Wi-Fi and the date and time.");
-    }
-    if (e && (strcmp(e, HTTP_ERR_DNS) == 0 || strcmp(e, HTTP_ERR_CONNECT) == 0 ||
-              strcmp(e, HTTP_ERR_CONNECT_TIMEOUT) == 0)) {
-        return TR("Cannot reach GitHub. Check the Wi-Fi connection.");
-    }
-    if (e && strcmp(e, HTTP_ERR_TIMEOUT) == 0) {
-        return TR("GitHub did not respond in time. Try again.");
-    }
-    return TR("Could not read the plugin list from GitHub.");
-}
 /* Build the compact UI rows from the current index and installed record. */
 static bool plugin_contains_theme_pack(const plugin_store_plugin_t * plugin) {
     for (int f = 0; f < plugin->file_count; f++) {
@@ -1453,7 +1254,7 @@ static bool conflict_exists(const char * root, const plugin_store_plugin_t * p,
         if (lstat(path, &st) == 0) {
             char sha[65];
             uint64_t size;
-            if (!S_ISREG(st.st_mode) || !hash_file(path, &size, sha) ||
+            if (!S_ISREG(st.st_mode) || !store_hash_file(path, &size, sha) ||
                 !tracked_same(f->dest, sha, p->id, rec, vers, rn)) {
                 return true;
             }
@@ -1517,18 +1318,10 @@ static bool download_plugin_files(const plugin_store_plugin_t * p, const char * 
         if (!make_asset_url(url, sizeof(url), tag, f->asset)) {
             return false;
         }
-        int status = 0;
-        if (!http_get_to_file_redirects(url, true, dest, STORE_FILE_LIMIT, download_progress,
-                                        guard, STORE_TIMEOUT_CONNECT, STORE_TIMEOUT_READ, NULL, 5,
-                                        &status)) {
+        if (!store_download_verified(url, dest, f->size, f->sha256, STORE_FILE_LIMIT, download_progress, guard)) {
             return false;
         }
-        char sha[65];
-        uint64_t size;
-        if (!hash_file(dest, &size, sha) || size != f->size || strcmp(sha, f->sha256) != 0) {
-            return false;
-        }
-        *bytes += size;
+        *bytes += f->size;
     }
     return true;
 }
@@ -1619,7 +1412,7 @@ static bool preview_cache_open(void) {
             if ((len == 68 && (strcmp(ent->d_name + 64, ".jpg") == 0 ||
                                strcmp(ent->d_name + 64, ".bin") == 0))) {
                 char sha[65]; memcpy(sha, ent->d_name, 64); sha[64] = 0;
-                if (!sha_valid(sha)) continue;
+                if (!store_sha_valid(sha)) continue;
                 pthread_mutex_lock(&store_mutex);
                 for (int i = 0; i < STORE_PREVIEW_COUNT; i++)
                     if (strcmp(preview_cache[i].sha, sha) == 0) { keep = true; break; }
@@ -1682,7 +1475,7 @@ static bool preview_jpeg_valid(const char * path, const plugin_store_preview_t *
 
 static bool preview_file_verified(const char * path, const plugin_store_preview_t * meta) {
     char sha[65]; uint64_t bytes;
-    return preview_jpeg_valid(path, meta) && hash_file(path, &bytes, sha) &&
+    return preview_jpeg_valid(path, meta) && store_hash_file(path, &bytes, sha) &&
            bytes == meta->size && strcmp(sha, meta->sha256) == 0;
 }
 
@@ -1929,27 +1722,11 @@ uint64_t plugin_store_preview_generation(void) {
 
 static void * refresh_worker(void * unused) {
     (void) unused;
-    http_request_t req;
-    memset(&req, 0, sizeof(req));
-    snprintf(req.url, sizeof(req.url), "%s", PLUGIN_STORE_INDEX_URL);
-    req.method = HTTP_METHOD_GET;
-    req.verify_tls = true;
-    req.connect_timeout_ms = STORE_TIMEOUT_CONNECT;
-    req.read_timeout_ms = STORE_TIMEOUT_READ;
-    req.total_timeout_ms = 45000;
-    req.max_response_bytes = STORE_INDEX_LIMIT;
-    req.redirect_limit = 5;
     http_response_t response;
-    bool ok = http_request_ex(&req, NULL, &response);
-    if (!ok || !response.body) {
-        const char * msg = http_error(ok ? NULL : response.error);
-        http_response_free(&response);
-        finish(PLUGIN_STORE_FAILED, msg, false);
-        return NULL;
-    }
-    if (response.status != 200) {
-        http_response_free(&response);
-        finish(PLUGIN_STORE_FAILED, TR("Could not read the plugin list from GitHub."), false);
+    const char * fetch_error;
+    if (!store_fetch_index(PLUGIN_STORE_INDEX_URL, STORE_INDEX_LIMIT,
+                           TR("Could not read the plugin list from GitHub."), &response, &fetch_error)) {
+        finish(PLUGIN_STORE_FAILED, fetch_error, false);
         return NULL;
     }
     plugin_store_plugin_t * parsed = NULL;
@@ -2608,7 +2385,7 @@ void plugin_store_get_status(plugin_store_status_t * out, plugin_store_result_t 
 static bool layout_stem_valid(const char * stem) {
     if (!stem || !stem[0] || strlen(stem) >= 64) return false;
     for (const unsigned char * p = (const unsigned char *) stem; *p; ++p)
-        if (!ascii_alnum((char)*p) && *p != '_' && *p != '.' && *p != '-') return false;
+        if (!store_ascii_alnum((char)*p) && *p != '_' && *p != '.' && *p != '-') return false;
     return true;
 }
 
@@ -2625,10 +2402,10 @@ static bool layout_filename_is_primary(const char * name) {
         const char * p = underscore + 1;
         const char * end = stem + stem_len;
         const char * x = p;
-        while (x < end && ascii_digit(*x)) ++x;
+        while (x < end && store_ascii_digit(*x)) ++x;
         if (x > p && x < end && *x == 'x') {
             const char * h = x + 1;
-            while (h < end && ascii_digit(*h)) ++h;
+            while (h < end && store_ascii_digit(*h)) ++h;
             if (h == end && h > x + 1) return false;
         }
     }
@@ -2715,7 +2492,7 @@ bool plugin_store_get_player_layout_id(const char * plugin_id, char * out, size_
             if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || !realpath(path, file_real)) continue;
             size_t root_len = strlen(root_real);
             if (strncmp(file_real, root_real, root_len) != 0 || file_real[root_len] != '/') continue;
-            if (!hash_file(path, &bytes, sha) || bytes != file->size || strcmp(sha, file->sha256) != 0) continue;
+            if (!store_hash_file(path, &bytes, sha) || bytes != file->size || strcmp(sha, file->sha256) != 0) continue;
             if (snprintf(out, size, "%s", layout_id) >= (int) size) { out[0] = '\0'; break; }
             valid = true;
             break;

@@ -99,6 +99,12 @@ extern player_settings_t current_settings;
 #define PLUGIN_ASYNC_HTTP_MAX_RESPONSE (2U * 1024U * 1024U)
 #define PLUGIN_ASYNC_HTTP_MAX_REQUEST (1024U * 1024U)
 
+// How many album cover requests to queue, before rejecting
+#define PLUGIN_ALBUM_COVER_QUEUE 32
+/* Lookups answered per player tick. Each one is a database query plus a
+ * cache-file check on the UI thread, so a full queue is spread over ticks. */
+#define PLUGIN_ALBUM_COVER_PER_TICK 4
+
 typedef struct {
     lua_State * L;
     int open_ref; /* LUA_REGISTRYINDEX ref to the on_open function */
@@ -261,6 +267,7 @@ typedef enum {
     PLUGIN_LIST_TARGET_POWER,
     PLUGIN_LIST_TARGET_SYSTEM,
     PLUGIN_LIST_TARGET_PLAYER,
+    PLUGIN_LIST_TARGET_MORE,
     PLUGIN_LIST_TARGET_COUNT
 } plugin_list_target_t;
 
@@ -282,6 +289,7 @@ static const plugin_list_target_desc_t plugin_list_targets[PLUGIN_LIST_TARGET_CO
     [PLUGIN_LIST_TARGET_POWER] = { "power", "power list item", PLUGIN_MAX_POWER_LIST_ITEMS },
     [PLUGIN_LIST_TARGET_SYSTEM] = { "system", "system list item", PLUGIN_MAX_SYSTEM_LIST_ITEMS },
     [PLUGIN_LIST_TARGET_PLAYER] = { "player", "player menu item", PLUGIN_MAX_PLAYER_LIST_ITEMS },
+    [PLUGIN_LIST_TARGET_MORE] = { "more", "more list item", PLUGIN_MAX_MORE_LIST_ITEMS },
 };
 
 /* Keep physical registry storage at least as large as every per-list limit.
@@ -299,6 +307,7 @@ _Static_assert(PLUGIN_MAX_MUSIC_LIBRARY_LIST_ITEMS <= PLUGIN_LIST_REGISTRY_CAPAC
 _Static_assert(PLUGIN_MAX_POWER_LIST_ITEMS <= PLUGIN_LIST_REGISTRY_CAPACITY, "power registry capacity");
 _Static_assert(PLUGIN_MAX_SYSTEM_LIST_ITEMS <= PLUGIN_LIST_REGISTRY_CAPACITY, "system registry capacity");
 _Static_assert(PLUGIN_MAX_PLAYER_LIST_ITEMS <= PLUGIN_LIST_REGISTRY_CAPACITY, "player registry capacity");
+_Static_assert(PLUGIN_MAX_MORE_LIST_ITEMS <= PLUGIN_LIST_REGISTRY_CAPACITY, "more registry capacity");
 static plugin_list_item_t plugin_list_items[PLUGIN_LIST_TARGET_COUNT][PLUGIN_LIST_REGISTRY_CAPACITY];
 static int plugin_list_item_counts[PLUGIN_LIST_TARGET_COUNT];
 static uint32_t plugin_list_registry_generation = 1;
@@ -1871,9 +1880,20 @@ static int l_plugin_mkdir(lua_State * L) {
     return 1;
 }
 
+/* Optional { open_player = false } table at stack index `idx`: start
+ * playback without opening Now Playing (capability playback.stay_on_screen). */
+static bool play_opens_player(lua_State * L, int idx) {
+    if (lua_isnoneornil(L, idx)) return true;
+    luaL_checktype(L, idx, LUA_TTABLE);
+    lua_getfield(L, idx, "open_player");
+    bool open = lua_isnil(L, -1) || lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    return open;
+}
+
 static int l_plugin_play_file(lua_State * L) {
     const char * path = check_plugin_external_path(L, 1, "plugin.play_file");
-    gui_plugin_play_paths(&path, 1, 0);
+    gui_plugin_play_paths(&path, 1, 0, play_opens_player(L, 2));
     return 0;
 }
 
@@ -1901,7 +1921,7 @@ static int l_plugin_play_list(lua_State * L) {
         lua_pop(L, 1);
     }
 
-    gui_plugin_play_paths(paths, n, start);
+    gui_plugin_play_paths(paths, n, start, play_opens_player(L, 3));
     return 0;
 }
 
@@ -4831,6 +4851,96 @@ static int l_plugin_library_get_albums(lua_State * L) {
     return 1;
 }
 
+typedef struct {
+    lua_State * L;
+    int callback_ref;
+    int64_t song_id;
+    int size_px;
+} plugin_album_cover_req_t;
+
+static plugin_album_cover_req_t plugin_album_cover_queue[PLUGIN_ALBUM_COVER_QUEUE];
+
+static void plugin_album_cover_drop(plugin_album_cover_req_t * req, bool unref) {
+    if (unref) luaL_unref(req->L, LUA_REGISTRYINDEX, req->callback_ref);
+    req->L = NULL;
+    req->callback_ref = LUA_NOREF;
+}
+
+static void plugin_album_cover_drop_owner(lua_State * owner, bool aborted) {
+    for (int i = 0; i < PLUGIN_ALBUM_COVER_QUEUE; i++) {
+        plugin_album_cover_req_t * req = &plugin_album_cover_queue[i];
+        if (req->L && req->L == owner) plugin_album_cover_drop(req, !aborted);
+    }
+}
+
+static void plugin_album_cover_cancel_all(void) {
+    for (int i = 0; i < PLUGIN_ALBUM_COVER_QUEUE; i++) {
+        plugin_album_cover_req_t * req = &plugin_album_cover_queue[i];
+        if (!req->L) continue;
+        plugin_instance_t * inst = plugin_instance_for_state(req->L);
+        plugin_album_cover_drop(req, !(inst && inst->aborted));
+    }
+}
+
+static void plugin_album_cover_poll(void) {
+    /* Rotates the starting slot so later requests are not starved. */
+    static int next_slot;
+    int answered = 0;
+    for (int n = 0; n < PLUGIN_ALBUM_COVER_QUEUE && answered < PLUGIN_ALBUM_COVER_PER_TICK; n++) {
+        int i = (next_slot + n) % PLUGIN_ALBUM_COVER_QUEUE;
+        plugin_album_cover_req_t * req = &plugin_album_cover_queue[i];
+        if (!req->L) continue;
+        answered++;
+        next_slot = (i + 1) % PLUGIN_ALBUM_COVER_QUEUE;
+        lua_State * L = req->L;
+        int ref = req->callback_ref;
+        int64_t song_id = req->song_id;
+        int size_px = req->size_px;
+        req->L = NULL;
+        req->callback_ref = LUA_NOREF;
+        plugin_instance_t * inst = plugin_instance_for_state(L);
+        if (inst && inst->aborted) continue;
+        char path[PATH_MAX];
+        bool found = gui_plugin_library_album_cover(song_id, size_px, path, sizeof(path));
+        lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+        if (found) {
+            lua_pushstring(L, path);
+            lua_pushnil(L);
+        } else {
+            lua_pushnil(L);
+            lua_pushstring(L, "not_generated");
+        }
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        if (plugin_call(L, 2, 0, 0) != LUA_OK) {
+            const char * err = lua_tostring(L, -1);
+            fprintf(stderr, "[plugins] library_album_cover_async callback error: %s\n", err ? err : "unknown error");
+            lua_pop(L, 1);
+        }
+    }
+}
+
+static int l_plugin_library_album_cover_async(lua_State * L) {
+    int64_t song_id = (int64_t) luaL_checkinteger(L, 1);
+    int size_px = (int) luaL_checkinteger(L, 2);
+    luaL_checktype(L, 3, LUA_TFUNCTION);
+    if (size_px != ALBUMART_THUMBNAIL_SIZE && size_px != ALBUMART_PLAYER_CACHE_SIZE)
+        return luaL_error(L, "plugin.library_album_cover_async: size must be %d or %d",
+                          ALBUMART_THUMBNAIL_SIZE, ALBUMART_PLAYER_CACHE_SIZE);
+    plugin_album_cover_req_t * slot = NULL;
+    for (int i = 0; i < PLUGIN_ALBUM_COVER_QUEUE && !slot; i++)
+        if (!plugin_album_cover_queue[i].L) slot = &plugin_album_cover_queue[i];
+    if (!slot) {
+        return push_plugin_error(L, "busy");
+    }
+    lua_pushvalue(L, 3);
+    slot->callback_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    slot->L = plugin_main_state(L);
+    slot->song_id = song_id;
+    slot->size_px = size_px;
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 /* plugin.refresh_library() -- triggers the same background rescan as
  * Settings > Update Music Database, so a plugin that wrote new files under
  * plugin.sd_root() can make them show up in library_*() without the user
@@ -5242,7 +5352,7 @@ static const char * const plugin_capabilities[] = {
     "ui.music_layout", "ui.quick_drawer_layout",
     "ui.progress", "network.http.download_progress", "ui.list", "ui.settings", "ui.row_width", "ui.text_input", "ui.toast", "ui.screenshot", "ui.theme",
     "filesystem.sd", "playback.control", "playback.state", "playback.events",
-    "library.artist_albums", "library.paged", "network.http.sync", "network.http.async",
+    "library.artist_albums", "library.paged", "library.album_cover", "network.http.sync", "network.http.async",
     "network.http.download", "filesystem.mkdir", "crypto.md5", "audio.peq", "data.json",
     "storage.namespaced", "storage.secrets", "playback.remote", "filesystem.playlists", "library.refresh",
     "ui.home_layout", "ui.theme_refresh", "ui.reload", "ui.home_tiles", "ui.launcher_layout",
@@ -5253,8 +5363,8 @@ static const char * const plugin_capabilities[] = {
     "playback.format", "playback.output_info", "playback.silent_volume", "audio.peq.transient",
     "playback.output_events", "playback.settings", "playback.ab_loop", "playback.ab_switch", "playback.http_seek",
     "audio.peq.state", "library.track_metadata", "playback.transient_volume",
-    "filesystem.file_ops", "ui.file_manager", "ui.player_menu", "ui.file_picker",
-    "ui.startup_image", "audio.mseb.stock"
+    "filesystem.file_ops", "ui.file_manager", "ui.player_menu", "ui.more_menu", "ui.file_picker",
+    "ui.startup_image", "audio.mseb.stock", "playback.stay_on_screen"
 };
 
 static int l_plugin_has_capability(lua_State * L) {
@@ -6266,6 +6376,7 @@ static const luaL_Reg plugin_funcs[] = {
     { "library_get_song",          l_plugin_library_get_song },
     { "library_get_artists",       l_plugin_library_get_artists },
     { "library_get_albums",        l_plugin_library_get_albums },
+    { "library_album_cover_async", l_plugin_library_album_cover_async },
     { "refresh_library",           l_plugin_refresh_library },
     { "on",                        l_plugin_on },
     { "set_interval",              l_plugin_set_interval },
@@ -6747,6 +6858,7 @@ static void discard_failed_plugin_resources(lua_State * L, bool aborted) {
     }
     if (plugin_zip_image.active && failed_load_owner_matches(plugin_zip_image.L, L, aborted))
         plugin_zip_image_cancel();
+    plugin_album_cover_drop_owner(L, aborted);
     if (failed_load_owner_matches(plugin_file_op.L, L, aborted)) plugin_file_op_release();
     if (failed_load_owner_matches(plugin_file_picker.L, L, aborted)) plugin_file_picker_release(true);
 }
@@ -7213,6 +7325,7 @@ void plugin_manager_deinit(void) {
     deinit_diag("plugin_manager_deinit: cancel_all_async_http before");
     plugin_manager_cancel_all_async_http();
     plugin_zip_image_cancel();
+    plugin_album_cover_cancel_all();
     plugin_file_op_release();
     plugin_file_picker_release(true);
     deinit_diag("plugin_manager_deinit: cancel_all_async_http after");
@@ -7271,6 +7384,7 @@ void plugin_manager_deinit(void) {
 void plugin_manager_poll(void) {
     plugin_output_poll();
     plugin_zip_image_poll();
+    plugin_album_cover_poll();
     plugin_file_op_poll();
     for (int i = 0; i < PLUGIN_MAX_ASYNC_HTTP; i++) {
         plugin_async_http_t * req = &plugin_async_http[i];
@@ -7471,6 +7585,11 @@ int plugin_manager_get_system_list_item_count(void) { return generic_list_item_c
 const char * plugin_manager_get_system_list_item_label(int index) { return generic_list_item_label(PLUGIN_LIST_TARGET_SYSTEM, index); }
 void plugin_manager_system_list_item_clicked(int index) { generic_list_item_clicked(PLUGIN_LIST_TARGET_SYSTEM, index); }
 void plugin_manager_get_system_list_item_options(int index, const char ** out_icon, int32_t * out_height, int32_t * out_width, const char ** out_text_size) { generic_list_item_options(PLUGIN_LIST_TARGET_SYSTEM, index, out_icon, out_height, out_width, out_text_size); }
+
+int plugin_manager_get_more_list_item_count(void) { return generic_list_item_count(PLUGIN_LIST_TARGET_MORE); }
+const char * plugin_manager_get_more_list_item_label(int index) { return generic_list_item_label(PLUGIN_LIST_TARGET_MORE, index); }
+void plugin_manager_more_list_item_clicked(int index) { generic_list_item_clicked(PLUGIN_LIST_TARGET_MORE, index); }
+void plugin_manager_get_more_list_item_options(int index, const char ** out_icon, int32_t * out_height, int32_t * out_width, const char ** out_text_size) { generic_list_item_options(PLUGIN_LIST_TARGET_MORE, index, out_icon, out_height, out_width, out_text_size); }
 
 int plugin_manager_get_player_list_item_count(void) { return generic_list_item_count(PLUGIN_LIST_TARGET_PLAYER); }
 const char * plugin_manager_get_player_list_item_label(int index) { return generic_list_item_label(PLUGIN_LIST_TARGET_PLAYER, index); }
