@@ -42,6 +42,8 @@ grep -q 'keep_remote_volume' "$run/src/src/bluealsa-dbus.c" ||
     { echo 'BlueALSA sink soft-volume patch not applied' >&2; exit 1; }
 grep -q 'Preferring SBC Dual Channel HD' "$run/src/src/a2dp-sbc.c" ||
     { echo 'BlueALSA SBC XQ capability patch not applied' >&2; exit 1; }
+grep -q 'a2dp_ssc_source' "$run/src/src/a2dp.c" ||
+    { echo 'BlueALSA SSC patch not applied' >&2; exit 1; }
 for stage in "${stages[@]}"; do cp -a "$stage/usr/." "$sysroot/usr/"; done
 # Libtool .la metadata from staged libraries can cause it to embed the
 # workstation sysroot as an RPATH. pkg-config supplies the required linkage;
@@ -58,7 +60,7 @@ export LDFLAGS="-EL -mips32r2 -mabi=32 -mhard-float -mfp32 -L$sysroot/usr/lib -W
 export PKG_CONFIG_LIBDIR="$sysroot/usr/lib/pkgconfig:$sysroot/usr/share/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR="$sysroot"
 unset PKG_CONFIG_PATH
-for package in alsa bluez dbus-1 gio-unix-2.0 glib-2.0 sbc fdk-aac ldacBT-enc ldacBT-abr ldacBT-dec; do
+for package in alsa bluez dbus-1 gio-unix-2.0 glib-2.0 sbc fdk-aac ldacBT-enc ldacBT-abr ldacBT-dec ssc; do
     pkg-config --modversion "$package"
 done
 aptx_option=--with-libopenaptx
@@ -70,7 +72,7 @@ if pkg-config --exists libfreeaptx; then aptx_option=--with-libfreeaptx; fi
         --sysconfdir=/etc --localstatedir=/var --disable-static --disable-manpages \
         --with-alsaplugindir=/usr/lib/alsa-lib --with-alsaconfdir=/etc/alsa/conf.d \
         --with-dbusconfdir=/etc/dbus-1/system.d --with-dbus-iface-xml=/usr/share/dbus-1/interfaces \
-        --enable-aac --enable-aptx --enable-aptx-hd "$aptx_option" --enable-ldac
+        --enable-aac --enable-aptx --enable-aptx-hd "$aptx_option" --enable-ldac --enable-ssc
     # A successful encoder-only configuration is not sufficient for R1 DAC mode.
     grep -q '^#define HAVE_LDAC_DECODE 1' config.h
     make -j"${JOBS:-4}"

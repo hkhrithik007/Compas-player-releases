@@ -151,6 +151,7 @@ copy_notice zlib "$(dirname "$(readlink -f "$zlib")")/src/zlib-1.3.2/LICENSE"
 copy_notice expat "$BASE_DIR/expat/src/expat-2.8.4/COPYING"
 copy_notice fdk-aac "$BASE_DIR/fdk-aac/NOTICE"
 copy_notice libopenaptx "$BASE_DIR/libopenaptx/COPYING"
+copy_notice libssc "$REPO_ROOT/third_party/libssc/README.md"
 
 # Preserve exact vendor script bodies except for the executable daemon name.
 # This keeps UART setup, firmware loading, and vendor helper invocation intact.

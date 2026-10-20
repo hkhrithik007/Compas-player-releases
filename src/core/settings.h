@@ -182,7 +182,7 @@ typedef struct {
      * from. Leaving the overlay already clears it, so a stored "true" only
      * ever came from powering off while the overlay was open. */
     bool bt_dac_mode_enabled;
-    char bt_codec[16];           /* "auto"/"ldac_hq"/"ldac_sq"/"aptx"/"aac"/"sbc"/"sbc_xq" */
+    char bt_codec[16];           /* "auto"/"ldac_hq"/"ldac_sq"/"ssc"/"aptx"/"aac"/"sbc"/"sbc_xq" */
     /* Resample Bluetooth output with the speex converter instead of
      * alsa-lib's built-in linear one. A track whose rate differs from the
      * A2DP transport's has to be converted either way, and speex measured

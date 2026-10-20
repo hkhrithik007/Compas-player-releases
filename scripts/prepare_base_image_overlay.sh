@@ -26,7 +26,7 @@ copy_libraries "$base/dbus/stage" libdbus-1
 copy_libraries "$base/glib/stage" libglib-2.0 libgobject-2.0 libgio-2.0 libgmodule-2.0 libgthread-2.0 libffi libpcre2-8
 "$repo/scripts/prepare_sys_server_mpris_overlay.sh" "$stock" "$overlay"
 "$repo/scripts/prepare_bt_cover_art_overlay.sh" "$base/bluez/stage" "$stock" "$overlay"
-copy_libraries "$base/codecs/stage" libfdk-aac libopenaptx libldacdec
+copy_libraries "$base/codecs/stage" libfdk-aac libopenaptx libldacdec libssc
 for binary in bluealsad bluealsactl bluealsa-aplay; do
     cp "$base/bluealsa/stage/usr/bin/$binary" "$overlay/usr/bin/"
 done
@@ -83,6 +83,7 @@ bluez_src="$(dirname "$(readlink -f "$base/bluez-library/stage")")/bluez-5.87"
 copy_notice bluez "$bluez_src/COPYING" "$bluez_src/COPYING.LIB"
 copy_notice fdk-aac "$base/fdk-aac/NOTICE"
 copy_notice libopenaptx "$base/libopenaptx/COPYING"
+copy_notice libssc "$repo/third_party/libssc/README.md"
 # Upstream publishes no license file; ship its README and our patch with it.
 copy_notice libldacdec "$base/libldacdec-anonymix007/README.md" \
     "$repo/scripts/base_image/libldacdec-hiby.patch"

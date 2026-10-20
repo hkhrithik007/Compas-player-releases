@@ -5364,7 +5364,8 @@ static const char * const plugin_capabilities[] = {
     "playback.output_events", "playback.settings", "playback.ab_loop", "playback.ab_switch", "playback.http_seek",
     "audio.peq.state", "library.track_metadata", "playback.transient_volume",
     "filesystem.file_ops", "ui.file_manager", "ui.player_menu", "ui.more_menu", "ui.file_picker",
-    "ui.startup_image", "audio.mseb.stock", "playback.stay_on_screen"
+    "ui.startup_image", "audio.mseb.stock", "playback.stay_on_screen",
+    "ui.settings_list_10_sliders"
 };
 
 static int l_plugin_has_capability(lua_State * L) {
@@ -5394,8 +5395,9 @@ static int l_plugin_has_capability(lua_State * L) {
  *   not a stale one. It is NOT true of local file playback any more: local
  *   FLAC/WAV/ALAC/APE/AIFF sources above 16-bit now reach the DAC at
  *   PCM_FORMAT_S24_LE (audio_output.c's open_device()) when hw_params
- *   negotiation for it succeeds. The USB-DAC and Bluetooth aplay spawns are
- *   still unconditionally "-f S16_LE" with no exception, same as before.
+ *   negotiation for it succeeds. USB-DAC output can also use S24_LE, and
+ *   Bluetooth uses a stable S24_LE ALSA pipe; its negotiated codec may
+ *   still convert to a lower precision.
  * - max_channels is 2: nothing in this pipeline remaps or mixes channel
  *   counts; every path above passes `channels` straight through with no
  *   multichannel-aware code found anywhere in the codebase.

@@ -79,6 +79,7 @@ bool start_usb_mode_switch(usb_mode_t target);
 bool gui_network_adb_active(void);
 
 bool gui_network_has_background_work(void);
+bool gui_network_bt_user_operation_active(void);
 void gui_network_cancel_background_work(void);
 
 /* Called once Wi-Fi disable is authoritatively confirmed (gui_shell.c's

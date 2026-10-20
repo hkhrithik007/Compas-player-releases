@@ -156,12 +156,14 @@
 
 /* Upper bound on "slider"-type rows per call specifically -- separate from
  * PLUGIN_SETTINGS_LIST_MAX_ROWS because each slider row needs a real,
- * bounded slot in gui.c's swipe_dead_zones[] (see SWIPE_DEAD_ZONE_MAX's own
+ * bounded slot in gui_shell.c's swipe_dead_zones[] (see SWIPE_DEAD_ZONE_MAX's own
  * comment there): PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE pool slots x this
  * many sliders each is real, accounted-for headroom, not unbounded growth.
  * A slider row past this cap is silently dropped (not rendered at all),
- * same truncate-don't-error convention as the row cap above. */
-#define PLUGIN_SETTINGS_LIST_MAX_SLIDERS 4
+ * same truncate-don't-error convention as the row cap above. The additive
+ * ui.settings_list_10_sliders capability lets plugins retain a four-slider
+ * fallback on older builds. */
+#define PLUGIN_SETTINGS_LIST_MAX_SLIDERS 10
 
 /* One reusable plugin.show_order_editor() screen, bounded to the same size
  * as plugin settings lists. */

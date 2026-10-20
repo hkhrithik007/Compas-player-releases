@@ -51,6 +51,16 @@ is_our_wifi_wrapper() {
     }
 }
 
+is_known_wifi_up_compat_shim() {
+    local file=$1
+    # The R1 staging image retains a compatibility entry point even
+    # after its vendor implementation has been saved under /usr/libexec. It
+    # is safe to coexist only in this exact, behavior-free forwarding form.
+    [[ -f $file ]] && cmp -s "$file" <(printf '%s\n' \
+        '#!/bin/sh' \
+        'exec /usr/bin/wifi_up.sh "$@"')
+}
+
 # Validate all canonical scripts before preparing any destination changes.
 for rel in "${shared_paths[@]}"; do
     sh -n "$overlay/$rel"
@@ -76,7 +86,7 @@ if [[ -e $vendor ]]; then
         exit 1
     fi
     sh -n "$vendor" || { echo "Saved Wi-Fi vendor implementation is not valid shell: $vendor" >&2; exit 1; }
-    if [[ -e $wifi ]] && ! is_our_wifi_wrapper "$wifi"; then
+    if [[ -e $wifi ]] && ! is_our_wifi_wrapper "$wifi" && ! is_known_wifi_up_compat_shim "$wifi"; then
         echo "Unexpected /usr/bin/wifi_on.sh alongside saved vendor implementation" >&2
         exit 1
     fi

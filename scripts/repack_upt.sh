@@ -51,6 +51,80 @@ path.write_text(text)
 PY
 }
 
+# Production R1 packages must retain HiBy's closed cywdhd Wi-Fi stack. A
+# candidate built with the experimental brcmfmac backend is packaged separately
+# and must never pass through this general production repacker.
+require_closed_r1_wifi() {
+    local root=$1
+    python3 - "$root" <<'PY'
+import os, pathlib, re, sys
+
+root = pathlib.Path(sys.argv[1])
+module_driver = root / "module_driver"
+if module_driver.is_symlink() or not module_driver.is_dir():
+    raise SystemExit("Closed R1 Wi-Fi gate: /module_driver is missing or unsafe")
+
+def regular(rel, label):
+    path = root / rel
+    if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+        raise SystemExit(f"Closed R1 Wi-Fi gate: {label} is missing or not a regular non-empty file: /{rel}")
+    return path
+
+regular("module_driver/cywdhd.ko", "vendor cywdhd module")
+loader = regular("module_driver/cywdhd.sh", "vendor cywdhd loader")
+init = regular("module_driver/driver_default_init_script.sh", "vendor module startup script")
+
+def active_text(path):
+    # Ignore full-line shell comments so documentation cannot satisfy a load check.
+    return "\n".join(line for line in path.read_text(errors="replace").splitlines()
+                     if not re.match(r"^\s*#", line))
+
+loader_text = active_text(loader)
+init_text = active_text(init)
+if len(re.findall(r"(?:^|\s)insmod\s+cywdhd\.ko(?=\s|$)", loader_text)) != 1:
+    raise SystemExit("Closed R1 Wi-Fi gate: cywdhd.sh must load cywdhd.ko exactly once")
+if len(re.findall(r"(?:^|\s)sh\s+cywdhd\.sh(?=\s|$)", init_text)) != 1:
+    raise SystemExit("Closed R1 Wi-Fi gate: driver startup must invoke cywdhd.sh exactly once")
+if re.search(r"(?:^|\s)sh\s+bcm_wlbt_power\.sh(?=\s|$)", init_text):
+    raise SystemExit("Closed R1 Wi-Fi gate: driver startup invokes the experimental bcm_wlbt_power helper")
+
+for rel in (
+    "usr/bin/wifi_on.sh",
+    "usr/bin/wifi_off.sh",
+    "usr/bin/wifi_up.sh",
+    "usr/bin/wifi_down.sh",
+    "usr/bin/bt_init",
+    "usr/bin/bt_resume",
+    "usr/bin/bt_suspend",
+    "usr/bin/bt_enable_bsa.sh",
+):
+    path = root / rel
+    if path.is_file() or path.is_symlink():
+        target_is_compas_radio = path.is_symlink() and path.resolve().name == "compas-radio"
+        if target_is_compas_radio or (path.is_file() and re.search(
+            r"(?<![A-Za-z0-9_.-])compas-radio(?![A-Za-z0-9_.-])", active_text(path)
+        )):
+            raise SystemExit(f"Closed R1 Wi-Fi gate: active compas-radio reference is present: /{rel}")
+
+for rel in (
+    "usr/bin/compas-radio",
+    "usr/lib/compas-radio",
+    "usr/libexec/compas/radio-bt",
+    "usr/libexec/compas/wifi_on.brcmfmac.vendor.sh",
+    "usr/libexec/compas/wifi_off.brcmfmac.vendor.sh",
+):
+    path = root / rel
+    if path.exists() or path.is_symlink():
+        raise SystemExit(f"Closed R1 Wi-Fi gate: experimental radio helper is present: /{rel}")
+
+for parent, dirs, files in os.walk(root, followlinks=False):
+    for name in dirs + files:
+        if name in {"brcmfmac.ko", "brcmutil.ko", "bcm_wlbt_power.ko", "bcm_wlbt_power.sh"}:
+            path = pathlib.Path(parent) / name
+            raise SystemExit(f"Closed R1 Wi-Fi gate: experimental module/helper is present: /{path.relative_to(root)}")
+PY
+}
+
 # R3 Pro II: install the open gt9xx_touch.ko (five contacts) in place of the
 # OEM one, which drops multi-contact frames, and load it with
 # gtp_max_touch_number=5. Everything is pinned in
@@ -804,6 +878,10 @@ fi
 # Apply the same portable startup changes to every board after optional local
 # runtime overlays, so those overlays cannot restore an unstandardized wrapper.
 "$repo/scripts/standardize_boot_pipeline.sh" --board "$board" "$work/root"
+
+if [[ $board == r1 ]]; then
+    require_closed_r1_wifi "$work/root"
+fi
 
 # Touch policy for a base image that keeps its own driver tree. This is the
 # last writer of the touched files: both overlays are already in place, and an
