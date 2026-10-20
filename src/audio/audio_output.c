@@ -226,10 +226,13 @@ static bool open_device(unsigned int channels, unsigned int sample_rate, bool lo
         char bt_pcm[64];
         const char * bt_device = bt_control_prepare_playback_pcm(bt_pcm, sizeof(bt_pcm))
             ? bt_pcm : bt_control_get_playback_pcm();
-        if (!spawn_aplay(bt_device, channels, sample_rate, PCM_FORMAT_S16_LE, &bt_aplay_pid, &bt_aplay_fd)) return false;
+        /* A stable wide pipe avoids reopening BlueALSA at mixed-depth track
+         * boundaries; narrow writes are widened below before reaching it. */
+        enum pcm_format format = PCM_FORMAT_S24_LE;
+        if (!spawn_aplay(bt_device, channels, sample_rate, format, &bt_aplay_pid, &bt_aplay_fd)) return false;
         pthread_mutex_lock(&state_mutex);
         active_target = OUTPUT_TARGET_BT;
-        active_format = PCM_FORMAT_S16_LE;
+        active_format = format;
         pthread_mutex_unlock(&state_mutex);
     } else {
         /* A PCM stream must never start with the DAC still in DoP mode; a
@@ -429,11 +432,11 @@ static bool ensure_output(unsigned int channels, unsigned int sample_rate, bool 
 
     bool device_open = (alsa_pcm != NULL || bt_aplay_pid >= 0 || usb_aplay_pid >= 0);
     if (device_open && active_target != target) device_open = false;
-    /* Local and USB targets have format options -- a format or mode mismatch
+    /* All PCM targets have format options -- a format or mode mismatch
      * must force a reopen the same as a channel/rate change. */
-    enum pcm_format requested_format = ((target == OUTPUT_TARGET_LOCAL || target == OUTPUT_TARGET_USB) && want_s24)
+    enum pcm_format requested_format = (target == OUTPUT_TARGET_BT || want_s24)
                                        ? PCM_FORMAT_S24_LE : PCM_FORMAT_S16_LE;
-    if (device_open && (target == OUTPUT_TARGET_LOCAL || target == OUTPUT_TARGET_USB) && active_format != requested_format) device_open = false;
+    if (device_open && active_format != requested_format) device_open = false;
     if (device_open && target == OUTPUT_TARGET_LOCAL && active_low_latency != low_latency) device_open = false;
     if (device_open && active_dop != dop) device_open = false;
     if (device_open && device_channels == channels && device_sample_rate == sample_rate) return true;
@@ -539,6 +542,24 @@ static bool write_pipe_bounded(int fd, const char * p, size_t remaining, size_t 
 bool audio_output_write(const int16_t * buf, uint64_t frames, unsigned int channels, uint64_t * out_frames_written) {
     if (out_frames_written) *out_frames_written = 0;
     if (!caller_owns_output()) return false;
+    if (active_target == OUTPUT_TARGET_BT && audio_output_is_s24_active()) {
+        int32_t wide[1024];
+        if (!buf || !channels || channels > sizeof(wide) / sizeof(wide[0])) return false;
+        uint64_t done = 0;
+        while (done < frames) {
+            uint64_t chunk = frames - done;
+            size_t capacity = sizeof(wide) / sizeof(wide[0]) / channels;
+            if (chunk > capacity) chunk = capacity;
+            for (size_t i = 0; i < chunk * channels; i++)
+                wide[i] = (int32_t)buf[done * channels + i] * 256;
+            uint64_t written = 0;
+            bool ok = audio_output_write_s24(wide, chunk, channels, &written);
+            done += written;
+            if (out_frames_written) *out_frames_written = done;
+            if (!ok || written != chunk) return false;
+        }
+        return true;
+    }
     if (audio_output_is_s24_active()) {
         DBG_LOG("audio_output: audio_output_write called while device is S24_LE (target=%d format=%d)\n",
                 (int) active_target, (int) active_format);
@@ -626,8 +647,9 @@ bool audio_output_write_s24(const int32_t * buf, uint64_t frames, unsigned int c
         return false;
     }
 
-    if (active_target == OUTPUT_TARGET_USB) {
-        int fd = usb_aplay_fd;
+    if (active_target == OUTPUT_TARGET_BT || active_target == OUTPUT_TARGET_USB) {
+        output_target_t target = active_target;
+        int fd = target == OUTPUT_TARGET_BT ? bt_aplay_fd : usb_aplay_fd;
         if (fd < 0) {
             unsigned int rate = device_sample_rate ? device_sample_rate : 44100;
             usleep((useconds_t) ((uint64_t) frames * 1000000ULL / rate));
@@ -643,12 +665,13 @@ bool audio_output_write_s24(const int32_t * buf, uint64_t frames, unsigned int c
             if (out_frames_written) {
                 *out_frames_written = written_bytes / frame_bytes;
             }
-            close_usb_device();
+            if (target == OUTPUT_TARGET_BT) close_bt_device();
+            else close_usb_device();
             if (err == ETIMEDOUT) {
-                DBG_LOG("audio_output: USB S24 pipe write timed out after 2s, closing device (written=%" PRIu64 "/%" PRIu64 " frames)\n",
+                DBG_LOG("audio_output: BT/USB S24 pipe write timed out after 2s, closing device (written=%" PRIu64 "/%" PRIu64 " frames)\n",
                         out_frames_written ? *out_frames_written : 0ULL, frames);
             } else {
-                DBG_LOG("audio_output: USB S24 pipe write failed (errno=%d written=%" PRIu64 "/%" PRIu64 " frames)\n",
+                DBG_LOG("audio_output: BT/USB S24 pipe write failed (errno=%d written=%" PRIu64 "/%" PRIu64 " frames)\n",
                         err, out_frames_written ? *out_frames_written : 0ULL, frames);
             }
             return false;
@@ -695,7 +718,8 @@ bool audio_output_is_bluetooth_requested(void) {
 
 bool audio_output_supports_wide_path(void) {
     pthread_mutex_lock(&config_mutex);
-    bool supports = (requested_target == OUTPUT_TARGET_LOCAL || requested_target == OUTPUT_TARGET_USB);
+    bool supports = (requested_target == OUTPUT_TARGET_LOCAL || requested_target == OUTPUT_TARGET_USB ||
+                     requested_target == OUTPUT_TARGET_BT);
     pthread_mutex_unlock(&config_mutex);
     return supports;
 }
@@ -723,7 +747,8 @@ void audio_output_get_info(audio_output_info_t * out) {
 
 bool audio_output_is_s24_active(void) {
     pthread_mutex_lock(&state_mutex);
-    bool active = (active_target == OUTPUT_TARGET_LOCAL || active_target == OUTPUT_TARGET_USB) && active_format == PCM_FORMAT_S24_LE;
+    bool active = (active_target == OUTPUT_TARGET_LOCAL || active_target == OUTPUT_TARGET_USB ||
+                   active_target == OUTPUT_TARGET_BT) && active_format == PCM_FORMAT_S24_LE;
     pthread_mutex_unlock(&state_mutex);
     return active;
 }

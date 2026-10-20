@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include "decoder_result.h"
 #include "metadata.h"
 
@@ -265,6 +266,21 @@ bool audio_extract_waveform_progress(const char * path, uint8_t * bins, size_t c
 
 /* 0.0 (silent) - 1.0 (full volume). Applied as software gain on the decoded PCM. */
 void audio_set_volume(float volume);
+/* Requested volume generation, including local commands still queued for the
+ * audio worker. UI consumers use it to detect newer local intent. */
+unsigned int audio_get_volume_generation(void);
+/* Last applied volume generation for snapshotting before slow external
+ * hardware readback. A queued request leaves this behind the requested
+ * generation, so the conditional setter will reject the stale snapshot. */
+unsigned int audio_get_applied_volume_generation(void);
+/* Generation-conditional volume adoption for external readback. Pass the
+ * applied generation captured before readback; the setter compares it to
+ * the current requested generation. The owner generation changes whenever
+ * the external source is invalidated. No Bluetooth lock may be held here. */
+bool audio_try_set_external_volume(float new_volume, unsigned int expected_generation,
+                                   const atomic_uint * owner_generation,
+                                   unsigned int expected_owner_generation,
+                                   unsigned int * committed_generation);
 /* Coalesces slider-originated volume changes on a process-lifetime worker.
  * A later synchronous audio_set_volume() always supersedes queued work. */
 void audio_request_volume(float volume);

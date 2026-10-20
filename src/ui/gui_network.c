@@ -20,6 +20,7 @@ extern int subprocess_run(char * const argv[], char ** out_output, int timeout_s
 #include "wifi_status.h"
 #include "wifi_control.h"
 #include "bluetooth_control.h"
+#include "bluetooth_reconnect.h"
 #include "usb_mode_control.h"
 #include "battery.h"
 #include "usb_storage_session.h"
@@ -1580,11 +1581,12 @@ static void bt_clear_snapshot_state_for_mac(const char * mac) {
 
 typedef struct {
     char mac[18];
+    unsigned int rate;
 } bt_connect_request_t;
 
 static void * bt_connect_thread_func(void * arg) {
     bt_connect_request_t * req = (bt_connect_request_t *) arg;
-    bt_connect_succeeded = bt_control_connect(req->mac);
+    bt_connect_succeeded = bt_control_connect_with_rate(req->mac, req->rate);
     free(req);
     atomic_store_explicit(&bt_connect_done_flag, true, memory_order_release); /* written last -- poll_bt_connect only checks this flag */
     return NULL;
@@ -1596,6 +1598,7 @@ static void start_bt_connect(const char * mac) {
     bt_connect_request_t * req = malloc(sizeof(*req));
     if (!req) return;
     snprintf(req->mac, sizeof(req->mac), "%s", mac);
+    req->rate = settings_bt_rate_for(&current_settings, req->mac);
 
     atomic_store_explicit(&bt_connect_done_flag, false, memory_order_relaxed);
     bt_connect_active = true;
@@ -2185,8 +2188,8 @@ typedef struct {
 
 static const bt_codec_option_t bt_codec_options[] = {
     { "auto", N_("Auto") },   { "ldac_hq", N_("LDAC Quality") }, { "ldac_sq", N_("LDAC Standard") },
-    { "aptx", "aptX" },      { "aac", "AAC" },              { "sbc", "SBC" },
-    { "sbc_xq", "SBC-XQ" },
+    { "ssc", "SSC" },        { "aptx", "aptX" },                { "aac", "AAC" },
+    { "sbc", "SBC" },        { "sbc_xq", "SBC-XQ" },
 };
 #define BT_CODEC_OPTION_COUNT (sizeof(bt_codec_options) / sizeof(bt_codec_options[0]))
 
@@ -2249,7 +2252,7 @@ static unsigned int bt_rate_selected(void) {
 
 static void populate_bt_rate_screen(void) {
     lv_obj_clean(bt_rate_list);
-    add_pill_option_row(bt_rate_list, TR("Automatic (44.1 kHz)"), bt_rate_selected() == 0,
+    add_pill_option_row(bt_rate_list, TR("Auto"), bt_rate_selected() == 0,
                         bt_rate_option_row_cb, (void *) (intptr_t) 0);
 
     /* Nothing connected means nothing to query, and only 44.1 can be applied
@@ -2305,6 +2308,10 @@ void poll_bt_rate_apply(void) {
 static void bt_rate_option_row_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     unsigned int rate = (unsigned int) (intptr_t) lv_event_get_user_data(e);
+    if (bt_rate_apply_active || bt_reconnect_busy()) {
+        show_info_toast(TR("Service is busy"));
+        return;
+    }
     bool changed = bt_rate_selected() != rate;
     /* Remembered against the accessory when one is connected, so each keeps
      * its own; with nothing connected this sets the default for accessories
@@ -2322,12 +2329,6 @@ static void bt_rate_option_row_cb(lv_event_t * e) {
      * the radio stays on. With nothing connected there is nothing to cycle
      * and the choice simply applies on the next connection. */
     if (!gui_shell_is_bt_audio_connected()) return;
-    if (bt_rate_apply_active) {
-        /* Silently dropping this would leave the setting saying one thing and
-         * the transport doing another. */
-        show_info_toast(TR("Still applying the previous choice"));
-        return;
-    }
     atomic_store_explicit(&bt_rate_apply_done_flag, false, memory_order_relaxed);
     bt_rate_apply_target = rate;
     bt_rate_apply_active = true;
@@ -4560,10 +4561,14 @@ bool gui_network_has_background_work(void) {
     pthread_mutex_unlock(&network_service_mutex);
     return wifi_connect_active || wifi_connect_saved_active || wifi_disconnect_active ||
            wifi_scan_active || wifi_forget_active || wifi_settings_snapshot_active ||
-           bt_connect_active || bt_forget_active ||
+           bt_connect_active || bt_forget_active || bt_rate_apply_active ||
            bt_scan_active || usb_mode_switch_active || usb_bridge_restart_active || import_web_stop_active ||
            usb_dac_charging_active ||
            network_service_work;
+}
+
+bool gui_network_bt_user_operation_active(void) {
+    return bt_connect_active || bt_forget_active || bt_rate_apply_active;
 }
 
 void gui_network_cancel_background_work(void) {

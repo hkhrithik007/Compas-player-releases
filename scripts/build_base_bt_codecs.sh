@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rebuild AAC/aptX and the LDAC decoder; retain the device's working LDAC
+# Rebuild AAC/aptX, native SSC and the LDAC decoder; retain the device's working LDAC
 # encoder/ABR pair.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -78,6 +78,14 @@ for part in enc abr dec; do
     printf 'prefix=/usr\nlibdir=${prefix}/lib\nincludedir=${prefix}/include/ldac\nName: ldacBT-%s\nDescription: retained HiBy LDAC ABI\nVersion: 2.0.0\nLibs: -L${libdir} -l%s\nCflags: -I${includedir}\n' \
         "$part" "$library" > "$stage/usr/lib/pkgconfig/ldacBT-$part.pc"
 done
+cmake -S "$repo/third_party/libssc" -B "$run/ssc" -DCMAKE_SYSTEM_NAME=Linux \
+    -DCMAKE_C_COMPILER="${cross}gcc" -DCMAKE_C_FLAGS="${flags/-Os/-O2}" \
+    -DCMAKE_SHARED_LINKER_FLAGS="$flags -Wl,--no-undefined" \
+    -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
+    -DCMAKE_BUILD_TYPE=Release
+cmake --build "$run/ssc" --parallel "${JOBS:-4}"
+DESTDIR="$stage" cmake --install "$run/ssc"
+"${cross}strip" --strip-unneeded "$stage/usr/lib/libssc.so.0.1.0"
 [[ ! -e "$work/stage" || -L "$work/stage" ]] || { echo 'stage must be a symlink' >&2; exit 1; }
 ln -sfnT "$stage" "$work/stage"
 printf 'Codec developer stage: %s\nLDAC encoder/ABR retained; decoder rebuilt from source.\n' "$stage"

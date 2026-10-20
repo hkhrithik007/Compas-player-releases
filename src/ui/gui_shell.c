@@ -1,7 +1,6 @@
 #include "gui_shell.h"
 #include "i18n.h"
 #include "app_clock.h"
-#include "topbar_icon_layout.h"
 #include "gui.h"
 #include "gui_theme.h"
 #include "gui_notifications.h"
@@ -796,6 +795,7 @@ typedef enum {
     BT_CODEC_TYPE_APTX,
     BT_CODEC_TYPE_APTX_HD,
     BT_CODEC_TYPE_LDAC,
+    BT_CODEC_TYPE_SSC,
     BT_CODEC_TYPE_UAT,
     BT_CODEC_TYPE_COUNT
 } bt_codec_type_t;
@@ -824,6 +824,7 @@ static bt_codec_type_t bt_codec_identify(const char * codec) {
     if (strcmp(norm, "aptx") == 0) return BT_CODEC_TYPE_APTX;
     if (strcmp(norm, "aptxhd") == 0) return BT_CODEC_TYPE_APTX_HD;
     if (strcmp(norm, "ldac") == 0) return BT_CODEC_TYPE_LDAC;
+    if (strcmp(norm, "ssc") == 0 || strcmp(norm, "samsungsc") == 0) return BT_CODEC_TYPE_SSC;
     if (strcmp(norm, "uat") == 0) return BT_CODEC_TYPE_UAT;
 
     return BT_CODEC_TYPE_NONE;
@@ -840,6 +841,7 @@ static const char * bt_codec_get_asset(bt_codec_type_t type) {
         assets[BT_CODEC_TYPE_APTX]    = asset_path("topbar/aptx.png");
         assets[BT_CODEC_TYPE_APTX_HD] = asset_path("topbar/aptx_hd.png");
         assets[BT_CODEC_TYPE_LDAC]    = asset_path("topbar/ldac.png");
+        assets[BT_CODEC_TYPE_SSC]     = asset_path("topbar/ssc.png");
         assets[BT_CODEC_TYPE_UAT]     = asset_path("topbar/uat.png");
         initialized = true;
     }
@@ -946,9 +948,10 @@ static const lv_font_t * topbar_ampm_font(void) {
 /* Normalize Lucide art by its visible source bounds so icon ink shares the
  * text's centerline and target height. Two pixels of padding around the
  * visible bounds keeps neighboring status items legible without crowding. */
-static void layout_lucide_topbar_image(lv_obj_t * image, int left, int top,
-                                       int width, int height) {
-    int target = BOARD_SCALE_PX(20);
+static void layout_lucide_topbar_image_sized(lv_obj_t * image, int left, int top,
+                                             int width, int height,
+                                             int target_px) {
+    int target = BOARD_SCALE_PX(target_px);
     int padding = BOARD_SCALE_PX(2);
     int scale = (target * LV_SCALE_NONE + height / 2) / height;
     int visible_width = (width * scale + LV_SCALE_NONE / 2) / LV_SCALE_NONE;
@@ -962,6 +965,11 @@ static void layout_lucide_topbar_image(lv_obj_t * image, int left, int top,
                                            - (top * scale + LV_SCALE_NONE / 2) / LV_SCALE_NONE));
 }
 
+static void layout_lucide_topbar_image(lv_obj_t * image, int left, int top,
+                                       int width, int height) {
+    layout_lucide_topbar_image_sized(image, left, top, width, height, 20);
+}
+
 /* All battery states use the same measured family envelope. The resulting
  * fixed-width slot keeps the percentage group anchored through state swaps. */
 static void layout_battery_topbar_image(lv_obj_t * image) {
@@ -969,9 +977,16 @@ static void layout_battery_topbar_image(lv_obj_t * image) {
 }
 
 static void layout_radio_topbar_image(lv_obj_t * image) {
-    /* All Wi-Fi strengths/off and Bluetooth states share the same family
-     * canvas bounds. Keeping them identical preserves partial-state art. */
+    /* All Wi-Fi strengths/off states share these family canvas bounds.
+     * Keeping them identical preserves partial-state art. */
     layout_lucide_topbar_image(image, 1, 1, 22, 22);
+}
+
+static void layout_bluetooth_topbar_image(lv_obj_t * image) {
+    /* Bluetooth's connected glyph is much narrower than the shared radio
+     * envelope. Enlarge both states together so they remain optically balanced
+     * without changing the slot or shifting when the state changes. */
+    layout_lucide_topbar_image_sized(image, 1, 1, 22, 22, 24);
 }
 
 /* Connected strengths share the full-signal arcs' bounds, which leave the
@@ -981,12 +996,11 @@ static void layout_wifi_connected_topbar_image(lv_obj_t * image) {
     layout_lucide_topbar_image(image, 1, 4, 22, 17);
 }
 
-/* Theme2 codec sprites share a 30 px canvas, but their visible alpha bounds
- * vary substantially. Measure the solid glyph (alpha >= 128), not faint
- * antialiasing fringes, and keep it on the common status-band centerline. */
-static void normalize_topbar_image(lv_obj_t * image, int left, int top,
-                                   int width, int height) {
-    topbar_icon_layout(image, left, top, width, height, STATUS_BAR_CLEARANCE);
+/* Codec badges share these measured solid alpha bounds (alpha >= 128) on a
+ * 48x30 canvas. Scaling the 40x24 mark directly gives a clear, consistent
+ * 24 px badge height while preserving two pixels of horizontal slot padding. */
+static void layout_codec_topbar_image(lv_obj_t * image) {
+    layout_lucide_topbar_image_sized(image, 4, 3, 40, 24, 24);
 }
 
 static void build_status_bar(void) {
@@ -1140,13 +1154,13 @@ static void build_status_bar(void) {
     lv_obj_add_flag(play_pause_status_icon, LV_OBJ_FLAG_HIDDEN);
 
     /* Negotiated Bluetooth codec indicator (e.g. sbc.png, aac.png, aptx.png,
-     * aptx_hd.png, ldac.png, uat.png) -- rightmost in volume_topbar_group,
+     * aptx_hd.png, ldac.png, ssc.png, uat.png) -- rightmost in volume_topbar_group,
      * lowest priority on the left side. Shows when an A2DP source PCM is
      * connected and fits without colliding with clock_topbar_group.
      * Hidden by default. */
     bt_codec_status_icon = lv_image_create(volume_topbar_group);
     lv_image_set_src(bt_codec_status_icon, bt_codec_get_asset(BT_CODEC_TYPE_SBC));
-    normalize_topbar_image(bt_codec_status_icon, 0, 0, 48, 30);
+    layout_codec_topbar_image(bt_codec_status_icon);
     lv_obj_add_flag(bt_codec_status_icon, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_align(volume_topbar_group, LV_ALIGN_LEFT_MID, BOARD_SCALE_PX(4), 0);
@@ -1196,7 +1210,7 @@ static void build_status_bar(void) {
 
     bt_status_icon = lv_image_create(band);
     lv_image_set_src(bt_status_icon, asset_path("topbar/lucide_bluetooth.png"));
-    layout_radio_topbar_image(bt_status_icon);
+    layout_bluetooth_topbar_image(bt_status_icon);
     lv_obj_align(bt_status_icon, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(145), 0);
     lv_obj_add_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN); /* shown by refresh_bt_icon() once bt_control_is_powered() */
 }
@@ -2284,9 +2298,7 @@ static void sync_bt_codec_status_icon(void) {
     if (last_codec_type != codec_type) {
         last_codec_type = codec_type;
         const char * asset = bt_codec_get_asset(codec_type);
-        if (asset) {
-            lv_image_set_src(bt_codec_status_icon, asset);
-        }
+        if (asset) lv_image_set_src(bt_codec_status_icon, asset);
     }
 
     lv_obj_remove_flag(bt_codec_status_icon, LV_OBJ_FLAG_HIDDEN);
@@ -2469,7 +2481,7 @@ static void poll_refresh_bt_icon(void) {
     lv_obj_remove_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN);
     lv_image_set_src(bt_status_icon, asset_path(refresh_bt_icon_result_connected ?
                      "topbar/lucide_bluetooth.png" : "topbar/lucide_bluetooth_off.png"));
-    layout_radio_topbar_image(bt_status_icon);
+    layout_bluetooth_topbar_image(bt_status_icon);
     sync_topbar_status_icon_positions();
     if (a2dp_connected) {
         lv_obj_remove_flag(a2dp_status_icon, LV_OBJ_FLAG_HIDDEN);
@@ -3302,10 +3314,10 @@ bool active_press_is_over_drag_adjust_widget(void) {
  * starting on non-clickable card containers near sliders from triggering
  * swipe transitions. Capacity accommodates native sliders and dynamic
  * plugin settings list sliders. */
-/* 11 native slider cards, up to 8 plugin settings sliders
+/* 13 native slider cards, up to 20 plugin settings sliders
  * (PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE x PLUGIN_SETTINGS_LIST_MAX_SLIDERS),
  * the accent color picker, ten Quick Drawer reorder handles and up to 24
- * plugin item editor handles, with headroom. */
+ * plugin item editor handles: 68 entries total, with four slots of headroom. */
 #define SWIPE_DEAD_ZONE_MAX 72
 static lv_obj_t * swipe_dead_zones[SWIPE_DEAD_ZONE_MAX];
 static int swipe_dead_zone_count = 0;
@@ -4395,7 +4407,7 @@ static void show_optimistic_bt_state(bool powered) {
     if (powered) {
         lv_obj_remove_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN);
         lv_image_set_src(bt_status_icon, asset_path("topbar/lucide_bluetooth_off.png"));
-        layout_radio_topbar_image(bt_status_icon);
+        layout_bluetooth_topbar_image(bt_status_icon);
     } else {
         lv_obj_add_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN);
     }
@@ -4580,6 +4592,7 @@ static void * bt_source_codec_reconcile_thread_func(void * arg) {
 static void start_bt_source_codec_reconcile_if_needed(void) {
     if (bt_source_codec_reconcile_active || bt_source_codec_reconcile_succeeded ||
         current_settings.bt_dac_mode_enabled ||
+        bt_reconnect_busy() || gui_network_bt_user_operation_active() ||
         !refresh_bt_startup_readiness()) return;
     /* The first attempt is allowed to query the authoritative state even if
      * the cached status is still false. After a transient failure, wait for a
@@ -4616,6 +4629,25 @@ static void poll_bt_source_codec_reconcile(void) {
 
 static void poll_bt_reconnect(void) {
     bt_reconnect_poll();
+    char correction_mac[18];
+    unsigned int correction_rate = 0;
+    if (bt_control_ssc_rate_correction_peek(correction_mac, sizeof(correction_mac), &correction_rate)) {
+        bool blocked = !bt_reconnect_observed_powered || current_settings.bt_dac_mode_enabled ||
+                       bt_toggle_active || bt_source_codec_reconcile_active ||
+                       bt_dac_startup_reapply_active || bt_apply_output_settings_active ||
+                       bt_reconnect_busy() || gui_network_bt_user_operation_active();
+        if (blocked) return;
+        if (bt_connected_mac_cached[0] &&
+                (strcmp(correction_mac, bt_connected_mac_cached) != 0 ||
+                 settings_bt_rate_for(&current_settings, correction_mac) != correction_rate)) {
+            bt_control_ssc_rate_correction_cancel();
+            return;
+        }
+        if (bt_connected_mac_cached[0]) {
+            (void) bt_reconnect_start_ssc_rate_correction(correction_mac, correction_rate);
+            return;
+        }
+    }
     if (!bt_reconnect_pending || bt_reconnect_cycle_suppressed ||
         bt_reconnect_busy() || !bt_reconnect_observed_powered ||
         current_settings.bt_dac_mode_enabled || bt_toggle_active ||
@@ -4626,8 +4658,11 @@ static void poll_bt_reconnect(void) {
     /* Consume the arm before starting. A failed start or exhausted worker is
      * deliberately not retried until a new authoritative power cycle. */
     bt_reconnect_pending = false;
-    bt_reconnect_start(current_settings.bt_last_output_mac[0] ?
-                       current_settings.bt_last_output_mac : NULL);
+    const char * preferred_mac = current_settings.bt_last_output_mac[0] ?
+                                 current_settings.bt_last_output_mac : NULL;
+    unsigned int rate = preferred_mac ? settings_bt_rate_for(&current_settings, preferred_mac) :
+                        current_settings.bt_sample_rate;
+    bt_reconnect_start_with_rate(preferred_mac, rate);
 }
 
 typedef struct {

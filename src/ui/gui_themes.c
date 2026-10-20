@@ -145,7 +145,7 @@ static const char * const s_legacy_asset_inventory[] = {
     "topbar/lucide_wifi_low.png", "topbar/lucide_wifi_zero.png",
     "topbar/lucide_wifi_off.png",
     "topbar/wifi_connect_0.png", "topbar/wifi_connect_1.png", "topbar/wifi_connect_2.png", "topbar/wifi_connect_3.png",
-    "topbar/sbc.png", "topbar/aac.png", "topbar/aptx.png", "topbar/aptx_hd.png", "topbar/ldac.png", "topbar/uat.png",
+    "topbar/sbc.png", "topbar/aac.png", "topbar/aptx.png", "topbar/aptx_hd.png", "topbar/ldac.png", "topbar/ssc.png", "topbar/uat.png",
     "touch_list/a_z_result_bg.png", "touch_list/del.png", "touch_list/item_bg.png",
     "touch_list/list_default_album.png", "touch_list/list_folder.png",
     "touch_list/quality_hr.png", "touch_list/quality_high.png", "touch_list/quality_nomal.png",

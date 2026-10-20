@@ -41,15 +41,29 @@ static atomic_int stub_list_pcms_calls;
 static atomic_int stub_volume_calls;
 static atomic_int stub_last_volume_raw;
 static atomic_int stub_seed_volume_calls;
+static atomic_int stub_bluez_transport_volume = 38;
+static atomic_int stub_avrcp_set_calls;
+static atomic_bool stub_avrcp_ready;
+static atomic_bool stub_avrcp_remote_applies = true;
+static atomic_bool stub_avrcp_rounds;
+static atomic_int stub_avrcp_pending_raw = -1;
+static atomic_int stub_avrcp_reads_before_apply;
 static atomic_int stub_monitor_volume_raw = 80;
 static atomic_int stub_live_volume_packed = (80 << 8) | 80;
 static atomic_bool stub_live_volume_as_bytes;
 static atomic_bool stub_volume_readback_fail;
 static atomic_bool stub_soft_volume_apply_fail;
+static atomic_bool stub_current_soft_volume;
+static atomic_bool stub_info_running;
+static atomic_int stub_info_calls;
+static atomic_int stub_soft_volume_set_calls;
 static atomic_bool stub_source_pcm_present = true;
 static const char *stub_managed_objects = "";
 static const char *stub_transport_props = "";
 static float stub_audio_volume = 0.50f;
+static atomic_uint stub_audio_generation;
+static atomic_bool stub_local_change_during_readback;
+static atomic_bool stub_policy_apply_during_readback;
 static atomic_bool stub_gate_popen;
 static atomic_bool stub_popen_entered;
 static atomic_bool stub_release_popen;
@@ -117,12 +131,18 @@ bool subprocess_run_low_priority(char * const argv[], char * out, size_t size) {
 
 bool subprocess_run(char * const argv[], char * out, size_t size) {
     assert(argv && argv[0] && argv[1]);
-    /* Soft-volume state query and the absolute-volume probe: unknown. */
-    if (strcmp(argv[0], "dbus-send") == 0 || strcmp(argv[1], "soft-volume") == 0) return false;
+    if (strcmp(argv[0], "dbus-send") == 0) return false;
+    if (strcmp(argv[1], "soft-volume") == 0) {
+        if (out && size) snprintf(out, size, "SoftVolume: %s\n",
+                                  atomic_load(&stub_current_soft_volume) ? "true" : "false");
+        return true;
+    }
     /* Automatic codec selection reads the PCM's codecs; SBC only, already
      * selected, so it settles without a switch. */
     if (strcmp(argv[1], "info") == 0) {
-        if (out && size) snprintf(out, size, "Selected codec: SBC\nAvailable codecs: SBC\nRunning: false\n");
+        atomic_fetch_add(&stub_info_calls, 1);
+        if (out && size) snprintf(out, size, "Selected codec: SBC\nAvailable codecs: SBC\nRunning: %s\n",
+                                  atomic_load(&stub_info_running) ? "true" : "false");
         return true;
     }
     /* The volume worker's startup discovery is intentionally empty; this
@@ -138,7 +158,43 @@ bool subprocess_run_checked(char * const argv[], char * out, size_t size,
                             int timeout_ms, int * out_exit_code) {
     (void) timeout_ms;
     if (argv && strcmp(argv[0], "dbus-send") == 0) {
-        if (strstr(argv[5], "Properties.Get") != NULL) {
+        if (strcmp(argv[5], "org.freedesktop.DBus.Properties.Set") == 0) {
+            atomic_fetch_add(&stub_avrcp_set_calls, 1);
+            unsigned raw = 0;
+            if (sscanf(argv[8], "variant:uint16:%u", &raw) != 1 || raw > BT_SOURCE_VOLUME_MAX) {
+                if (out_exit_code) *out_exit_code = 1;
+                return true;
+            }
+            if (!atomic_load(&stub_avrcp_ready)) {
+                if (out_exit_code) *out_exit_code = 1; /* delayed AVRCP property setter */
+                return true;
+            }
+            if (atomic_load(&stub_avrcp_remote_applies)) {
+                int applied_raw = atomic_load(&stub_avrcp_rounds) ? 60 : (int)raw;
+                int delay = atomic_load(&stub_avrcp_reads_before_apply);
+                if (delay > 0) {
+                    atomic_store(&stub_avrcp_pending_raw, applied_raw);
+                } else {
+                    atomic_store(&stub_bluez_transport_volume, applied_raw);
+                }
+            }
+            if (out_exit_code) *out_exit_code = 0;
+            return true;
+        }
+        if (strcmp(argv[5], "org.freedesktop.DBus.Properties.Get") == 0) {
+            if (atomic_load(&stub_policy_apply_during_readback) &&
+                strcmp(argv[4], TEST_PCM_PATH) == 0) {
+                atomic_store(&stub_policy_apply_during_readback, false);
+                /* Model a due capability retry while the live PCM latch is
+                 * otherwise current. The retry must invalidate this read. */
+                atomic_store(&bt_source_soft_volume, true);
+                bt_source_volume_probe_ms = 0;
+                bluealsa_apply_soft_volume_cancellable(TEST_PCM_PATH, NULL);
+            }
+            if (atomic_load(&stub_local_change_during_readback)) {
+                atomic_store(&stub_local_change_during_readback, false);
+                audio_set_volume(0.50f);
+            }
             if (atomic_load(&stub_volume_readback_fail)) return false;
             if (out && size) {
                 if (atomic_load(&stub_live_volume_as_bytes))
@@ -151,10 +207,25 @@ bool subprocess_run_checked(char * const argv[], char * out, size_t size,
             if (out_exit_code) *out_exit_code = 0;
             return true;
         }
-        if (out && size) {
-            const char * fixture = strstr(argv[5], "GetManagedObjects") ?
-                                   stub_managed_objects : stub_transport_props;
-            snprintf(out, size, "%s", fixture);
+        if (out && size && strstr(argv[5], "GetManagedObjects")) {
+            snprintf(out, size, "%s", stub_managed_objects);
+        } else if (out && size && strstr(argv[5], "Properties.GetAll")) {
+            int pending_raw = atomic_load(&stub_avrcp_pending_raw);
+            int delay = atomic_load(&stub_avrcp_reads_before_apply);
+            if (pending_raw >= 0 && delay > 0) {
+                delay = atomic_fetch_sub(&stub_avrcp_reads_before_apply, 1) - 1;
+                if (delay == 0) {
+                    atomic_store(&stub_bluez_transport_volume, pending_raw);
+                    atomic_store(&stub_avrcp_pending_raw, -1);
+                }
+            }
+            if (stub_transport_props[0]) {
+                snprintf(out, size,
+                    "string \"UUID\"\n variant string \"0000110a-0000-1000-8000-00805f9b34fb\"\nstring \"Volume\"\n variant uint16 %d\n",
+                    atomic_load(&stub_bluez_transport_volume));
+            } else {
+                snprintf(out, size, "%s", stub_transport_props);
+            }
         }
         if (out_exit_code) *out_exit_code = 0;
         return true;
@@ -165,9 +236,10 @@ bool subprocess_run_checked(char * const argv[], char * out, size_t size,
         atomic_fetch_add(&stub_seed_volume_calls, 1);
         atomic_store(&stub_last_volume_raw, atoi(argv[3]));
     } else if (argv && argv[1] && strcmp(argv[1], "soft-volume") == 0) {
-        /* Record application writes; readback remains unknown in subprocess_run. */
         assert(argv[2] && argv[3]);
+        atomic_fetch_add(&stub_soft_volume_set_calls, 1);
         if (atomic_load(&stub_soft_volume_apply_fail) && out_exit_code) *out_exit_code = 1;
+        else atomic_store(&stub_current_soft_volume, strcmp(argv[3], "on") == 0);
     }
     if (out_exit_code) *out_exit_code = 0;
     return true;
@@ -267,8 +339,30 @@ float audio_get_volume(void) {
     return stub_audio_volume;
 }
 
+unsigned int audio_get_volume_generation(void) {
+    return atomic_load_explicit(&stub_audio_generation, memory_order_acquire);
+}
+
+unsigned int audio_get_applied_volume_generation(void) {
+    return audio_get_volume_generation();
+}
+
+bool audio_try_set_external_volume(float volume, unsigned int expected_generation,
+                                   const atomic_uint * owner_generation,
+                                   unsigned int expected_owner_generation,
+                                   unsigned int * committed_generation) {
+    if (audio_get_volume_generation() != expected_generation ||
+        atomic_load_explicit(owner_generation, memory_order_acquire) != expected_owner_generation)
+        return false;
+    stub_audio_volume = volume;
+    unsigned int committed = atomic_fetch_add_explicit(&stub_audio_generation, 1, memory_order_acq_rel) + 1;
+    if (committed_generation) *committed_generation = committed;
+    return true;
+}
+
 void audio_set_volume(float volume) {
     stub_audio_volume = volume;
+    atomic_fetch_add_explicit(&stub_audio_generation, 1, memory_order_acq_rel);
 }
 
 void hiby_sys_server_report_volume(int percent) {
@@ -284,6 +378,15 @@ static void reset_stub_counters(void) {
     atomic_store(&stub_volume_calls, 0);
     atomic_store(&stub_seed_volume_calls, 0);
     atomic_store(&stub_last_volume_raw, -1);
+    atomic_store(&stub_avrcp_set_calls, 0);
+    atomic_store(&stub_avrcp_remote_applies, true);
+    atomic_store(&stub_avrcp_rounds, false);
+    atomic_store(&stub_avrcp_pending_raw, -1);
+    atomic_store(&stub_avrcp_reads_before_apply, 0);
+    atomic_store(&stub_soft_volume_set_calls, 0);
+    atomic_store(&stub_info_calls, 0);
+    atomic_store(&stub_local_change_during_readback, false);
+    atomic_store(&stub_policy_apply_during_readback, false);
     atomic_store(&stub_gate_popen, false);
     atomic_store(&stub_popen_entered, false);
     atomic_store(&stub_release_popen, false);
@@ -541,6 +644,7 @@ static void run_volume_adoption_case(bool fail_apply, bool fail_readback,
     }
     usleep(250000);
     bt_control_source_volume_sync_stop();
+    if (stub_audio_volume != expected) fprintf(stderr, "adoption mismatch fail_apply=%d fail_readback=%d event=%d live=%d got=%f expected=%f\n", fail_apply, fail_readback, event_raw, live_raw, stub_audio_volume, expected);
     assert(stub_audio_volume == expected);
     if (expected == 0.50f) {
         int percent = -1;
@@ -563,6 +667,92 @@ static void test_volume_adoption_requires_ready_and_live_match(void) {
     atomic_store(&stub_live_volume_as_bytes, false);
     /* Unknown live state is never treated as an accessory update. */
     run_volume_adoption_case(false, true, 80, 80, 0.50f);
+}
+
+
+static void test_local_volume_change_wins_over_slow_remote_event(void) {
+    reset_stub_counters();
+    stub_mode = STUB_MONITOR_VOLUME;
+    atomic_store(&stub_monitor_volume_raw, 80);
+    atomic_store(&stub_live_volume_packed, (80 << 8) | 80);
+    atomic_store(&stub_volume_readback_fail, false);
+    stub_managed_objects = "object path \"/org/bluez/hci0/dev_test/sep1/fd0\"";
+    stub_transport_props = "available";
+    atomic_store(&bt_source_soft_volume, false);
+    atomic_store(&modern_soft_volume_requested, false);
+    bt_soft_volume_applied_path[0] = '\0';
+    stub_audio_volume = 0.30f;
+    atomic_store(&stub_local_change_during_readback, true);
+    bt_control_source_volume_sync_start();
+    wait_for_true(spawned_once);
+    pthread_mutex_lock(&bt_soft_volume_mutex);
+    snprintf(bt_soft_volume_applied_path, sizeof(bt_soft_volume_applied_path), "%s", TEST_PCM_PATH);
+    atomic_store(&bt_source_soft_volume, false);
+    pthread_mutex_unlock(&bt_soft_volume_mutex);
+    usleep(250000);
+    bt_control_source_volume_sync_stop();
+    assert(stub_audio_volume == 0.50f); /* local change during slow Get wins */
+    int percent = -1;
+    assert(!bt_control_source_volume_sync_consume_percent(&percent));
+    stub_managed_objects = "";
+    stub_transport_props = "";
+}
+
+static void run_policy_reapply_running_case(bool prior_soft_volume) {
+    reset_stub_counters();
+    stub_managed_objects = "object path \"/org/bluez/hci0/dev_test/sep1/fd0\"";
+    stub_transport_props = "available";
+    atomic_store(&stub_bluez_transport_volume, 64);
+    atomic_store(&stub_info_running, true);
+    atomic_store(&stub_current_soft_volume, prior_soft_volume);
+    atomic_store(&bt_source_soft_volume, prior_soft_volume);
+    atomic_store(&modern_soft_volume_requested, false);
+    bt_soft_volume_applied_path[0] = '\0'; /* force an actual reapply */
+
+    bluealsa_apply_soft_volume_cancellable(TEST_PCM_PATH, NULL);
+
+    assert(atomic_load(&bt_source_soft_volume) == prior_soft_volume);
+    assert(atomic_load(&stub_current_soft_volume) == prior_soft_volume);
+    assert(atomic_load(&stub_soft_volume_set_calls) == 0);
+    assert(atomic_load(&stub_info_calls) == (prior_soft_volume ? 1 : 0));
+    stub_managed_objects = "";
+    stub_transport_props = "";
+    atomic_store(&stub_info_running, false);
+}
+
+static void test_policy_reapply_preserves_running_pcm_gain_mode(void) {
+    run_policy_reapply_running_case(false); /* hardware mode remains hardware */
+    run_policy_reapply_running_case(true);  /* software mode remains software */
+}
+
+static void test_policy_reapply_cancels_slow_remote_event(void) {
+    reset_stub_counters();
+    stub_mode = STUB_MONITOR_VOLUME;
+    atomic_store(&stub_monitor_volume_raw, 80);
+    atomic_store(&stub_live_volume_packed, (80 << 8) | 80);
+    atomic_store(&stub_volume_readback_fail, false);
+    atomic_store(&bt_source_soft_volume, false);
+    atomic_store(&modern_soft_volume_requested, false);
+    stub_managed_objects = "object path \"/org/bluez/hci0/dev_test/sep1/fd0\"";
+    stub_transport_props = "available";
+    atomic_store(&stub_bluez_transport_volume, 64);
+    snprintf(bt_soft_volume_applied_path, sizeof(bt_soft_volume_applied_path), "%s", TEST_PCM_PATH);
+    stub_audio_volume = 0.50f;
+    atomic_store(&stub_policy_apply_during_readback, true);
+
+    bt_control_source_volume_sync_start();
+    wait_for_true(spawned_once);
+    usleep(250000);
+    bt_control_source_volume_sync_stop();
+    if (stub_audio_volume != 0.50f)
+        fprintf(stderr, "policy reapply test: volume=%f clears=%u pending=%d token_applied=%d\n",
+                stub_audio_volume, atomic_load(&bt_soft_volume_clears),
+                atomic_load(&bt_source_vol_pending_percent), atomic_load(&stub_policy_apply_during_readback));
+    assert(stub_audio_volume == 0.50f); /* reapply began while the stale Get was in flight */
+    int percent = -1;
+    assert(!bt_control_source_volume_sync_consume_percent(&percent));
+    stub_managed_objects = "";
+    stub_transport_props = "";
 }
 
 static void test_source_volume_reply_parser(void) {
@@ -592,6 +782,7 @@ static void test_software_gain_ignores_inbound_volume_but_pushes_app_value(void)
     for (int i = 0; i < 300 && atomic_load(&stub_volume_calls) == 0; i++) usleep(10000);
     assert(atomic_load(&stub_volume_calls) >= 1);
     assert(atomic_load(&stub_last_volume_raw) == 32);
+    assert(atomic_load(&stub_avrcp_set_calls) == 0); /* software mode stays PCM-only */
     usleep(100000);
     assert(stub_audio_volume == 0.25f);
     int percent = -1;
@@ -638,6 +829,119 @@ static void test_unchanged_volume_reseeds_recreated_same_path_pcm(void) {
     assert(stub_audio_volume == 0.50f);
 }
 
+
+static void setup_hardware_source_volume(int remote_raw) {
+    atomic_store(&stub_source_pcm_present, true);
+    atomic_store(&stub_avrcp_ready, true);
+    atomic_store(&stub_bluez_transport_volume, remote_raw);
+    stub_managed_objects = "object path \"/org/bluez/hci0/dev_test/sep1/fd0\"";
+    stub_transport_props = "available";
+    atomic_store(&modern_soft_volume_requested, false);
+    atomic_store(&bt_source_soft_volume, false);
+    snprintf(bt_source_vol_pcm_path, sizeof(bt_source_vol_pcm_path), "%s", TEST_PCM_PATH);
+    bt_source_vol_pcm_path[0] = '\0';
+    bt_soft_volume_applied_path[0] = '\0';
+    bt_source_vol_last_synced_raw = -1;
+    stub_audio_volume = 0.50f;
+}
+
+static void test_hardware_set_accepts_delayed_property_update(void) {
+    reset_stub_counters();
+    setup_hardware_source_volume(38);
+    atomic_store(&stub_avrcp_reads_before_apply, 2);
+    assert(bt_control_prepare_source_volume());
+    assert(atomic_load(&bt_source_soft_volume) == false);
+    assert(atomic_load(&stub_volume_calls) == 1);
+    assert(atomic_load(&stub_bluez_transport_volume) == 38);
+    assert(atomic_load(&stub_avrcp_pending_raw) == 64);
+
+    char transport[256];
+    int observed_raw = -1;
+    assert(bluealsa_find_source_transport(TEST_PCM_PATH, transport, sizeof(transport), &observed_raw));
+    assert(observed_raw == 38); /* headset has not reported the request yet */
+    assert(bluealsa_find_source_transport(TEST_PCM_PATH, transport, sizeof(transport), &observed_raw));
+    assert(observed_raw == 64); /* later BlueZ property notification/readback settles */
+    stub_managed_objects = "";
+    stub_transport_props = "";
+}
+
+static void test_hardware_set_accepts_rounded_property_and_adopts_headset_value(void) {
+    reset_stub_counters();
+    setup_hardware_source_volume(38);
+    atomic_store(&stub_avrcp_rounds, true);
+    atomic_store(&stub_live_volume_packed, (60 << 8) | 60);
+    assert(bt_control_prepare_source_volume());
+    assert(atomic_load(&stub_bluez_transport_volume) == 60);
+    assert(atomic_load(&stub_avrcp_set_calls) == 1);
+
+    stub_mode = STUB_MONITOR_VOLUME;
+    atomic_store(&stub_monitor_volume_raw, 60);
+    bt_control_source_volume_sync_start();
+    wait_for_true(spawned_once);
+    int percent = -1;
+    for (int i = 0; i < 300 && percent < 0; i++) {
+        (void) bt_control_source_volume_sync_consume_percent(&percent);
+        usleep(10000);
+    }
+    assert(percent == 47);
+    assert(stub_audio_volume > 0.47f && stub_audio_volume < 0.48f);
+    usleep(650000); /* allow the next app-push tick after adopting raw 60 */
+    assert(atomic_load(&stub_avrcp_set_calls) == 2); /* startup push only; rounded event isn't fought */
+    bt_control_source_volume_sync_stop();
+    stub_managed_objects = "";
+    stub_transport_props = "";
+    atomic_store(&stub_avrcp_rounds, false);
+}
+
+static void test_hardware_set_accepts_no_property_reply(void) {
+    reset_stub_counters();
+    setup_hardware_source_volume(38);
+    atomic_store(&stub_avrcp_remote_applies, false); /* Set accepted, headset has not answered yet */
+    assert(bt_control_prepare_source_volume());
+    assert(atomic_load(&bt_source_soft_volume) == false);
+    assert(atomic_load(&stub_volume_calls) == 1);
+    assert(atomic_load(&stub_avrcp_set_calls) == 1);
+    assert(atomic_load(&stub_bluez_transport_volume) == 38);
+    stub_managed_objects = "";
+    stub_transport_props = "";
+}
+
+static void test_hardware_volume_retries_after_avrcp_is_ready(void) {
+    reset_stub_counters();
+    atomic_store(&stub_source_pcm_present, true);
+    atomic_store(&stub_avrcp_ready, false);
+    atomic_store(&stub_bluez_transport_volume, 38); /* 30% on the headset */
+    atomic_store(&stub_live_volume_packed, (38 << 8) | 38);
+    stub_managed_objects = "object path \"/org/bluez/hci0/dev_test/sep1/fd0\"";
+    stub_transport_props = "available";
+    atomic_store(&modern_soft_volume_requested, false);
+    atomic_store(&bt_source_soft_volume, false);
+    snprintf(bt_soft_volume_applied_path, sizeof(bt_soft_volume_applied_path), "%s", TEST_PCM_PATH);
+    snprintf(bt_source_vol_pcm_path, sizeof(bt_source_vol_pcm_path), "%s", TEST_PCM_PATH);
+    bt_source_vol_last_synced_raw = 38;
+    stub_audio_volume = 0.50f; /* app was changed to 50% while disconnected */
+    float last_synced_app_percent = 0.30f;
+
+    bt_source_push_app_volume_if_changed(&last_synced_app_percent);
+    assert(atomic_load(&stub_avrcp_set_calls) == 1);
+    assert(atomic_load(&stub_bluez_transport_volume) == 38);
+    assert(last_synced_app_percent == 0.30f); /* failed remote Set is not latched */
+
+    atomic_store(&stub_avrcp_ready, true);
+    bt_source_push_app_volume_if_changed(&last_synced_app_percent); /* next 500ms discovery pass */
+    assert(atomic_load(&stub_avrcp_set_calls) == 2);
+    assert(atomic_load(&stub_bluez_transport_volume) == 64);
+    assert(last_synced_app_percent == 0.50f);
+    stub_managed_objects = "";
+    stub_transport_props = "";
+    atomic_store(&stub_avrcp_ready, false);
+    atomic_store(&bt_source_soft_volume, true);
+    atomic_store(&modern_soft_volume_requested, false);
+    bt_soft_volume_applied_path[0] = '\0';
+    bt_source_vol_pcm_path[0] = '\0';
+    bt_source_vol_last_synced_raw = -1;
+}
+
 int main(void) {
     test_source_volume_reply_parser();
     test_disconnect_eof_and_pending_event();
@@ -646,9 +950,16 @@ int main(void) {
     test_disconnect_reconfigure_grace_cases();
     test_volume_monitor_eof_stop_restart_and_event();
     test_volume_adoption_requires_ready_and_live_match();
+    test_local_volume_change_wins_over_slow_remote_event();
+    test_policy_reapply_preserves_running_pcm_gain_mode();
+    test_policy_reapply_cancels_slow_remote_event();
     test_software_gain_ignores_inbound_volume_but_pushes_app_value();
     test_unchanged_app_volume_still_discovers_recreated_pcm();
     test_unchanged_volume_reseeds_recreated_same_path_pcm();
+    test_hardware_volume_retries_after_avrcp_is_ready();
+    test_hardware_set_accepts_delayed_property_update();
+    test_hardware_set_accepts_rounded_property_and_adopts_headset_value();
+    test_hardware_set_accepts_no_property_reply();
     puts("bluetooth monitor lifecycle tests passed");
     return 0;
 }

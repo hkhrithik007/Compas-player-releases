@@ -8,7 +8,7 @@ A personal note: I like to keep my music player free of distractions, so everyth
 
 - **Rockbox loader:** on R1 and R3 Pro II, the bootloader automatically detects a compatible Rockbox installation on your SD card and shows a boot menu when one is found.
 - **Emulators:** download QuickNES (NES), Gearboy (Game Boy and Game Boy Color), Gearsystem (Master System, Game Gear and SG-1000), gpSP (Game Boy Advance), Beetle PCE Fast (PC Engine / TurboGrafx-16), Beetle WonderSwan (WonderSwan and WonderSwan Color), and PrBoom (Doom) from More > Emulators.
-- **Updates made easier than ever:** the Player Update option is now available directly in Settings > Updates, including online updates. Future player updates can replace just the player without flashing the entire firmware; the underlying update support was already present.
+- **Updates made easier than ever:** the Player Update option is now available directly in Settings > Updates, including online updates. Future player updates can replace just the player without flashing the entire firmware; the underlying update support was already present. Both update menus now explain which parts they replace.
 - **Folder playback:** play a folder or add it to the queue or a playlist from the file browsers. Navigation is unified across browsers.
 - **Startup image:** choose a custom splash through the Startup Image plugin, or enable an optional accent-color tint in Appearance > Accent Color. There is also a new default boot splash—thanks to [@buymyhubs](https://github.com/buymyhubs) for [PR #157](https://github.com/Starnished66/compas-player/pull/157).
 - **Music menus and Quick Drawer customization:** reorder and hide Music menu entries and Quick Drawer controls. The Kids Mode plugin uses these controls too.
@@ -17,7 +17,8 @@ A personal note: I like to keep my music player free of distractions, so everyth
 - **Regional keyboards:** AZERTY, QWERTZ, Russian and Ukrainian layouts, a Latin switch for Cyrillic, and long-press character variants such as n, ñ and ń. Themes are also accessible from Settings > Display > Appearance.
 - **Crossfeed:** its own Sound screen, with five angle settings from No delay to 90°.
 - **PEQ:** refined controls and layout.
-- **MSEB plugin:** matches stock HiBy MSEB with native 13-filter processing.
+- **MSEB plugin:** matches stock HiBy MSEB with native 13-filter processing and all ten controls on one scrolling page, directly under Settings > Sound.
+- **LastFM Scrobbler V2:** now available. No API key required—sign in with just your username and password.
 - **Metronome plugin:** now available to download.
 - **Album sorting:** remembered separately for Albums, Artists and Album Artist.
 - **Repeat mode:** kept when starting another album.
@@ -29,6 +30,7 @@ A personal note: I like to keep my music player free of distractions, so everyth
 ## Fixes
 
 - **Search:** inline search is kept when you reopen it.
+- **Dutch:** book instructions now show the actual `Books` folder name.
 - **Bluetooth:** volume fixes.
 - **USB DAC:** fixes for phones, plus a new setting under Charging to disable charging while using USB DAC mode.
 - **Album sorting:** applies consistently inside artist views.

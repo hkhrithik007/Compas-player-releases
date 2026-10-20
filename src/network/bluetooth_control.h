@@ -141,6 +141,7 @@ int bt_control_scan(int seconds, bt_device_t * out, int max_count);
  * "Just Works" pairing with no PIN prompt needed from this app. Blocking;
  * call off the UI thread. */
 bool bt_control_connect(const char * mac);
+bool bt_control_connect_with_rate(const char * mac, unsigned int rate);
 
 bool bt_control_disconnect(const char * mac);
 
@@ -155,6 +156,19 @@ bool bt_control_forget(const char * mac);
 bool bt_control_reconnect_paired(const char * preferred_mac,
                                 bt_control_cancel_callback_t cancel_cb,
                                 void * cancel_ctx);
+bool bt_control_reconnect_paired_with_rate(const char * preferred_mac, unsigned int rate,
+                                           bt_control_cancel_callback_t cancel_cb,
+                                           void * cancel_ctx);
+unsigned int bt_control_get_sample_rate(void);
+
+/* One-shot recovery for SSC's advertised 44.1 kHz choice. The selection
+ * worker queues this before issuing SelectCodec, which can drop these peers. */
+bool bt_control_ssc_rate_correction_peek(char * mac, size_t mac_size, unsigned int * rate);
+bool bt_control_ssc_rate_correction_take(const char * mac, unsigned int rate);
+void bt_control_ssc_rate_correction_cancel(void);
+bool bt_control_reconnect_for_ssc_rate_correction(const char * mac, unsigned int rate,
+                                                  bt_control_cancel_callback_t cancel_cb,
+                                                  void * cancel_ctx);
 
 /* Output settings use the firmware's BlueALSA 5 service, with an
  * a2dp-source profile for this device sending audio OUT to
@@ -175,7 +189,7 @@ bool bt_control_reconnect_paired(const char * preferred_mac,
 bool bt_control_apply_output_settings(bool dac_mode_enabled, bool volume_sync_enabled);
 
 /* Select the outgoing BlueALSA 5 encoder preference. `codec` is one of
- * "auto"/"ldac_hq"/"ldac_sq"/"aptx"/"aac"/"sbc"/"sbc_xq". The active
+ * "auto"/"ldac_hq"/"ldac_sq"/"ssc"/"aptx"/"aac"/"sbc"/"sbc_xq". The active
  * daemon is reconciled separately by bt_control_reconcile_source_settings().
  * This only updates the in-memory preference; settings persistence belongs to
  * the caller. */

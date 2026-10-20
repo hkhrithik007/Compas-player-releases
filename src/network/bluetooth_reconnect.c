@@ -11,6 +11,8 @@
 typedef struct {
     unsigned int generation;
     char preferred_mac[18];
+    bool ssc_rate_correction;
+    unsigned int rate;
 } bt_reconnect_job_t;
 
 static pthread_mutex_t reconnect_state_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -41,6 +43,15 @@ static void * reconnect_thread_func(void * arg) {
     bt_reconnect_job_t job = *(const bt_reconnect_job_t *) arg;
     free(arg);
     bool cancelled = reconnect_cancelled(&job);
+    if (job.ssc_rate_correction) {
+        bool claimed = !cancelled &&
+                       bt_control_ssc_rate_correction_take(job.preferred_mac, job.rate);
+        if (claimed && !reconnect_cancelled(&job))
+            (void) bt_control_reconnect_for_ssc_rate_correction(job.preferred_mac, job.rate,
+                                                                 reconnect_cancelled, &job);
+        atomic_store_explicit(&reconnect_done, true, memory_order_release);
+        return NULL;
+    }
     for (unsigned int attempt = 0; !cancelled && attempt < 3; attempt++) {
         if (attempt > 0) {
             /* The backend owns the command timeout; this sleep is deliberately
@@ -51,8 +62,8 @@ static void * reconnect_thread_func(void * arg) {
             }
             if (cancelled) break;
         }
-        if (bt_control_reconnect_paired(job.preferred_mac[0] ? job.preferred_mac : NULL,
-                                        reconnect_cancelled, &job))
+        if (bt_control_reconnect_paired_with_rate(job.preferred_mac[0] ? job.preferred_mac : NULL,
+                                                  job.rate, reconnect_cancelled, &job))
             break;
         cancelled = reconnect_cancelled(&job);
     }
@@ -60,8 +71,9 @@ static void * reconnect_thread_func(void * arg) {
     return NULL;
 }
 
-bool bt_reconnect_start(const char * preferred_mac) {
+static bool reconnect_start(const char * preferred_mac, bool correction, unsigned int rate) {
     if (preferred_mac && !reconnect_valid_mac(preferred_mac)) return false;
+    if (correction && rate != 44100) return false;
     pthread_mutex_lock(&reconnect_state_mutex);
     if (atomic_load_explicit(&reconnect_active, memory_order_acquire)) {
         pthread_mutex_unlock(&reconnect_state_mutex);
@@ -70,11 +82,14 @@ bool bt_reconnect_start(const char * preferred_mac) {
 
     bt_reconnect_job_t * job = calloc(1, sizeof(*job));
     if (!job) {
+        if (correction) bt_control_ssc_rate_correction_cancel();
         pthread_mutex_unlock(&reconnect_state_mutex);
         return false;
     }
     job->generation = atomic_fetch_add_explicit(&reconnect_generation, 1, memory_order_acq_rel) + 1;
     if (preferred_mac) memcpy(job->preferred_mac, preferred_mac, sizeof(job->preferred_mac));
+    job->ssc_rate_correction = correction;
+    job->rate = rate;
     atomic_store_explicit(&reconnect_done, false, memory_order_relaxed);
     atomic_store_explicit(&reconnect_active, true, memory_order_release);
     reconnect_joinable = true;
@@ -82,6 +97,7 @@ bool bt_reconnect_start(const char * preferred_mac) {
         free(job);
         reconnect_joinable = false;
         atomic_store_explicit(&reconnect_active, false, memory_order_release);
+        if (correction) bt_control_ssc_rate_correction_cancel();
         pthread_mutex_unlock(&reconnect_state_mutex);
         return false;
     }
@@ -89,8 +105,21 @@ bool bt_reconnect_start(const char * preferred_mac) {
     return true;
 }
 
+bool bt_reconnect_start(const char * preferred_mac) {
+    return reconnect_start(preferred_mac, false, bt_control_get_sample_rate());
+}
+
+bool bt_reconnect_start_with_rate(const char * preferred_mac, unsigned int rate) {
+    return reconnect_start(preferred_mac, false, rate);
+}
+
+bool bt_reconnect_start_ssc_rate_correction(const char * mac, unsigned int rate) {
+    return reconnect_start(mac, true, rate);
+}
+
 void bt_reconnect_cancel(void) {
     atomic_fetch_add_explicit(&reconnect_generation, 1, memory_order_acq_rel);
+    bt_control_ssc_rate_correction_cancel();
 }
 
 void bt_reconnect_poll(void) {

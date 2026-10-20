@@ -30,6 +30,7 @@ typedef enum {
     BT_CODEC_AUTO = 0,
     BT_CODEC_LDAC_HQ,
     BT_CODEC_LDAC_SQ,
+    BT_CODEC_SSC,
     BT_CODEC_APTX,
     BT_CODEC_AAC,
     BT_CODEC_SBC,
@@ -59,6 +60,40 @@ static bluealsa_backend_t bluealsa_backend(void) {
     };
 }
 
+#define BT_SSC_AUTO_PROFILE_ARG "--ssc-auto-profile"
+static pthread_mutex_t bt_daemon_ssc_feature_mutex = PTHREAD_MUTEX_INITIALIZER;
+static atomic_int bt_daemon_ssc_auto_profile_feature = -1;
+
+static bool bt_daemon_supports_ssc_auto_profile(void) {
+    int state = atomic_load(&bt_daemon_ssc_auto_profile_feature);
+    if (state >= 0) return state != 0;
+    pthread_mutex_lock(&bt_daemon_ssc_feature_mutex);
+    state = atomic_load(&bt_daemon_ssc_auto_profile_feature);
+    if (state < 0) {
+        char help[16384] = {0};
+        char *argv[] = { (char *)"/usr/bin/bluealsad", (char *)"--help", NULL };
+        int exit_code = -1;
+        bool queried = subprocess_run_checked(argv, help, sizeof(help), 1000, &exit_code) && exit_code == 0;
+        bool supported = false;
+        if (queried) {
+            char *save = NULL;
+            for (char *token = strtok_r(help, " \t\r\n", &save); token;
+                 token = strtok_r(NULL, " \t\r\n", &save)) {
+                if (strcmp(token, BT_SSC_AUTO_PROFILE_ARG) == 0) {
+                    supported = true;
+                    break;
+                }
+            }
+        }
+        if (queried) {
+            atomic_store(&bt_daemon_ssc_auto_profile_feature, supported ? 1 : 0);
+            state = supported ? 1 : 0;
+        }
+    }
+    pthread_mutex_unlock(&bt_daemon_ssc_feature_mutex);
+    return state > 0;
+}
+
 static const char * bluealsa_ctl_name(void) {
     return bluealsa_backend().ctl;
 }
@@ -67,6 +102,15 @@ static const char * bluealsa_ctl_name(void) {
 static atomic_bool bt_speexrate_enabled = false;
 /* Requested A2DP transport rate in Hz, 0 for BlueALSA's own choice. */
 static atomic_uint bt_sample_rate = 44100;
+static void bt_pref_rate_changed(void);
+
+static bool bt_ssc_auto_profile_enabled(void) {
+    return atomic_load(&bt_sample_rate) == 0 && bt_daemon_supports_ssc_auto_profile();
+}
+
+static bool bt_ssc_auto_profile_for_rate(unsigned int rate) {
+    return rate == 0 && bt_daemon_supports_ssc_auto_profile();
+}
 
 /* Remembers a rate the accessory REFUSED, not one that was applied: a refusal
  * can tear the transport down, so retrying it every reconnect would become a
@@ -76,17 +120,71 @@ static pthread_mutex_t bt_rate_applied_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char bt_rate_refused_path[256];
 static char bt_rate_refused_codec[32]; /* a refusal holds for this codec only */
 static unsigned int bt_rate_refused_rate;
+static pthread_mutex_t bt_ssc_correction_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char bt_ssc_correction_mac[18];
+static unsigned int bt_ssc_correction_rate;
+static char bt_ssc_correction_path[256];
+static char bt_ssc_correction_codec[32];
+static atomic_uint bt_ssc_correction_generation = 0;
+
+void bt_control_ssc_rate_correction_cancel(void) {
+    atomic_fetch_add_explicit(&bt_ssc_correction_generation, 1, memory_order_acq_rel);
+    pthread_mutex_lock(&bt_ssc_correction_mutex);
+    bt_ssc_correction_mac[0] = '\0';
+    bt_ssc_correction_rate = 0;
+    bt_ssc_correction_path[0] = '\0';
+    bt_ssc_correction_codec[0] = '\0';
+    pthread_mutex_unlock(&bt_ssc_correction_mutex);
+}
+
+bool bt_control_ssc_rate_correction_peek(char * mac, size_t mac_size, unsigned int * rate) {
+    if (!mac || mac_size < 18 || !rate) return false;
+    pthread_mutex_lock(&bt_ssc_correction_mutex);
+    bool pending = bt_ssc_correction_mac[0] != '\0';
+    if (pending) {
+        snprintf(mac, mac_size, "%s", bt_ssc_correction_mac);
+        *rate = bt_ssc_correction_rate;
+    }
+    pthread_mutex_unlock(&bt_ssc_correction_mutex);
+    return pending;
+}
+
+bool bt_control_ssc_rate_correction_take(const char * mac, unsigned int rate) {
+    bool taken = false;
+    pthread_mutex_lock(&bt_ssc_correction_mutex);
+    if (mac && bt_ssc_correction_rate == rate &&
+            strcmp(bt_ssc_correction_mac, mac) == 0 && atomic_load(&bt_sample_rate) == rate) {
+        bt_ssc_correction_mac[0] = '\0';
+        bt_ssc_correction_rate = 0;
+        pthread_mutex_lock(&bt_rate_applied_mutex);
+        snprintf(bt_rate_refused_path, sizeof(bt_rate_refused_path), "%s", bt_ssc_correction_path);
+        snprintf(bt_rate_refused_codec, sizeof(bt_rate_refused_codec), "%s", bt_ssc_correction_codec);
+        bt_rate_refused_rate = rate;
+        bt_ssc_correction_path[0] = '\0';
+        bt_ssc_correction_codec[0] = '\0';
+        pthread_mutex_unlock(&bt_rate_applied_mutex);
+        atomic_fetch_add_explicit(&bt_ssc_correction_generation, 1, memory_order_acq_rel);
+        taken = true;
+    }
+    pthread_mutex_unlock(&bt_ssc_correction_mutex);
+    return taken;
+}
 
 /* Routine (startup, the connected device changing): the refusal memory is
  * kept, so a refused rate is not retried on every reconnect. */
 void bt_control_set_sample_rate(unsigned int rate) {
-    atomic_store(&bt_sample_rate, rate);
+    if (atomic_exchange(&bt_sample_rate, rate) != rate) bt_pref_rate_changed();
+}
+
+unsigned int bt_control_get_sample_rate(void) {
+    return atomic_load(&bt_sample_rate);
 }
 
 /* The user picked a rate: a different choice deserves a fresh attempt even
  * on a device that refused the previous one. */
 void bt_control_choose_sample_rate(unsigned int rate) {
     atomic_store(&bt_sample_rate, rate);
+    bt_control_ssc_rate_correction_cancel();
     pthread_mutex_lock(&bt_rate_applied_mutex);
     bt_rate_refused_path[0] = '\0';
     bt_rate_refused_codec[0] = '\0';
@@ -94,16 +192,13 @@ void bt_control_choose_sample_rate(unsigned int rate) {
     pthread_mutex_unlock(&bt_rate_applied_mutex);
 }
 
-/* 44.1 kHz is the one rate the daemon can be told to negotiate directly, so
- * it is the only one reached without re-establishing the link. Automatic
- * resolves to it: left to itself BlueALSA picks the highest rate up to
- * 48 kHz, which would resample the 44.1 kHz majority of a music library.
- * The rate list is read from BlueZ, so clamping what the daemon advertises
- * no longer hides the accessory's other rates from the user. */
-/* Automatic is not "let BlueALSA choose": left alone it picks the highest
- * rate up to 48 kHz, which resamples the 44.1 kHz majority of a music
- * library. Every reader resolves it through here so the daemon argument, the
- * per-connection apply and the UI cannot disagree about what it means. */
+/* The source daemon's force-audio-cd option keeps non-SSC codecs at the
+ * player's 44.1 kHz default. With --ssc-auto-profile, SSC instead negotiates
+ * from the accessory's advertised rates while other codecs retain that
+ * default. */
+/* The explicit transport-rate apply path resolves Automatic to 44.1 kHz;
+ * the daemon's SSC auto-profile option is the separate exception that lets
+ * an SSC transport use its advertised HiFi/UHQ profile. */
 static unsigned int bt_effective_sample_rate(void) {
     unsigned int rate = atomic_load(&bt_sample_rate);
     return rate == 0 ? 44100 : rate;
@@ -111,6 +206,10 @@ static unsigned int bt_effective_sample_rate(void) {
 
 static bool bt_rate_wants_audio_cd(void) {
     return bt_effective_sample_rate() == 44100;
+}
+
+static bool bt_rate_wants_audio_cd_for_rate(unsigned int rate) {
+    return rate == 0 || rate == 44100;
 }
 
 /* Selects the speex resampler for Bluetooth output. On by default: a track
@@ -154,17 +253,21 @@ static bool bt_ldac_decoder_is_rebuilt(void) {
     return found;
 }
 
+static void bt_buds_reset(const char *path);
+
 void bt_control_restore_codec_preference(const char * codec) {
     bt_codec_preference_t preference = BT_CODEC_AUTO;
     if (codec) {
         if (strcmp(codec, "ldac_hq") == 0) preference = BT_CODEC_LDAC_HQ;
         else if (strcmp(codec, "ldac_sq") == 0 || strcmp(codec, "ldac") == 0) preference = BT_CODEC_LDAC_SQ;
+        else if (strcmp(codec, "ssc") == 0) preference = BT_CODEC_SSC;
         else if (strcmp(codec, "aptx") == 0) preference = BT_CODEC_APTX;
         else if (strcmp(codec, "aac") == 0) preference = BT_CODEC_AAC;
         else if (strcmp(codec, "sbc") == 0) preference = BT_CODEC_SBC;
         else if (strcmp(codec, "sbc_xq") == 0) preference = BT_CODEC_SBC_XQ;
     }
     atomic_store(&bt_codec_preference, preference);
+    bt_buds_reset(NULL);
 }
 
 /* ALSA reads $HOME/.asoundrc; main() points HOME at this writable
@@ -195,6 +298,10 @@ const char * bt_control_get_playback_pcm(void) {
     case BT_CODEC_LDAC_HQ:
     case BT_CODEC_LDAC_SQ:
         return "bluealsa:CODEC=LDAC";
+    case BT_CODEC_SSC:
+        /* The PCMAdded selector already applied SSC or its supported-device
+         * fallback. Leave the plugin free to open that negotiated codec. */
+        return "bluealsa";
     case BT_CODEC_APTX:
         return "bluealsa:CODEC=aptX";
     case BT_CODEC_AAC:
@@ -219,6 +326,7 @@ static const char * bt_codec_daemon_name(void) {
     switch ((bt_codec_preference_t) atomic_load(&bt_codec_preference)) {
     case BT_CODEC_LDAC_HQ:
     case BT_CODEC_LDAC_SQ: return "LDAC";
+    case BT_CODEC_SSC: return "samsung-SC";
     case BT_CODEC_APTX: return "aptX";
     case BT_CODEC_AAC: return "AAC";
     default: return NULL;
@@ -235,6 +343,7 @@ static const char * bt_codec_select_name(void) {
     switch ((bt_codec_preference_t) atomic_load(&bt_codec_preference)) {
     case BT_CODEC_LDAC_HQ:
     case BT_CODEC_LDAC_SQ: return "LDAC";
+    case BT_CODEC_SSC: return "samsung-SC";
     case BT_CODEC_APTX: return "aptX";
     case BT_CODEC_AAC: return "AAC";
     case BT_CODEC_SBC:
@@ -264,6 +373,10 @@ static int bt_codec_append_daemon_args(char ** argv, int argc) {
     if (bt_codec_auto()) {
         argv[argc++] = (char *) "--all-codecs";
         argv[argc++] = (char *) "--ldac-abr";
+    } else if ((bt_codec_preference_t) atomic_load(&bt_codec_preference) == BT_CODEC_SSC) {
+        /* Keep every usable advertised fallback enabled. The per-PCM
+         * preference worker explicitly selects SSC when the peer supports it. */
+        argv[argc++] = (char *) "--all-codecs";
     } else {
         const char * daemon_codec = bt_codec_daemon_name();
         if (daemon_codec) {
@@ -292,7 +405,8 @@ static bool bluealsa_is_audio_pcm_path(const char * path) {
  * latch is recorded only after the command succeeded, and not at all if a
  * clear happened meanwhile (bt_soft_volume_clears). */
 static pthread_mutex_t bt_soft_volume_serial = PTHREAD_MUTEX_INITIALIZER;
-static unsigned int bt_soft_volume_clears;
+static atomic_uint bt_soft_volume_clears;
+static unsigned int bt_source_vol_pending_audio_generation;
 
 /* bluealsactl soft-volume PATH prints "SoftVolume: true|false". */
 static bool bluealsa_read_soft_volume(const char * path, bool * out) {
@@ -310,11 +424,14 @@ static bool bluealsa_read_soft_volume(const char * path, bool * out) {
 static const char * dbus_prop_value(const char * out, const char * prop);
 static bool dbus_prop_string_equals(const char * out, const char * prop, const char * expected);
 static uint32_t bt_control_monotonic_ms(void);
+static bool bluealsa_read_source_volume(const char * path, int * out);
 
-/* BlueZ exposes Volume only after AVRCP absolute-volume negotiation. Inspect
- * transport objects for this exact device, including dev/sepN/fdN paths.
- * Missing, malformed or truncated replies keep software attenuation enabled. */
-static bool bluealsa_source_has_absolute_volume(const char * pcm_path) {
+/* Locate this PCM's exact BlueZ MediaTransport1 object and read its current
+ * absolute volume. Volume is only present after AVRCP negotiation succeeds. */
+static bool bluealsa_find_source_transport(const char * pcm_path,
+                                           char * out_transport, size_t transport_size,
+                                           int * out_volume) {
+    if (!pcm_path || !out_transport || transport_size == 0) return false;
     const char * adapter = strstr(pcm_path, "/hci");
     const char * role = strstr(pcm_path, "/a2dpsrc/sink");
     if (!adapter || !role || role <= adapter) return false;
@@ -327,7 +444,7 @@ static bool bluealsa_source_has_absolute_volume(const char * pcm_path) {
     char * argv[] = { "dbus-send", "--system", "--print-reply", "--dest=org.bluez", "/",
                      "org.freedesktop.DBus.ObjectManager.GetManagedObjects", NULL };
     int status = -1;
-    bool supported = false;
+    bool found = false;
     if (!subprocess_run_checked(argv, reply, REPLY_SIZE, 1500, &status) || status != 0 ||
         strlen(reply) >= REPLY_SIZE - 1) goto done;
     const char * scan = reply;
@@ -360,27 +477,59 @@ static bool bluealsa_source_has_absolute_volume(const char * pcm_path) {
         int consumed = 0;
         if (value && sscanf(value, "uint16 %u%n", &raw, &consumed) == 1 && raw <= BT_SOURCE_VOLUME_MAX &&
             (value[consumed] == '\0' || isspace((unsigned char)value[consumed]))) {
-            supported = true;
+            snprintf(out_transport, transport_size, "%s", transport);
+            if (out_volume) *out_volume = (int) raw;
+            found = true;
             break;
         }
     }
 done:
     free(reply);
-    return supported;
+    return found;
 }
 
-/* Enabling SoftVolume resets the PCM level. Seed it before playback opens,
- * under the same serial lock as policy application; don't latch failed writes. */
-static bool bluealsa_seed_source_volume(const char * path) {
-    float percent = audio_get_volume();
-    int raw = (int)(percent * BT_SOURCE_VOLUME_MAX + 0.5f);
+static bool bluealsa_source_has_absolute_volume(const char * pcm_path) {
+    char transport[256];
+    return bluealsa_find_source_transport(pcm_path, transport, sizeof(transport), NULL);
+}
+
+/* BlueALSA can report success after updating its PCM cache even when BlueZ's
+ * remote AVRCP Set fails. In hardware-volume mode, check that request on the
+ * exact transport before updating BlueALSA PCM state. BlueZ's volume property
+ * can settle asynchronously or round the requested value; monitor events adopt
+ * the headset's settled value. Software mode keeps the established PCM path. */
+static bool bluealsa_write_source_volume(const char * path, int raw, bool software_volume) {
     if (raw < 0) raw = 0;
     if (raw > BT_SOURCE_VOLUME_MAX) raw = BT_SOURCE_VOLUME_MAX;
+    if (!software_volume) {
+        char transport[256];
+        int current_raw = -1;
+        if (!bluealsa_find_source_transport(path, transport, sizeof(transport), &current_raw)) return false;
+        if (current_raw != raw) {
+            char variant[32];
+            snprintf(variant, sizeof(variant), "variant:uint16:%d", raw);
+            char * set_argv[] = { "dbus-send", "--system", "--print-reply", "--dest=org.bluez",
+                transport, "org.freedesktop.DBus.Properties.Set", "string:org.bluez.MediaTransport1",
+                "string:Volume", variant, NULL };
+            int set_status = -1;
+            if (!subprocess_run_checked(set_argv, NULL, 0, 1000, &set_status) || set_status != 0)
+                return false;
+        }
+    }
     char text[8];
     snprintf(text, sizeof(text), "%d", raw);
     char * argv[] = { (char *)bluealsa_ctl_name(), "volume", (char *)path, text, text, NULL };
     int status = -1;
     return subprocess_run_checked(argv, NULL, 0, 1000, &status) && status == 0;
+}
+
+/* Enabling SoftVolume resets the PCM level. Seed it before playback opens,
+ * using the mode currently being selected rather than the temporary atomic
+ * fallback value that remains true until the policy latch commits. */
+static bool bluealsa_seed_source_volume(const char * path, bool software_volume) {
+    float percent = audio_get_volume();
+    int raw = (int)(percent * BT_SOURCE_VOLUME_MAX + 0.5f);
+    return bluealsa_write_source_volume(path, raw, software_volume);
 }
 
 /* Negative capability is retried, but a live software-controlled PCM is
@@ -394,33 +543,35 @@ static void bluealsa_apply_soft_volume_cancellable(const char * path, const atom
     pthread_mutex_lock(&bt_soft_volume_mutex);
     bool source = strstr(path, "/a2dpsrc/sink") != NULL;
     uint32_t now = bt_control_monotonic_ms();
+    bool prior_source_soft_volume = atomic_load(&bt_source_soft_volume);
     bool retry = source && !atomic_load(&modern_soft_volume_requested) &&
-                 atomic_load(&bt_source_soft_volume) &&
+                 prior_source_soft_volume &&
                  (uint32_t)(now - bt_source_volume_probe_ms) >= 5000;
     bool done = (strcmp(bt_soft_volume_applied_path, path) == 0 && !retry) ||
                 (cancel && atomic_load(cancel));
-    unsigned int clears = bt_soft_volume_clears;
-    /* A failed retry must not leave an old readiness latch authorizing audio
-     * after SoftVolume has reset the level to maximum. */
-    if (!done && strcmp(bt_soft_volume_applied_path, path) == 0)
-        bt_soft_volume_applied_path[0] = '\0';
+    unsigned int clears = atomic_load_explicit(&bt_soft_volume_clears, memory_order_acquire);
+    if (!done) {
+        /* Invalidate slow incoming events before changing or reseeding policy.
+         * A reapply can change effective gain ownership without a PCM removal. */
+        clears = atomic_fetch_add_explicit(&bt_soft_volume_clears, 1, memory_order_acq_rel) + 1;
+        /* A failed retry must not leave an old readiness latch authorizing audio
+         * after SoftVolume has reset the level to maximum. */
+        if (strcmp(bt_soft_volume_applied_path, path) == 0)
+            bt_soft_volume_applied_path[0] = '\0';
+        if (source) atomic_store(&bt_source_soft_volume, true);
+    }
     pthread_mutex_unlock(&bt_soft_volume_mutex);
     if (!done) {
         bool want = atomic_load(&modern_soft_volume_requested);
         if (source && !want) {
             bt_source_volume_probe_ms = now;
             want = !bluealsa_source_has_absolute_volume(path);
-            if (!want && atomic_load(&bt_source_soft_volume)) {
+            if (!want && prior_source_soft_volume) {
                 char info[2048];
                 char * argv[] = { (char *)bluealsa_ctl_name(), "info", (char *)path, NULL };
                 /* Unknown running state is treated as live. */
                 if (!subprocess_run(argv, info, sizeof(info)) || !strstr(info, "Running: false")) want = true;
             }
-        }
-        /* Ignore stale monitor events while selecting/reseeding a mode. */
-        if (source) {
-            atomic_store(&bt_source_soft_volume, true);
-            atomic_store(&bt_source_vol_pending_percent, -1);
         }
         bool current;
         bool ok;
@@ -432,9 +583,9 @@ static void bluealsa_apply_soft_volume_cancellable(const char * path, const atom
             int exit_code = -1;
             ok = subprocess_run_checked(argv, NULL, 0, 5000, &exit_code) && exit_code == 0;
         }
-        if (source && ok) ok = bluealsa_seed_source_volume(path);
+        if (source && ok) ok = bluealsa_seed_source_volume(path, want);
         pthread_mutex_lock(&bt_soft_volume_mutex);
-        if (ok && bt_soft_volume_clears == clears) {
+        if (ok && atomic_load_explicit(&bt_soft_volume_clears, memory_order_acquire) == clears) {
             snprintf(bt_soft_volume_applied_path, sizeof(bt_soft_volume_applied_path), "%s", path);
             if (source) atomic_store(&bt_source_soft_volume, want);
         }
@@ -455,14 +606,11 @@ static void bluealsa_clear_soft_volume_path(const char * path) {
     bool clear = !path || strcmp(bt_soft_volume_applied_path, path) == 0;
     if (clear)
         bt_soft_volume_applied_path[0] = '\0';
-    bt_soft_volume_clears++;
+    atomic_fetch_add_explicit(&bt_soft_volume_clears, 1, memory_order_acq_rel);
     bool invalidate_source = !path ||
         (strstr(path, "/a2dpsrc/sink") != NULL &&
          (!bt_soft_volume_applied_path[0] || clear));
-    if (invalidate_source) {
-        atomic_store(&bt_source_soft_volume, true);
-        atomic_store(&bt_source_vol_pending_percent, -1);
-    }
+    if (invalidate_source) atomic_store(&bt_source_soft_volume, true);
     pthread_mutex_unlock(&bt_soft_volume_mutex);
 }
 
@@ -480,6 +628,10 @@ static void bluealsa_codec_display_name(const char * selected, char * out, size_
     if (name_len >= out_size) name_len = out_size - 1;
     memcpy(out, selected, name_len);
     out[name_len] = '\0';
+    if (strcasecmp(out, "samsung-SC") == 0) {
+        snprintf(out, out_size, "SSC");
+        return;
+    }
     if (!colon || strcasecmp(out, "SBC") != 0) return;
     unsigned int b0 = 0, b1 = 0;
     if (sscanf(colon + 1, "%2x%2x", &b0, &b1) != 2) return;
@@ -576,11 +728,13 @@ static void bt_rate_remember_refusal(const char * path, const char * codec, unsi
 }
 
 static bool bluealsa_apply_rate_preference_cancellable(const char * path, const atomic_bool * cancel) {
-    /* 44.1 kHz, including the Automatic that resolves to it, is already
-     * carried by the daemon argument and costs no re-handshake. */
-    unsigned int want = bt_effective_sample_rate();
-    if (want == 44100) return false;
+    /* Automatic SSC negotiates from the profile selected by the daemon. An
+     * explicit 44.1 kHz choice still needs a live transport check because
+     * --ssc-auto-profile can select a higher SSC rate. */
+    unsigned int want = atomic_load(&bt_sample_rate);
+    if (want == 0) return false;
     if (!bluealsa_is_audio_pcm_path(path)) return false;
+    unsigned int correction_generation = atomic_load_explicit(&bt_ssc_correction_generation, memory_order_acquire);
 
     bluealsa_backend_t backend = bluealsa_backend();
     char info_out[2048];
@@ -604,6 +758,34 @@ static bool bluealsa_apply_rate_preference_cancellable(const char * path, const 
                    strcasecmp(bt_rate_refused_codec, codec) == 0;
     pthread_mutex_unlock(&bt_rate_applied_mutex);
     if (refused) return false;
+
+    if (want == 44100 &&
+            (strcasecmp(codec, "samsung-SC") == 0 || strcasecmp(codec, "SSC") == 0)) {
+        if (current != 0 && current != want) {
+            char mac[18];
+            const char * dev = strstr(path, "/dev_");
+            if (dev && strlen(dev + 5) >= 17) {
+                memcpy(mac, dev + 5, 17);
+                mac[17] = '\0';
+                for (size_t i = 0; i < 17; i++) if (mac[i] == '_') mac[i] = ':';
+                pthread_mutex_lock(&bt_ssc_correction_mutex);
+                if (correction_generation == atomic_load_explicit(&bt_ssc_correction_generation, memory_order_acquire) &&
+                        atomic_load(&bt_sample_rate) == want) {
+                    if (!bt_ssc_correction_mac[0] ||
+                            (strcmp(bt_ssc_correction_mac, mac) == 0 && bt_ssc_correction_rate == want)) {
+                        snprintf(bt_ssc_correction_mac, sizeof(bt_ssc_correction_mac), "%s", mac);
+                        bt_ssc_correction_rate = want;
+                        snprintf(bt_ssc_correction_path, sizeof(bt_ssc_correction_path), "%s", path);
+                        snprintf(bt_ssc_correction_codec, sizeof(bt_ssc_correction_codec), "%s", codec);
+                    }
+                }
+                pthread_mutex_unlock(&bt_ssc_correction_mutex);
+            }
+        }
+        /* These SSC peers refuse live SelectCodec and disconnect. The GUI
+         * claims the target-bound correction in its existing reconnect poll. */
+        return false;
+    }
 
     /* The link is about to be re-established for the rate: a drop from here
      * on is not the codec's fault, so Automatic must not blame it. */
@@ -638,10 +820,48 @@ static void bluealsa_apply_rate_preference(const char * path) {
 }
 
 /* Automatic picks the best codec both sides support, in the order the stock
- * HiBy player documents: LDAC > aptX HD > aptX > AAC > SBC. Left to itself,
+ * HiBy player documents: LDAC > samsung-SC > aptX HD > aptX > AAC > SBC. Left to itself,
  * BlueZ takes the first endpoint in an order that does not follow quality
  * (and then keeps its LastUsed one), so LDAC headphones could stay on AAC. */
-static const char * const BT_AUTO_CODEC_RANKING[] = { "LDAC", "aptX-HD", "aptX", "AAC", "SBC" };
+static const char * const BT_AUTO_CODEC_RANKING[] = { "LDAC", "samsung-SC", "aptX-HD", "aptX", "AAC", "SBC" };
+static pthread_mutex_t bt_buds_state_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char bt_buds_state_path[256];
+static bool bt_buds_name_checked, bt_buds_name_match;
+static uint32_t bt_buds_wait_started;
+static unsigned int bt_buds_generation;
+#define BT_BUDS_SSC_DISCOVERY_GRACE_MS 4000u
+
+static bool bluealsa_available_codec_contains(const char * info_out, const char * codec) {
+    if (!info_out || !codec) return false;
+    const char * line = strstr(info_out, "Available codecs:");
+    if (!line) return false;
+    line += strlen("Available codecs:");
+    const char * eol = strchr(line, '\n');
+    size_t len = eol ? (size_t)(eol - line) : strlen(line);
+    char list[512];
+    if (len >= sizeof(list)) len = sizeof(list) - 1;
+    memcpy(list, line, len);
+    list[len] = '\0';
+    char * save = NULL;
+    for (char * tok = strtok_r(list, " \t\r", &save); tok;
+         tok = strtok_r(NULL, " \t\r", &save))
+        if (strcasecmp(tok, codec) == 0) return true;
+    return false;
+}
+
+static bool bluealsa_available_codecs_known(const char * info_out) {
+    for (size_t i = 0; i < sizeof(BT_AUTO_CODEC_RANKING) / sizeof(BT_AUTO_CODEC_RANKING[0]); i++)
+        if (bluealsa_available_codec_contains(info_out, BT_AUTO_CODEC_RANKING[i])) return true;
+    return false;
+}
+
+/* SSC selection is serialized by the PCMAdded preference worker. Keep ALSA
+ * from issuing a second codec change from a stale asoundrc snapshot. */
+static const char * bt_playback_codec_override(void) {
+    if ((bt_codec_preference_t) atomic_load(&bt_codec_preference) == BT_CODEC_SSC)
+        return NULL;
+    return bt_codec_select_name();
+}
 
 /* From `bluealsactl info` output: the highest-ranked entry of "Available
  * codecs:" (codecs the accessory advertises that this daemon has enabled).
@@ -649,28 +869,132 @@ static const char * const BT_AUTO_CODEC_RANKING[] = { "LDAC", "aptX-HD", "aptX",
  * have been published. */
 static bool bluealsa_best_available_codec(const char * info_out, unsigned int rejected,
                                           char * out, size_t out_size) {
-    const char * line = strstr(info_out, "Available codecs:");
-    if (!line) return false;
-    line += strlen("Available codecs:");
-    const char * eol = strchr(line, '\n');
-    size_t len = eol ? (size_t) (eol - line) : strlen(line);
-    char list[512];
-    if (len >= sizeof(list)) len = sizeof(list) - 1;
-    memcpy(list, line, len);
-    list[len] = '\0';
+    if (!bluealsa_available_codecs_known(info_out)) return false;
     for (size_t r = 0; r < sizeof(BT_AUTO_CODEC_RANKING) / sizeof(BT_AUTO_CODEC_RANKING[0]); r++) {
         if (rejected & (1u << r)) continue;
-        char copy[512];
-        snprintf(copy, sizeof(copy), "%s", list);
-        char * save = NULL;
-        for (char * tok = strtok_r(copy, " \t\r", &save); tok; tok = strtok_r(NULL, " \t\r", &save)) {
-            if (strcasecmp(tok, BT_AUTO_CODEC_RANKING[r]) == 0) {
-                snprintf(out, out_size, "%s", BT_AUTO_CODEC_RANKING[r]);
-                return true;
-            }
+        if (bluealsa_available_codec_contains(info_out, BT_AUTO_CODEC_RANKING[r])) {
+            snprintf(out, out_size, "%s", BT_AUTO_CODEC_RANKING[r]);
+            return true;
         }
     }
     return false;
+}
+
+/* Match known Samsung Buds model tokens. Aliases may put an owner's name
+ * before Galaxy or after a numbered model. */
+static bool bt_is_galaxy_buds_name(const char * name) {
+    if (!name) return false;
+    char normalized[128];
+    size_t n = 0;
+    for (const unsigned char *p = (const unsigned char *)name; *p && n < sizeof(normalized)-1; p++) {
+        if (*p == '+' && n + 5 < sizeof(normalized)) {
+            memcpy(normalized + n, " plus", 5); n += 5;
+        } else normalized[n++] = (char)(isalnum(*p) ? tolower(*p) : ' ');
+    }
+    normalized[n] = '\0';
+    char *tokens[8], *save = NULL;
+    size_t count = 0;
+    for (char *tok = strtok_r(normalized, " ", &save); tok && count < 8;
+         tok = strtok_r(NULL, " ", &save)) tokens[count++] = tok;
+    bool galaxy = false;
+    size_t i = 0;
+    for (; i < count; i++) {
+        if (strcmp(tokens[i], "galaxy") == 0) { galaxy = true; i++; break; }
+    }
+    if (!galaxy) {
+        for (i = 0; i < count && strncmp(tokens[i], "buds", 4) != 0; i++) {}
+    }
+    if (i >= count) return false;
+    char *model = tokens[i++];
+    if (strncmp(model, "buds", 4) != 0) return false;
+    model += 4;
+    if (!*model) {
+        if (i >= count) return galaxy;
+        model = tokens[i++];
+    }
+    if (!*model) return galaxy; /* Original family name requires Galaxy. */
+    if (strcmp(model, "plus") == 0 || strcmp(model, "live") == 0 ||
+        strcmp(model, "pro") == 0 || strcmp(model, "fe") == 0 || strcmp(model, "core") == 0)
+        return true;
+    if (galaxy && (strcmp(model, "de") == 0 || strcmp(model, "of") == 0 || strcmp(model, "della") == 0))
+        return true;
+    if (strcmp(model, "1") == 0 || strcmp(model, "2") == 0 || strcmp(model, "3") == 0 ||
+        strcmp(model, "4") == 0) {
+        return true; /* Model number is decisive; remaining tokens are suffix/owner. */
+    }
+    if (model[0] >= '1' && model[0] <= '4' &&
+        (strcmp(model + 1, "pro") == 0 || strcmp(model + 1, "fe") == 0 ||
+         strcmp(model + 1, "live") == 0)) return true;
+    return false;
+}
+
+static bool bt_pcm_is_galaxy_buds(const char * path, bool *known, const atomic_bool *cancel) {
+    *known = false;
+    const char * dev = path ? strstr(path, "/dev_") : NULL;
+    if (!dev) { *known = true; return false; }
+    dev += 5;
+    char mac[18];
+    if (strlen(dev) < 17 || dev[17] != '/') { *known = true; return false; }
+    for (int i = 0; i < 17; i++) mac[i] = dev[i] == '_' ? ':' : dev[i];
+    mac[17] = '\0';
+    char info[1024];
+    char *argv[] = { (char *)"bluetoothctl", (char *)"info", mac, NULL };
+    int exit_code = -1;
+    if (bt_cancelled(cancel)) return false;
+    if (!subprocess_run_checked(argv, info, sizeof(info), 1000, &exit_code) || exit_code != 0) return false;
+    if (bt_cancelled(cancel)) return false;
+    *known = true;
+    const char *keys[] = { "Alias:", "Name:" };
+    for (size_t k = 0; k < 2; k++) {
+        const char *p = strstr(info, keys[k]);
+        if (!p) continue;
+        p += strlen(keys[k]);
+        while (*p == ' ' || *p == '\t') p++;
+        char name[128]; size_t i = 0;
+        while (*p && *p != '\n' && *p != '\r' && i + 1 < sizeof(name)) name[i++] = *p++;
+        name[i] = '\0';
+        if (bt_is_galaxy_buds_name(name)) return true;
+    }
+    return false;
+}
+
+static void bt_buds_state(const char *path, bool *is_buds, bool *metadata_known,
+                          uint32_t *wait_started, const atomic_bool *cancel) {
+    pthread_mutex_lock(&bt_buds_state_mutex);
+    if (strcmp(bt_buds_state_path, path) != 0) {
+        bt_buds_generation++;
+        snprintf(bt_buds_state_path, sizeof(bt_buds_state_path), "%s", path);
+        bt_buds_name_checked = false;
+        bt_buds_name_match = false;
+        bt_buds_wait_started = bt_control_monotonic_ms();
+    }
+    bool need_check = !bt_buds_name_checked;
+    unsigned int generation = bt_buds_generation;
+    pthread_mutex_unlock(&bt_buds_state_mutex);
+    bool matched = false, known = false;
+    if (need_check) matched = bt_pcm_is_galaxy_buds(path, &known, cancel);
+    pthread_mutex_lock(&bt_buds_state_mutex);
+    if (need_check && known && bt_buds_generation == generation &&
+        strcmp(bt_buds_state_path, path) == 0) {
+        bt_buds_name_match = matched;
+        bt_buds_name_checked = true;
+    }
+    *is_buds = bt_buds_name_match;
+    *metadata_known = bt_buds_name_checked;
+    *wait_started = bt_buds_wait_started;
+    pthread_mutex_unlock(&bt_buds_state_mutex);
+}
+
+static void bt_buds_reset(const char *path) {
+    pthread_mutex_lock(&bt_buds_state_mutex);
+    if (!path || strcmp(bt_buds_state_path, path) == 0) {
+        bt_buds_state_path[0] = '\0';
+        bt_buds_generation++;
+        bt_buds_name_checked = false;
+        bt_buds_name_match = false;
+        bt_buds_wait_started = 0;
+    }
+    pthread_mutex_unlock(&bt_buds_state_mutex);
 }
 
 /* Automatic remembers, per accessory and for this session, codecs it could
@@ -794,7 +1118,9 @@ static bool bt_cancelled(const atomic_bool * cancel) {
     return cancel && atomic_load(cancel);
 }
 
-static bool bluealsa_apply_codec_preference_serial(const char * path, const atomic_bool * cancel) {
+static bool bluealsa_apply_codec_preference_serial(const char * path, const atomic_bool * cancel,
+                                                   uint32_t * defer_until) {
+    if (defer_until) *defer_until = 0;
     bluealsa_backend_t backend = bluealsa_backend();
     pthread_mutex_lock(&bt_codec_applied_mutex);
     bool done = strcmp(bt_codec_applied_path, path) == 0;
@@ -810,13 +1136,72 @@ static bool bluealsa_apply_codec_preference_serial(const char * path, const atom
     if (!subprocess_run(info_argv, info_out, sizeof(info_out))) return false;
     const char * codec = bt_codec_select_name();
     bool automatic = codec == NULL;
+    bool explicit_ssc = (bt_codec_preference_t) atomic_load(&bt_codec_preference) == BT_CODEC_SSC;
+    bool galaxy_buds = false;
+    bool buds_metadata_known = false;
+    uint32_t buds_wait_started = 0;
+    bool ssc_advertised = bluealsa_available_codec_contains(info_out, "samsung-SC") ||
+                          bluealsa_available_codec_contains(info_out, "SSC");
+    /* A name can only affect delayed discovery or SSC-versus-LDAC ranking.
+     * An advertised SSC-only choice needs no name lookup or wait. */
+    bool inspect_buds_name = (automatic || explicit_ssc) &&
+        !(bt_auto_rejected(path) & (1u << bt_auto_rank_index("samsung-SC"))) &&
+        (!ssc_advertised || (automatic && bluealsa_available_codec_contains(info_out, "LDAC")));
+    if (inspect_buds_name)
+        bt_buds_state(path, &galaxy_buds, &buds_metadata_known, &buds_wait_started, cancel);
+    if (bt_cancelled(cancel)) return true;
+    if (inspect_buds_name && !buds_metadata_known &&
+        bt_control_monotonic_ms() - buds_wait_started < BT_BUDS_SSC_DISCOVERY_GRACE_MS) {
+        DBG_LOG("bt_control: waiting for Bluetooth device name on %s\n", path);
+        if (defer_until) *defer_until = buds_wait_started + BT_BUDS_SSC_DISCOVERY_GRACE_MS;
+        return false;
+    }
     char best[32];
     if (automatic) {
-        if (!bluealsa_best_available_codec(info_out, bt_auto_rejected(path), best, sizeof(best))) {
-            DBG_LOG("bt_control: auto codec for %s: available codecs not known yet\n", path);
-            return false;
+        bool ssc_rejected = (bt_auto_rejected(path) & (1u << bt_auto_rank_index("samsung-SC"))) != 0;
+        if (galaxy_buds &&
+            (bluealsa_available_codec_contains(info_out, "samsung-SC") ||
+             bluealsa_available_codec_contains(info_out, "SSC")) && !ssc_rejected) {
+            snprintf(best, sizeof(best), "%s", "samsung-SC");
+        } else {
+            if (galaxy_buds && !ssc_rejected &&
+                bt_control_monotonic_ms() - buds_wait_started < BT_BUDS_SSC_DISCOVERY_GRACE_MS) {
+                DBG_LOG("bt_control: waiting for Galaxy Buds SSC endpoint on %s\n", path);
+                if (defer_until) *defer_until = buds_wait_started + BT_BUDS_SSC_DISCOVERY_GRACE_MS;
+                return false;
+            }
+            if (!bluealsa_best_available_codec(info_out, bt_auto_rejected(path), best, sizeof(best))) {
+                DBG_LOG("bt_control: auto codec for %s: available codecs not known yet\n", path);
+                return false;
+            }
         }
         codec = best;
+    } else if (explicit_ssc) {
+        /* SSC is only implemented by Samsung accessories. Keep an explicit
+         * SSC preference for a later compatible connection, but use this
+         * device's best advertised codec when SSC is unavailable or has
+         * already failed configuration for this device. */
+        unsigned int rejected = bt_auto_rejected(path);
+        int ssc_rank = bt_auto_rank_index("samsung-SC");
+        bool ssc_available = bluealsa_available_codec_contains(info_out, "samsung-SC") ||
+                             bluealsa_available_codec_contains(info_out, "SSC");
+        if (!bluealsa_available_codecs_known(info_out)) {
+            DBG_LOG("bt_control: SSC codecs for %s are not known yet\n", path);
+            return false;
+        }
+        if (!ssc_available && !(ssc_rank >= 0 && (rejected & (1u << ssc_rank))) && galaxy_buds &&
+            bt_control_monotonic_ms() - buds_wait_started < BT_BUDS_SSC_DISCOVERY_GRACE_MS) {
+            DBG_LOG("bt_control: waiting for Galaxy Buds SSC endpoint on %s\n", path);
+            if (defer_until) *defer_until = buds_wait_started + BT_BUDS_SSC_DISCOVERY_GRACE_MS;
+            return false;
+        }
+        if (!ssc_available || (ssc_rank >= 0 && (rejected & (1u << ssc_rank)))) {
+            if (!bluealsa_best_available_codec(info_out, rejected, best, sizeof(best))) {
+                DBG_LOG("bt_control: SSC unavailable for %s and no fallback codec is known yet\n", path);
+                return false;
+            }
+            codec = best;
+        }
     }
     char active[32];
     if (bluealsa_parse_selected_codec(info_out, active, sizeof(active)) &&
@@ -831,10 +1216,12 @@ static bool bluealsa_apply_codec_preference_serial(const char * path, const atom
     int exit_code = -1;
     if (!subprocess_run_checked(argv, NULL, 0, 5000, &exit_code) || exit_code != 0) {
         DBG_LOG("bt_control: codec select %s -> %s FAILED (exit %d)\n", path, codec, exit_code);
-        if (automatic) bt_auto_reject(path, codec);
+        if (automatic || explicit_ssc) bt_auto_reject(path, codec);
+        if (explicit_ssc && strcasecmp(codec, "samsung-SC") == 0)
+            return bluealsa_apply_codec_preference_serial(path, cancel, defer_until);
         return false;
     }
-    if (automatic) bt_auto_note_switch(path, codec);
+    if (automatic || explicit_ssc) bt_auto_note_switch(path, codec);
     if (bt_cancelled(cancel)) return true;
     /* Read back rather than trusting the exit status: the accessory can
      * refuse a codec it advertised, and the top bar reports the real
@@ -848,20 +1235,28 @@ static bool bluealsa_apply_codec_preference_serial(const char * path, const atom
     }
     DBG_LOG("bt_control: codec select %s -> %s, now reports %s\n", path, codec, active);
     if (strcasecmp(active, codec) != 0) {
-        if (automatic) bt_auto_reject(path, codec);
+        if (automatic || explicit_ssc) bt_auto_reject(path, codec);
+        if (explicit_ssc && strcasecmp(codec, "samsung-SC") == 0)
+            return bluealsa_apply_codec_preference_serial(path, cancel, defer_until);
         return false;
     }
     return bluealsa_codec_latch_commit(path, clears);
 }
 
-/* cancel (optional) is checked between subprocesses; a cancelled pass
- * reports success so it is not scheduled for a retry. */
-static bool bluealsa_apply_codec_preference_cancellable(const char * path, const atomic_bool * cancel) {
+static bool bluealsa_apply_codec_preference_deferred(const char *path, const atomic_bool *cancel,
+                                                     uint32_t *defer_until) {
+    if (defer_until) *defer_until = 0;
     if (!bluealsa_is_audio_pcm_path(path)) return true;
     pthread_mutex_lock(&bt_codec_apply_serial);
-    bool ok = bluealsa_apply_codec_preference_serial(path, cancel);
+    bool ok = bluealsa_apply_codec_preference_serial(path, cancel, defer_until);
     pthread_mutex_unlock(&bt_codec_apply_serial);
     return ok;
+}
+
+/* cancel (optional) is checked between subprocesses; a cancelled pass
+ * reports success so it is not scheduled for a retry. */
+static bool bluealsa_apply_codec_preference_cancellable(const char *path, const atomic_bool *cancel) {
+    return bluealsa_apply_codec_preference_deferred(path, cancel, NULL);
 }
 
 static bool bluealsa_apply_codec_preference(const char * path) {
@@ -1235,7 +1630,8 @@ static int count_process_exact(const char * name) {
  * leave a source daemon running without the requested encoder quality; a
  * sink daemon is deliberately left alone because SBC-XQ is source-only. */
 static bool bluealsa_needs_source_restart(const bluealsa_backend_t * backend,
-                                          bt_codec_preference_t preference) {
+                                          bt_codec_preference_t preference,
+                                          unsigned int requested_rate) {
     DIR * proc = opendir("/proc");
     if (!proc) return false;
     bool restart = false;
@@ -1254,6 +1650,7 @@ static bool bluealsa_needs_source_restart(const bluealsa_backend_t * backend,
         name = name ? name + 1 : args;
         if (strcmp(name, backend->daemon_name) != 0) continue;
         bool sink = false, active_xq = false, active_all_codecs = false, active_force_cd = false;
+        bool active_ssc_auto_profile = false;
         bool active_ldac_abr = false;
         const char * active_codec = NULL;
         const char * active_ldac_quality = NULL;
@@ -1271,6 +1668,7 @@ static bool bluealsa_needs_source_restart(const bluealsa_backend_t * backend,
             if (strcmp(arg, "--all-codecs") == 0) active_all_codecs = true;
             if (strcmp(arg, "--ldac-abr") == 0) active_ldac_abr = true;
             if (strcmp(arg, BT_A2DP_FORCE_44K1_ARG) == 0) active_force_cd = true;
+            if (strcmp(arg, BT_SSC_AUTO_PROFILE_ARG) == 0) active_ssc_auto_profile = true;
             if (strcmp(arg, "-c") == 0 || strcmp(arg, "--codec") == 0) {
                 if (pos + arg_len + 1 < len) active_codec = args + pos + arg_len + 1;
             } else if (strncmp(arg, "--codec=", 8) == 0) {
@@ -1291,12 +1689,14 @@ static bool bluealsa_needs_source_restart(const bluealsa_backend_t * backend,
             const char * expected_ldac_quality = preference == BT_CODEC_LDAC_HQ ? "high" :
                                                   preference == BT_CODEC_LDAC_SQ ? "standard" :
                                                   preference == BT_CODEC_AUTO ? "high" : NULL;
-            bool expected_all_codecs = preference == BT_CODEC_AUTO;
+            bool expected_all_codecs = preference == BT_CODEC_AUTO || preference == BT_CODEC_SSC;
             bool expected_ldac_abr = preference == BT_CODEC_AUTO;
-            bool expected_force_cd = bt_rate_wants_audio_cd();
+            bool expected_ssc_auto_profile = bt_ssc_auto_profile_for_rate(requested_rate);
+            bool expected_force_cd = bt_rate_wants_audio_cd_for_rate(requested_rate);
             if (active_xq != expected_xq || active_all_codecs != expected_all_codecs ||
                     active_ldac_abr != expected_ldac_abr ||
                     active_force_cd != expected_force_cd ||
+                    active_ssc_auto_profile != expected_ssc_auto_profile ||
                     (expected_codec && (!active_codec || strcasecmp(active_codec, expected_codec) != 0)) ||
                     (!expected_codec && active_codec) ||
                     (expected_ldac_quality && (!active_ldac_quality ||
@@ -1525,11 +1925,11 @@ static bool bluealsa_source_pcm_may_be_connected(void) {
     return strstr(list_out, "/a2dpsrc/sink") != NULL;
 }
 
-static bool ensure_bluealsa_running_ex(bool * out_deferred) {
+static bool ensure_bluealsa_running_rate_ex(unsigned int requested_rate, bool * out_deferred) {
     pthread_mutex_lock(&bt_daemon_respawn_mutex);
     bluealsa_backend_t backend = bluealsa_backend();
     bt_codec_preference_t preference = (bt_codec_preference_t) atomic_load(&bt_codec_preference);
-    bool must_restart = bluealsa_needs_source_restart(&backend, preference);
+    bool must_restart = bluealsa_needs_source_restart(&backend, preference, requested_rate);
     /* Killing the daemon tears down every A2DP link it owns, and encoder
      * arguments only affect codec negotiation for new connections, so a
      * connected accessory is never dropped to correct them; the mismatch is
@@ -1560,13 +1960,19 @@ static bool ensure_bluealsa_running_ex(bool * out_deferred) {
     argv[argc++] = (char *) backend.daemon;
     argv[argc++] = (char *) "-p";
     argv[argc++] = (char *) "a2dp-source";
-    if (bt_rate_wants_audio_cd()) argv[argc++] = (char *) BT_A2DP_FORCE_44K1_ARG;
+    if (bt_rate_wants_audio_cd_for_rate(requested_rate)) argv[argc++] = (char *) BT_A2DP_FORCE_44K1_ARG;
+    bool ssc_auto_profile = bt_ssc_auto_profile_for_rate(requested_rate);
+    if (ssc_auto_profile) argv[argc++] = (char *) BT_SSC_AUTO_PROFILE_ARG;
     if (bt_codec_is_sbc_xq()) argv[argc++] = (char *) "--sbc-quality=xq";
     argc = bt_codec_append_daemon_args(argv, argc);
     argv[argc] = NULL;
     bool ok = subprocess_spawn_daemon(argv);
     pthread_mutex_unlock(&bt_daemon_respawn_mutex);
     return ok;
+}
+
+static bool ensure_bluealsa_running_ex(bool * out_deferred) {
+    return ensure_bluealsa_running_rate_ex(atomic_load(&bt_sample_rate), out_deferred);
 }
 
 static bool ensure_bluealsa_running(void) {
@@ -1602,7 +2008,10 @@ bool bt_control_init_chip(void) {
 
 bool bt_control_reconcile_source_settings(void) {
     bool deferred = false;
-    if (!ensure_bluealsa_running_ex(&deferred)) return false;
+    pthread_mutex_lock(&bt_chip_mutex);
+    bool ensured = ensure_bluealsa_running_ex(&deferred);
+    pthread_mutex_unlock(&bt_chip_mutex);
+    if (!ensured) return false;
     /* An accessory already connected before the PCMAdded watch started
      * never produces that event, so the codec preference would sit
      * unapplied until the next reconnect. Same reasoning (and same pairing
@@ -1912,9 +2321,14 @@ int bt_control_scan(int seconds, bt_device_t * out, int max_count) {
     return count;
 }
 
-bool bt_control_connect(const char * mac) {
+bool bt_control_connect_with_rate(const char * mac, unsigned int rate) {
     char out[512];
     pthread_mutex_lock(&bt_chip_mutex);
+    /* Prepare the daemon only after a successful query confirms that no
+     * source PCM is live. A busy or unreadable state keeps the old manual
+     * pair/trust/connect behavior and never authorizes a daemon restart. */
+    if (!bluealsa_source_pcm_may_be_connected())
+        (void) ensure_bluealsa_running_rate_ex(rate, NULL);
 
     char * pair_argv[] = { (char *) "bluetoothctl", (char *) "pair", (char *) mac, NULL };
     subprocess_run(pair_argv, out, sizeof(out)); /* no-op if already paired -- not fatal either way */
@@ -1926,6 +2340,10 @@ bool bt_control_connect(const char * mac) {
     bool ok = subprocess_run(connect_argv, out, sizeof(out)) && strstr(out, "Failed") == NULL;
     pthread_mutex_unlock(&bt_chip_mutex);
     return ok;
+}
+
+bool bt_control_connect(const char * mac) {
+    return bt_control_connect_with_rate(mac, bt_control_get_sample_rate());
 }
 
 bool bt_control_disconnect(const char * mac) {
@@ -2071,9 +2489,10 @@ static bool bt_reconnect_disconnect_locked(const char * mac) {
            exit_code == 0 && strstr(output, "Failed") == NULL;
 }
 
-bool bt_control_reconnect_paired(const char * preferred_mac,
-                                 bt_control_cancel_callback_t cancel_cb,
-                                 void * cancel_ctx) {
+static bool bt_control_reconnect_paired_core(const char * preferred_mac, unsigned int rate,
+                                            bool prepare_daemon,
+                                            bt_control_cancel_callback_t cancel_cb,
+                                            void * cancel_ctx) {
     if (preferred_mac && (!bt_reconnect_valid_mac(preferred_mac) ||
                           bt_reconnect_cancelled(cancel_cb, cancel_ctx))) return false;
     if (!bt_reconnect_adapter_powered(cancel_cb, cancel_ctx)) return false;
@@ -2153,6 +2572,14 @@ bool bt_control_reconnect_paired(const char * preferred_mac,
             pthread_mutex_unlock(&bt_chip_mutex);
             return false;
         }
+        if (prepare_daemon) {
+            bool deferred = false;
+            if (!ensure_bluealsa_running_rate_ex(rate, &deferred) || deferred ||
+                    bt_reconnect_cancelled(cancel_cb, cancel_ctx)) {
+                pthread_mutex_unlock(&bt_chip_mutex);
+                return false;
+            }
+        }
         char * connect_argv[] = { (char *) "bluetoothctl", (char *) "--timeout", (char *) "5",
                                   (char *) "connect", target, NULL };
         char connect_output[1024] = {0};
@@ -2173,6 +2600,19 @@ bool bt_control_reconnect_paired(const char * preferred_mac,
     }
     pthread_mutex_unlock(&bt_chip_mutex);
     return result;
+}
+
+bool bt_control_reconnect_paired_with_rate(const char * preferred_mac, unsigned int rate,
+                                           bt_control_cancel_callback_t cancel_cb,
+                                           void * cancel_ctx) {
+    return bt_control_reconnect_paired_core(preferred_mac, rate, true, cancel_cb, cancel_ctx);
+}
+
+bool bt_control_reconnect_paired(const char * preferred_mac,
+                                 bt_control_cancel_callback_t cancel_cb,
+                                 void * cancel_ctx) {
+    return bt_control_reconnect_paired_with_rate(preferred_mac, bt_control_get_sample_rate(),
+                                                  cancel_cb, cancel_ctx);
 }
 
 /* Synchronizes volume between this player and connected a2dp-source accessories.
@@ -2212,6 +2652,111 @@ static bool find_source_pcm_path_ex(char * out, size_t out_size, bool apply_soft
 
 static bool find_source_pcm_path(char * out, size_t out_size) {
     return find_source_pcm_path_ex(out, out_size, true);
+}
+
+static bool bt_correction_cancelled(bt_control_cancel_callback_t cb, void * ctx) {
+    return cb && cb(ctx);
+}
+
+bool bt_control_reconnect_for_ssc_rate_correction(const char * mac, unsigned int rate,
+                                                   bt_control_cancel_callback_t cancel_cb,
+                                                   void * cancel_ctx) {
+    if (!mac || strlen(mac) != 17 || rate != 44100 || bt_correction_cancelled(cancel_cb, cancel_ctx)) return false;
+    bool pcm_query_ok = false;
+    if (!bt_reconnect_audio_output_connected(cancel_cb, cancel_ctx, &pcm_query_ok) ||
+            !pcm_query_ok || bt_correction_cancelled(cancel_cb, cancel_ctx)) return false;
+    char path[256];
+    if (!find_source_pcm_path_ex(path, sizeof(path), false) ||
+            bt_correction_cancelled(cancel_cb, cancel_ctx)) return false;
+    char expected[64];
+    snprintf(expected, sizeof(expected), "/dev_%s/", mac);
+    for (char * c = expected; *c; c++) if (*c == ':') *c = '_';
+    if (!strstr(path, expected)) return false;
+
+    char info[2048];
+    char * info_argv[] = { (char *) bluealsa_ctl_name(), (char *) "info", path, NULL };
+    if (!subprocess_run_low_priority(info_argv, info, sizeof(info)) ||
+            bt_correction_cancelled(cancel_cb, cancel_ctx)) return false;
+    char codec[32] = {0};
+    copy_info_field(codec, sizeof(codec), info, "Selected codec:");
+    char * codec_end = strchr(codec, ':');
+    if (codec_end) *codec_end = '\0';
+    unsigned int current = 0;
+    const char * rate_field = strstr(info, "Rate:");
+    if (rate_field) (void) sscanf(rate_field + strlen("Rate:"), "%u", &current);
+    if ((strcasecmp(codec, "samsung-SC") != 0 && strcasecmp(codec, "SSC") != 0) ||
+            current == 0 || current == rate)
+        return false;
+
+    bt_auto_forget_switch(path);
+    if (bt_correction_cancelled(cancel_cb, cancel_ctx)) return false;
+    char * disconnect_argv[] = { (char *) "bluetoothctl", (char *) "--timeout", (char *) "5",
+                                 (char *) "disconnect", (char *) mac, NULL };
+    pthread_mutex_lock(&bt_chip_mutex);
+    int exit_code = -1;
+    bool disconnected = !bt_correction_cancelled(cancel_cb, cancel_ctx) &&
+            subprocess_run_checked(disconnect_argv, NULL, 0, 6500, &exit_code) && exit_code == 0;
+    pthread_mutex_unlock(&bt_chip_mutex);
+    if (!disconnected || bt_correction_cancelled(cancel_cb, cancel_ctx)) return false;
+
+    uint32_t deadline = bt_control_monotonic_ms() + 5000;
+    bool pcm_gone = false;
+    while ((int32_t)(deadline - bt_control_monotonic_ms()) > 0) {
+        if (bt_correction_cancelled(cancel_cb, cancel_ctx)) return false;
+        bool still_connected = bt_reconnect_audio_output_connected(cancel_cb, cancel_ctx, &pcm_query_ok);
+        if (!pcm_query_ok) goto reconnect_fallback;
+        if (!still_connected) {
+            pcm_gone = true;
+            break;
+        }
+        usleep(100000);
+    }
+    if (bt_correction_cancelled(cancel_cb, cancel_ctx)) return false;
+    if (!pcm_gone) goto reconnect_fallback;
+    /* The UI may refresh an empty cached MAC and change the global rate while
+     * this worker is disconnecting. Use the request captured by this job for
+     * both daemon reconciliation and launch flags. */
+    bool deferred = false;
+    pthread_mutex_lock(&bt_chip_mutex);
+    bool ensured = ensure_bluealsa_running_rate_ex(rate, &deferred);
+    pthread_mutex_unlock(&bt_chip_mutex);
+    if (bt_correction_cancelled(cancel_cb, cancel_ctx)) return false;
+    if (!ensured || deferred) goto reconnect_fallback;
+    if (!bt_control_reconnect_paired_core(mac, rate, false, cancel_cb, cancel_ctx)) {
+        if (bt_correction_cancelled(cancel_cb, cancel_ctx)) return false;
+        goto reconnect_fallback;
+    }
+
+    deadline = bt_control_monotonic_ms() + 20000;
+    while ((int32_t)(deadline - bt_control_monotonic_ms()) > 0) {
+        if (bt_correction_cancelled(cancel_cb, cancel_ctx)) return false;
+        bool connected = bt_reconnect_audio_output_connected(cancel_cb, cancel_ctx, &pcm_query_ok);
+        if (!pcm_query_ok) goto reconnect_fallback;
+        if (!connected) {
+            usleep(250000);
+            continue;
+        }
+        char active[256];
+        if (!find_source_pcm_path_ex(active, sizeof(active), false) || !strstr(active, expected)) {
+            usleep(250000);
+            continue;
+        }
+        char * current_argv[] = { (char *) bluealsa_ctl_name(), (char *) "info", active, NULL };
+        if (subprocess_run_low_priority(current_argv, info, sizeof(info))) {
+            current = 0;
+            rate_field = strstr(info, "Rate:");
+            if (rate_field) (void) sscanf(rate_field + strlen("Rate:"), "%u", &current);
+            if (current == rate) return true;
+        }
+        usleep(250000);
+    }
+reconnect_fallback:
+    /* Once this attempt has dropped the link, make one safe target-bound
+     * reconnect attempt unless the owning job was cancelled. The core checks
+     * pairing, current PCM state and cancellation before connecting. */
+    if (!bt_correction_cancelled(cancel_cb, cancel_ctx))
+        return bt_control_reconnect_paired_core(mac, rate, true, cancel_cb, cancel_ctx);
+    return false;
 }
 
 /* Require a successfully selected and seeded gain mode before opening audio.
@@ -2392,7 +2937,26 @@ static bool dbus_prop_byte(const char * out, const char * prop, uint8_t * value)
     while (isspace((unsigned char) *p)) p++;
     if (strncmp(p, "byte", 4) != 0 || !isspace((unsigned char) p[4])) return false;
     p += 4;
-    return dbus_parse_hex_byte(&p, value);
+    while (isspace((unsigned char) *p)) p++;
+
+    /* Scalar D-Bus bytes are decimal in current dbus-send output. Older
+     * captures used an explicit 0x prefix, so accept that form as hex while
+     * keeping bare array bytes on dbus_parse_hex_byte() above. */
+    int base = 10;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        base = 16;
+        p += 2;
+        if (!isxdigit((unsigned char) *p)) return false;
+    } else if (!isdigit((unsigned char) *p)) return false;
+
+    errno = 0;
+    char * end;
+    unsigned long parsed = strtoul(p, &end, base);
+    if (end == p || errno == ERANGE || parsed > UINT8_MAX) return false;
+    if (*end && !isspace((unsigned char) *end) && *end != ',' &&
+        *end != ')' && *end != ']' && *end != '}') return false;
+    *value = (uint8_t) parsed;
+    return true;
 }
 
 /* dbus-send prints a byte array as e.g. "array [ byte 0x80 byte 0x01 ]";
@@ -2441,6 +3005,8 @@ static bool a2dp_caps_match_codec(const uint8_t * caps, size_t len,
         return vendor_id == 0x00d7 && vendor_codec_id == 0x0024;
     if (strcasecmp(codec, "LDAC") == 0)
         return vendor_id == 0x012d && vendor_codec_id == 0x00aa;
+    if (strcasecmp(codec, "samsung-SC") == 0 || strcasecmp(codec, "SSC") == 0)
+        return vendor_id == 0x0075 && vendor_codec_id == 0x0103;
     return false;
 }
 
@@ -2461,6 +3027,9 @@ static int a2dp_caps_rates(const uint8_t * caps, size_t len, const char * codec,
     static const rate_bit_t ldac[] = {
         { 1u << 5, 44100 }, { 1u << 4, 48000 }, { 1u << 3, 88200 },
         { 1u << 2, 96000 }, { 1u << 1, 176400 }, { 1u << 0, 192000 },
+    };
+    static const rate_bit_t ssc[] = {
+        { 0x20, 44100 }, { 0x14, 48000 }, { 0x82, 96000 },
     };
 
     const rate_bit_t * table = NULL;
@@ -2485,6 +3054,10 @@ static int a2dp_caps_rates(const uint8_t * caps, size_t len, const char * codec,
              * byte 6 despite aptX-HD's additional trailing reserved bytes. */
             field = caps[6] >> 4;
             table = sbc_aptx; table_n = sizeof(sbc_aptx) / sizeof(sbc_aptx[0]);
+        } else if (strcasecmp(codec, "samsung-SC") == 0 ||
+                   strcasecmp(codec, "SSC") == 0) {
+            field = caps[6];
+            table = ssc; table_n = sizeof(ssc) / sizeof(ssc[0]);
         }
     }
     if (!table) return 0;
@@ -2510,11 +3083,12 @@ static int a2dp_caps_rates(const uint8_t * caps, size_t len, const char * codec,
 bool bt_control_reconnect_for_rate_change(unsigned int want) {
     char mac[18];
     if (!bt_control_get_connected_device_mac(mac, sizeof(mac))) return false;
-    if (want == 0) want = 44100; /* Automatic resolves the same way everywhere */
+    bool automatic = want == 0;
     /* Re-asserted rather than read from the atomic: disconnecting below makes
      * the status refresh publish "nothing connected", which would otherwise
      * overwrite the requested rate with the global default before the daemon
-     * is respawned with it. */
+     * is respawned with it. Keep Automatic's zero intact so the daemon can
+     * enable --ssc-auto-profile on the replacement connection. */
     atomic_store(&bt_sample_rate, want);
 
     /* Try reconfiguring the live transport first. A Galaxy Buds2 Pro refuses
@@ -2522,7 +3096,7 @@ bool bt_control_reconnect_for_rate_change(unsigned int want) {
      * (measured), but accessories that accept it change rate with nothing
      * dropping at all, so it is worth one attempt before cycling the link. */
     char path[256];
-    if (find_source_pcm_path(path, sizeof(path))) {
+    if (!automatic && find_source_pcm_path(path, sizeof(path))) {
         char info_out[2048];
         char * info_argv[] = { (char *) bluealsa_ctl_name(), (char *) "info", path, NULL };
         if (subprocess_run_low_priority(info_argv, info_out, sizeof(info_out))) {
@@ -2560,8 +3134,10 @@ bool bt_control_reconnect_for_rate_change(unsigned int want) {
         if (!find_source_pcm_path(gone, sizeof(gone))) break;
         usleep(250000);
     }
-    ensure_bluealsa_running();
-    bt_control_connect(mac);
+    /* A disconnect can refresh settings while the link is down. Reassert
+     * the captured request immediately before building daemon arguments. */
+    atomic_store(&bt_sample_rate, automatic ? 0 : want);
+    bt_control_connect_with_rate(mac, want);
 
     /* Believe the transport, not bluetoothctl's exit: it reports failure on a
      * slow connect that then completes on its own a few seconds later, which
@@ -2580,7 +3156,7 @@ bool bt_control_reconnect_for_rate_change(unsigned int want) {
         unsigned int now = 0;
         const char * field = strstr(info_out, "Rate:");
         if (field) (void) sscanf(field + strlen("Rate:"), "%u", &now);
-        if (now == want) return true;
+        if (automatic ? now != 0 : now == want) return true;
     }
     return false;
 }
@@ -2705,7 +3281,7 @@ bool bt_control_prepare_playback_pcm(char * out, size_t out_size) {
     fprintf(f, "            type bluealsa\n");
     fprintf(f, "            device \"%s\"\n", mac);
     fprintf(f, "            profile \"a2dp\"\n");
-    const char * codec = bt_codec_select_name();
+    const char * codec = bt_playback_codec_override();
     if (codec) fprintf(f, "            codec \"%s\"\n", codec);
     fprintf(f, "        }\n");
     fprintf(f, "        rate %u\n", rate);
@@ -2753,6 +3329,9 @@ static void bt_source_push_app_volume_if_changed(float * last_synced_app_percent
     pthread_mutex_lock(&bt_soft_volume_serial);
     pthread_mutex_lock(&bt_soft_volume_mutex);
     bool ready = strcmp(bt_soft_volume_applied_path, path) == 0;
+    unsigned int generation = atomic_load_explicit(&bt_soft_volume_clears, memory_order_acquire);
+    bool software_volume = atomic_load(&bt_source_soft_volume) ||
+                           atomic_load(&modern_soft_volume_requested);
     pthread_mutex_unlock(&bt_soft_volume_mutex);
     if (!ready) goto done;
     float current_percent = audio_get_volume();
@@ -2765,15 +3344,19 @@ static void bt_source_push_app_volume_if_changed(float * last_synced_app_percent
         goto done;
     }
 
-    char raw_str[8];
-    snprintf(raw_str, sizeof(raw_str), "%d", raw);
-    char * vol_argv[] = { (char *) bluealsa_ctl_name(), (char *) "volume", path, raw_str, raw_str, NULL };
-    int exit_code = -1;
-    if (!subprocess_run_checked(vol_argv, NULL, 0, 1000, &exit_code) || exit_code != 0) goto done;
-
-    bt_source_vol_last_synced_raw = raw;
-    *last_synced_app_percent = current_percent;
-    hiby_sys_server_report_volume((int) (current_percent * 100.0f + 0.5f));
+    if (!bluealsa_write_source_volume(path, raw, software_volume)) goto done;
+    pthread_mutex_lock(&bt_soft_volume_mutex);
+    bool current_generation = generation == atomic_load_explicit(&bt_soft_volume_clears, memory_order_acquire) &&
+                              strcmp(bt_soft_volume_applied_path, path) == 0 &&
+                              software_volume == (atomic_load(&bt_source_soft_volume) ||
+                                                  atomic_load(&modern_soft_volume_requested));
+    if (current_generation) {
+        bt_source_vol_last_synced_raw = raw;
+        *last_synced_app_percent = current_percent;
+    }
+    pthread_mutex_unlock(&bt_soft_volume_mutex);
+    if (current_generation)
+        hiby_sys_server_report_volume((int) (current_percent * 100.0f + 0.5f));
 done:
     pthread_mutex_unlock(&bt_soft_volume_serial);
 }
@@ -2854,11 +3437,13 @@ static void * bt_source_vol_sync_thread_func(void * arg) {
                     if (reset_path[0] && strcmp(reset_path, path) == 0) {
                         reset_path[0] = '\0';
                     } else {
-                        /* Serialize the gate and adoption with policy changes
-                         * so a queued hardware event cannot restore old volume. */
-                        pthread_mutex_lock(&bt_soft_volume_serial);
+                        /* Capture both cancellation domains before the slow
+                         * live-property read. A local volume move while D-Bus
+                         * is in flight must win over this queued remote event. */
+                        unsigned int audio_generation = audio_get_applied_volume_generation();
                         pthread_mutex_lock(&bt_soft_volume_mutex);
-                        unsigned int generation = bt_soft_volume_clears;
+                        unsigned int generation = atomic_load_explicit(&bt_soft_volume_clears,
+                                                                       memory_order_acquire);
                         bool ready = strcmp(bt_soft_volume_applied_path, path) == 0;
                         bool hardware_volume = !atomic_load(&bt_source_soft_volume) &&
                                                !atomic_load(&modern_soft_volume_requested);
@@ -2868,32 +3453,40 @@ static void * bt_source_vol_sync_thread_func(void * arg) {
                                           bluealsa_read_source_volume(path, &live_raw) &&
                                           live_raw == raw;
                         pthread_mutex_lock(&bt_soft_volume_mutex);
-                        bool still_ready = generation == bt_soft_volume_clears &&
+                        bool still_ready = generation == atomic_load_explicit(&bt_soft_volume_clears,
+                                                                               memory_order_acquire) &&
                                            strcmp(bt_soft_volume_applied_path, path) == 0 &&
                                            !atomic_load(&bt_source_soft_volume) &&
                                            !atomic_load(&modern_soft_volume_requested);
                         bool adopted = live_match && still_ready && raw != bt_source_vol_last_synced_raw;
                         float accessory_percent = (float) raw / (float) BT_SOURCE_VOLUME_MAX;
-                        if (adopted) {
-                            bt_source_vol_last_synced_raw = raw;
-                            /* Preserve the accessory's original fraction so the
-                             * next app push corrects it when it exceeds the cap. */
-                            last_synced_app_percent = accessory_percent;
-                        }
                         pthread_mutex_unlock(&bt_soft_volume_mutex);
                         if (adopted) {
-                            /* Do not nest audio's lock under bt_soft_volume_mutex. */
-                            audio_set_volume(accessory_percent);
-                            int percent = (int) (audio_get_volume() * 100.0f + 0.5f);
-                            pthread_mutex_lock(&bt_soft_volume_mutex);
-                            /* A disconnect can clear the path while audio is
-                             * applied; do not republish its stale UI event. */
-                            if (generation == bt_soft_volume_clears)
+                            unsigned int committed_generation = 0;
+                            bool accepted = audio_try_set_external_volume(
+                                accessory_percent, audio_generation, &bt_soft_volume_clears,
+                                generation, &committed_generation);
+                            if (accepted) {
+                                int percent = (int) (audio_get_volume() * 100.0f + 0.5f);
+                                pthread_mutex_lock(&bt_soft_volume_mutex);
+                                /* Publish the accepted audio generation even
+                                 * if disconnect cleared the PCM during apply;
+                                 * the UI drops it only if a newer local change
+                                 * has already superseded it. */
+                                bt_source_vol_pending_audio_generation = committed_generation;
                                 atomic_store_explicit(&bt_source_vol_pending_percent, percent,
                                                       memory_order_release);
-                            pthread_mutex_unlock(&bt_soft_volume_mutex);
+                                bool cache_current = generation == atomic_load_explicit(
+                                                         &bt_soft_volume_clears, memory_order_acquire) &&
+                                                     strcmp(bt_soft_volume_applied_path, path) == 0 &&
+                                                     audio_get_volume_generation() == committed_generation;
+                                if (cache_current) {
+                                    bt_source_vol_last_synced_raw = raw;
+                                    last_synced_app_percent = accessory_percent;
+                                }
+                                pthread_mutex_unlock(&bt_soft_volume_mutex);
+                            }
                         }
-                        pthread_mutex_unlock(&bt_soft_volume_serial);
                     }
                 }
                 line_start = newline + 1;
@@ -2924,7 +3517,6 @@ void bt_control_source_volume_sync_start(void) {
     bt_source_vol_sync_active = true;
     bt_source_vol_last_synced_raw = -1;
     bt_source_vol_pcm_path[0] = '\0';
-    atomic_store_explicit(&bt_source_vol_pending_percent, -1, memory_order_relaxed);
     if (pthread_create(&bt_source_vol_sync_thread, NULL, bt_source_vol_sync_thread_func, NULL) == 0)
         bt_source_vol_sync_joinable = true;
     else bt_source_vol_sync_active = false;
@@ -2937,13 +3529,15 @@ void bt_control_source_volume_sync_stop(void) {
     bt_source_vol_sync_active = false;
     pthread_join(bt_source_vol_sync_thread, NULL);
     bt_source_vol_sync_joinable = false;
-    atomic_store_explicit(&bt_source_vol_pending_percent, -1, memory_order_release);
 }
 
 bool bt_control_source_volume_sync_consume_percent(int * out_percent) {
+    pthread_mutex_lock(&bt_soft_volume_mutex);
     int percent = atomic_exchange_explicit(&bt_source_vol_pending_percent, -1,
                                            memory_order_acq_rel);
-    if (percent < 0) return false;
+    unsigned int generation = bt_source_vol_pending_audio_generation;
+    pthread_mutex_unlock(&bt_soft_volume_mutex);
+    if (percent < 0 || audio_get_volume_generation() != generation) return false;
     if (out_percent) *out_percent = percent;
     return true;
 }
@@ -2998,10 +3592,48 @@ static struct {
     char path[256];
     int attempts;        /* failed codec selections for path */
     uint32_t retry_at;
+    bool discovery_pending; /* waiting for SEP/name discovery; no attempt charged */
 } bt_pref = { .mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 
+static void bt_pref_rate_changed(void) {
+    pthread_mutex_lock(&bt_pref.mutex);
+    if (bt_pref.running && !atomic_load(&bt_pref.stop)) {
+        if (bt_pref.path[0]) bt_pref.refresh_due = true;
+        else bt_pref.scan_requested = true;
+        pthread_cond_signal(&bt_pref.cond);
+    }
+    pthread_mutex_unlock(&bt_pref.mutex);
+}
+
 static bool bt_pref_retry_scheduled_locked(void) {
-    return bt_pref.path[0] && bt_pref.attempts > 0 && bt_pref.attempts < BT_CODEC_RETRY_MAX_ATTEMPTS;
+    return bt_pref.path[0] && (bt_pref.discovery_pending ||
+           (bt_pref.attempts > 0 && bt_pref.attempts < BT_CODEC_RETRY_MAX_ATTEMPTS));
+}
+
+/* Called with bt_pref.mutex held. Discovery deferrals do not consume the
+ * finite selection-failure budget. */
+static void bt_pref_record_codec_result_locked(const char *path, bool applied, uint32_t defer_until) {
+    if (strcmp(bt_pref.path, path) != 0) return;
+    if (defer_until) {
+        bt_pref.discovery_pending = true;
+        bt_pref.retry_at = defer_until;
+    } else {
+        bt_pref.discovery_pending = false;
+        if (applied) {
+            bt_pref.attempts = 0;
+        } else if (++bt_pref.attempts < BT_CODEC_RETRY_MAX_ATTEMPTS) {
+            bt_pref.retry_at = bt_control_monotonic_ms() + BT_CODEC_RETRY_BASE_MS * (uint32_t) bt_pref.attempts;
+        } else {
+            DBG_LOG("bt_control: codec selection for %s gave up after %d attempts\n",
+                    path, bt_pref.attempts);
+        }
+    }
+}
+
+static void bt_pref_begin_work_locked(bool codec_work) {
+    bt_pref.codec_due = false;
+    if (codec_work) bt_pref.discovery_pending = false;
+    bt_pref.refresh_due = false;
 }
 
 static void * bt_pref_worker_func(void * arg) {
@@ -3023,6 +3655,7 @@ static void * bt_pref_worker_func(void * arg) {
             if (present && !bt_pref.path[0]) {
                 snprintf(bt_pref.path, sizeof(bt_pref.path), "%s", found);
                 bt_pref.attempts = 0;
+                bt_pref.discovery_pending = false;
                 bt_pref.codec_due = true;
             }
             continue;
@@ -3043,15 +3676,16 @@ static void * bt_pref_worker_func(void * arg) {
         }
         char path[256];
         snprintf(path, sizeof(path), "%s", bt_pref.path);
-        bt_pref.codec_due = false;
-        bt_pref.refresh_due = false;
+        bt_pref_begin_work_locked(codec_work);
         bt_pref.in_flight = true;
         pthread_mutex_unlock(&bt_pref.mutex);
 
         /* Codec first: selecting one can cycle the PCM, which would
          * otherwise drop a soft-volume setting applied just before. Stop is
          * checked between steps, so it waits for at most one of them. */
-        bool applied = codec_work ? bluealsa_apply_codec_preference_cancellable(path, &bt_pref.stop) : true;
+        uint32_t defer_until = 0;
+        bool applied = codec_work ? bluealsa_apply_codec_preference_deferred(path, &bt_pref.stop,
+                                                                               &defer_until) : true;
         /* Refresh-only passes too: the rate step waits for a verified codec,
          * so it never reconfigures a fallback codec or pre-empts a retry. */
         bool codec_verified = bluealsa_codec_verified(path);
@@ -3073,14 +3707,7 @@ static void * bt_pref_worker_func(void * arg) {
             bt_pref.attempts < BT_CODEC_RETRY_MAX_ATTEMPTS)
             bt_pref.codec_due = true;
         if (codec_work && strcmp(bt_pref.path, path) == 0) {
-            if (applied) {
-                bt_pref.attempts = 0;
-            } else if (++bt_pref.attempts < BT_CODEC_RETRY_MAX_ATTEMPTS) {
-                bt_pref.retry_at = bt_control_monotonic_ms() + BT_CODEC_RETRY_BASE_MS * (uint32_t) bt_pref.attempts;
-            } else {
-                DBG_LOG("bt_control: codec selection for %s gave up after %d attempts\n",
-                        path, bt_pref.attempts);
-            }
+            bt_pref_record_codec_result_locked(path, applied, defer_until);
         }
     }
     pthread_mutex_unlock(&bt_pref.mutex);
@@ -3097,6 +3724,7 @@ static void bt_pref_start(void) {
     bt_pref.refresh_due = false;
     bt_pref.path[0] = '\0';
     bt_pref.attempts = 0;
+    bt_pref.discovery_pending = false;
     bt_pref.running = pthread_create(&bt_pref.thread, NULL, bt_pref_worker_func, NULL) == 0;
     pthread_mutex_unlock(&bt_pref.mutex);
 }
@@ -3108,10 +3736,12 @@ static void bt_pref_stop(void) {
     atomic_store(&bt_pref.stop, true);
     pthread_cond_signal(&bt_pref.cond);
     pthread_mutex_unlock(&bt_pref.mutex);
-    if (!running) return;
-    pthread_join(bt_pref.thread, NULL);
+    if (running) pthread_join(bt_pref.thread, NULL);
     pthread_mutex_lock(&bt_pref.mutex);
     bt_pref.running = false;
+    bt_pref.discovery_pending = false;
+    bt_pref.attempts = 0;
+    bt_pref.path[0] = '\0';
     pthread_mutex_unlock(&bt_pref.mutex);
 }
 
@@ -3131,6 +3761,7 @@ static bool bt_pref_request(const char * path) {
         if (strcmp(bt_pref.path, path) != 0) {
             snprintf(bt_pref.path, sizeof(bt_pref.path), "%.*s", (int) sizeof(bt_pref.path) - 1, path);
             bt_pref.attempts = 0;
+            bt_pref.discovery_pending = false;
             bt_pref.codec_due = true;
             bt_pref.refresh_due = false;
         } else {
@@ -3138,7 +3769,8 @@ static bool bt_pref_request(const char * path) {
              * only when no selection is in flight or scheduled (a settled
              * success is then a cheap latch check). */
             bt_pref.refresh_due = true;
-            if (!bt_pref.in_flight && bt_pref.attempts == 0) bt_pref.codec_due = true;
+            if (!bt_pref.in_flight && bt_pref.attempts == 0 && !bt_pref.discovery_pending)
+                bt_pref.codec_due = true;
         }
         pthread_cond_signal(&bt_pref.cond);
     }
@@ -3162,6 +3794,7 @@ static void bt_pref_forget(const char * path) {
     if (!path || strcmp(bt_pref.path, path) == 0) {
         bt_pref.path[0] = '\0';
         bt_pref.attempts = 0;
+        bt_pref.discovery_pending = false;
         bt_pref.codec_due = false;
         bt_pref.refresh_due = false;
     }
@@ -3240,6 +3873,7 @@ static void bt_output_disconnect_publish_if_due(char * pending_path, uint32_t * 
     DBG_LOG("bt_control: output_disconnect_watch: PCMRemoved %s -- flagging disconnect\n", pending_path);
     bt_auto_note_disconnect(pending_path);
     bluealsa_clear_codec_path(pending_path); /* real disconnect: next connect must re-select */
+    bt_buds_reset(pending_path);
     bt_pref_forget(pending_path);
     pending_path[0] = '\0';
     *pending_deadline = 0;
@@ -3346,6 +3980,7 @@ static void * bt_output_disconnect_thread_func(void * arg) {
     /* The monitor can exit with a removal still unconfirmed, which would
      * leave the latch set and suppress the re-select on the next connect. */
     bluealsa_clear_codec_path(NULL);
+    bt_buds_reset(NULL);
     close(read_fd);
     subprocess_terminate(pid);
     atomic_store(&bt_output_disconnect_active, false);
@@ -3426,7 +4061,6 @@ bool bt_control_apply_output_settings(bool dac_mode_enabled, bool volume_sync_en
     pthread_mutex_lock(&bt_soft_volume_serial);
     atomic_store(&modern_soft_volume_requested, dac_mode_enabled || !volume_sync_enabled);
     atomic_store(&bt_source_soft_volume, true);
-    atomic_store(&bt_source_vol_pending_percent, -1);
     bluealsa_clear_soft_volume_path(NULL);
     pthread_mutex_unlock(&bt_soft_volume_serial);
 
@@ -3456,6 +4090,8 @@ bool bt_control_apply_output_settings(bool dac_mode_enabled, bool volume_sync_en
     /* Source only. In DAC mode the rate is the phone's choice and the local
      * DAC takes it as-is, so forcing 44.1 there would resample for nothing. */
     if (!dac_mode_enabled && bt_rate_wants_audio_cd()) argv[i++] = (char *) BT_A2DP_FORCE_44K1_ARG;
+    if (!dac_mode_enabled && bt_ssc_auto_profile_enabled())
+        argv[i++] = (char *) BT_SSC_AUTO_PROFILE_ARG;
     if (!dac_mode_enabled && bt_codec_is_sbc_xq())
         argv[i++] = (char *) "--sbc-quality=xq";
     if (dac_mode_enabled) {
@@ -3527,7 +4163,8 @@ static void bt_control_reapply_last_output_settings(void) {
 
 bool bt_control_set_codec(const char * codec) {
     if (!codec || (strcmp(codec, "auto") != 0 && strcmp(codec, "ldac") != 0 && strcmp(codec, "ldac_hq") != 0 &&
-                   strcmp(codec, "ldac_sq") != 0 && strcmp(codec, "aptx") != 0 &&
+                   strcmp(codec, "ldac_sq") != 0 && strcmp(codec, "ssc") != 0 &&
+                   strcmp(codec, "aptx") != 0 &&
                    strcmp(codec, "aac") != 0 && strcmp(codec, "sbc") != 0 &&
                    strcmp(codec, "sbc_xq") != 0)) return false;
     /* BlueALSA 5 receives the preference through its daemon arguments and

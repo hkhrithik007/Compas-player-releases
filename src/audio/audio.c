@@ -1203,6 +1203,7 @@ static double speed_for_decoder_locked(const char * path, const decoder_t * dec)
 static float volume = 1.0f;      /* UI-facing 0.0-1.0 percent, what audio_get_volume() returns */
 static float volume_gain = 1.0f; /* actual linear PCM multiplier the playback thread applies -- see audio_set_volume() */
 static atomic_uint volume_set_generation = 0;
+static atomic_uint volume_applied_generation = 0;
 static atomic_int max_volume_cap_percent = 100;
 static pthread_once_t volume_request_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t volume_request_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -2382,11 +2383,11 @@ static void publish_current_format_locked(const decoder_t * dec, const char * pa
     /* can_use_wide_path() alone is a prediction (source eligibility + what
      * output route is currently REQUESTED) -- audio_output_is_s24_active()
      * is the ground truth for what's actually open right now. They can
-     * disagree: a route change to Bluetooth, or an S24_LE hw_params
+     * disagree: an S24_LE hw_params
      * negotiation failure that fell back to S16_LE (see audio_output.c's
-     * open_device()), both leave can_use_wide_path() true while the device
+     * open_device()), can leave can_use_wide_path() true while the device
      * is actually running at S16_LE. Requiring both here means the UI never
-     * claims 24-bit output that isn't really happening (or, for USB, that the
+     * claims 24-bit output that isn't really happening (or, for piped output, that the
      * app didn't successfully request and spawn as a 24-bit stream). At a crossfade
      * promotion (cur_dec = nxt_dec) this can under-report by one chunk's
      * worth of time, since the device's format for the newly-promoted track
@@ -2768,8 +2769,8 @@ static inline write_result_t write_device_transition_ramp(const int16_t * buf, u
  * (buf_cur, already allocated at MAX_CHUNK_FRAMES*MAX_CHANNELS and otherwise
  * idle while a chunk is being decoded/written through this s32 path, is what
  * every real caller passes -- see write_device_with_retry_s32()'s own
- * caller). Used only if the device turns out not to actually be local or USB
- * S24_LE when it's time to write -- see the ground-truth check inside the loop.
+ * caller). Used only if the device turns out not to actually be S24_LE
+ * when it's time to write -- see the ground-truth check inside the loop.
  */
 static write_result_t write_device_with_retry_s32_ex(const int32_t * buf, uint64_t frames,
                                                     unsigned int channels,
@@ -2827,11 +2828,9 @@ static write_result_t write_device_with_retry_s32_ex(const int32_t * buf, uint64
             ok = audio_output_write_s24(cur_buf, remaining_frames, channels, &written_this_call);
         } else {
             /* ensure_device_format() above only REQUESTED S24_LE -- this is the
-             * ground truth for what actually opened. A route change to
-             * Bluetooth landing between the request and this write (want_s24
-             * is silently irrelevant to that path), or an S24_LE hw_params
+             * ground truth for what actually opened. An S24_LE hw_params
              * negotiation failure that fell back to S16_LE (open_device()'s own
-             * fallback), both leave this false even though the request above
+             * fallback) can leave this false even though the request above
              * just returned true. audio_output_write_s24() itself now refuses
              * this combination rather than corrupting samples (see its own
              * guard), so retrying it here would only exhaust the budget and
@@ -2912,8 +2911,8 @@ static write_result_t ensure_output_for_decoder(decoder_t * dec, uint64_t * fram
 }
 
 /* Decode/process/write one transition fade without narrowing an eligible S24
- * track.  The active output check is intentional: route changes and S24
- * negotiation fallback can make the request differ from the actual format.
+ * track. The active output check is intentional: local S24 negotiation
+ * fallback can make the request differ from the actual format.
  * The s32 writer retains its S16 fallback and exact delivered-frame count. */
 static uint64_t write_transition_fade(decoder_t * dec, uint64_t fade_frames,
                                       int16_t * buf_s16, int32_t * buf_s32,
@@ -3840,11 +3839,10 @@ static void * audio_thread_func(void * arg) {
                 if (!decoder_is_dop(&cur_dec)) ensure_device_format(cur_dec.channels, cur_dec.sample_rate, use_wide);
                 /* use_wide is only the REQUEST; audio_output_is_s24_active() (checked
                  * right after ensure_device_format() actually ran) is the ground truth
-                 * -- see its own doc comment for why these can disagree (route race,
-                 * hw_params negotiation failure). The decode/process/write branch
-                 * decision below re-derives this same combined check independently
-                 * rather than trusting this one, since a route change could still land
-                 * in the gap between here and there; this copy only drives the display
+                 * -- local hw_params negotiation can fall back to S16_LE.
+                 * The decode/process/write branch decision below re-derives this same combined check independently
+                 * rather than trusting this one, since output can be reopened between
+                 * here and there; this copy only drives the display
                  * value. */
                 pthread_mutex_lock(&audio_mutex);
                 if (current_format_info.valid) {
@@ -4701,9 +4699,7 @@ static void * audio_thread_func(void * arg) {
 #ifndef HOST_BUILD
             /* can_use_wide_path() alone is source-side eligibility only --
              * whether the device is ACTUALLY open as S24_LE right now
-             * can differ (a route change to Bluetooth landed after this
-             * track's initial ensure() returned, or hw_params negotiation
-             * failed). Checking audio_output_is_s24_active() as well
+             * can differ when hw_params negotiation failed. Checking audio_output_is_s24_active() as well
              * here, at the single point that decides whether this whole
              * chunk decodes/processes/writes through the s32 path, means a
              * stale or failed wide-path prediction falls through to the
@@ -5908,12 +5904,50 @@ static void audio_apply_volume(float new_volume, unsigned int generation) {
      * race a queued request that already sampled the old ceiling. */
     new_volume = audio_clamp_volume_locked(new_volume);
     audio_apply_volume_locked(new_volume);
+    atomic_store_explicit(&volume_applied_generation, generation, memory_order_release);
     pthread_mutex_unlock(&audio_mutex);
 }
 
 void audio_set_volume(float new_volume) {
     unsigned int generation = atomic_fetch_add(&volume_set_generation, 1) + 1;
     audio_apply_volume(new_volume, generation);
+}
+
+unsigned int audio_get_volume_generation(void) {
+    return atomic_load_explicit(&volume_set_generation, memory_order_acquire);
+}
+
+unsigned int audio_get_applied_volume_generation(void) {
+    return atomic_load_explicit(&volume_applied_generation, memory_order_acquire);
+}
+
+bool audio_try_set_external_volume(float new_volume, unsigned int expected_generation,
+                                   const atomic_uint * owner_generation,
+                                   unsigned int expected_owner_generation,
+                                   unsigned int * committed_generation) {
+    if (!owner_generation || !committed_generation) return false;
+
+    pthread_mutex_lock(&audio_mutex);
+    if (atomic_load_explicit(owner_generation, memory_order_acquire) != expected_owner_generation) {
+        pthread_mutex_unlock(&audio_mutex);
+        return false;
+    }
+
+    unsigned int generation = expected_generation;
+    unsigned int next_generation = expected_generation + 1;
+    if (!atomic_compare_exchange_strong_explicit(&volume_set_generation, &generation,
+                                                 next_generation, memory_order_acq_rel,
+                                                 memory_order_acquire)) {
+        pthread_mutex_unlock(&audio_mutex);
+        return false;
+    }
+
+    new_volume = audio_clamp_volume_locked(new_volume);
+    audio_apply_volume_locked(new_volume);
+    atomic_store_explicit(&volume_applied_generation, next_generation, memory_order_release);
+    *committed_generation = next_generation;
+    pthread_mutex_unlock(&audio_mutex);
+    return true;
 }
 
 int audio_clamp_volume_percent(int percent) {
