@@ -1,3 +1,4 @@
+
 name: Build Compass Player Firmware
 
 on:
@@ -23,7 +24,6 @@ jobs:
     timeout-minutes: 60
 
     steps:
-
       # ============================================================
       # CHECKOUT
       # ============================================================
@@ -104,7 +104,6 @@ jobs:
           echo
           echo "Player build completed."
 
-          test -f compas_player_target
           test -s compas_player_target
 
           ls -lh compas_player_target
@@ -125,14 +124,14 @@ jobs:
           make -j2 BOARD=r1 bootloader
 
           echo
-          echo "Bootloader build completed."
+          echo "Bootloader build command completed."
 
           # IMPORTANT:
-          # The current Makefile generates compas_bootloader.
-          test -f compas_bootloader
-          test -s compas_bootloader
+          # The expected root-level output is open_hiby_bootloader.
+          test -s open_hiby_bootloader
 
-          ls -lh compas_bootloader
+          echo "Bootloader output verified:"
+          ls -lh open_hiby_bootloader
 
       # ============================================================
       # VERIFY PLAYER
@@ -149,7 +148,6 @@ jobs:
           echo "Verifying Compass Player"
           echo "=========================================="
 
-          test -f "$BINARY"
           test -s "$BINARY"
 
           file "$BINARY"
@@ -171,13 +169,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          BINARY="compas_bootloader"
+          BINARY="open_hiby_bootloader"
 
           echo "=========================================="
           echo "Verifying HiBy R1 bootloader"
           echo "=========================================="
 
-          test -f "$BINARY"
           test -s "$BINARY"
 
           file "$BINARY"
@@ -204,7 +201,7 @@ jobs:
           echo "=========================================="
 
           test -s compas_player_target
-          test -s compas_bootloader
+          test -s open_hiby_bootloader
 
           echo
           echo "Player:"
@@ -212,13 +209,13 @@ jobs:
 
           echo
           echo "Bootloader:"
-          ls -lh compas_bootloader
+          ls -lh open_hiby_bootloader
 
           echo
           echo "SHA256:"
           sha256sum \
             compas_player_target \
-            compas_bootloader
+            open_hiby_bootloader
 
       # ============================================================
       # PACKAGE
@@ -235,12 +232,12 @@ jobs:
           cp compas_player_target \
             release/compas_player_target
 
-          cp compas_bootloader \
-            release/compas_bootloader
+          cp open_hiby_bootloader \
+            release/open_hiby_bootloader
 
           sha256sum \
             release/compas_player_target \
-            release/compas_bootloader \
+            release/open_hiby_bootloader \
             > release/SHA256SUMS
 
           cat > release/BUILD_INFO.txt <<EOF
@@ -255,7 +252,7 @@ jobs:
           compas_player_target
 
           Bootloader:
-          compas_bootloader
+          open_hiby_bootloader
           EOF
 
           echo
@@ -272,7 +269,7 @@ jobs:
           name: compass-player-firmware-${{ github.run_number }}
           path: |
             release/compas_player_target
-            release/compas_bootloader
+            release/open_hiby_bootloader
             release/SHA256SUMS
             release/BUILD_INFO.txt
           if-no-files-found: error
@@ -301,14 +298,14 @@ jobs:
           Included:
 
           - compas_player_target
-          - compas_bootloader
+          - open_hiby_bootloader
           - SHA256SUMS
           - BUILD_INFO.txt
           EOF
 
           gh release create "$TAG" \
             release/compas_player_target \
-            release/compas_bootloader \
+            release/open_hiby_bootloader \
             release/SHA256SUMS \
             release/BUILD_INFO.txt \
             --target "$GITHUB_SHA" \
@@ -338,14 +335,14 @@ jobs:
           Included:
 
           - compas_player_target
-          - compas_bootloader
+          - open_hiby_bootloader
           - SHA256SUMS
           - BUILD_INFO.txt
           EOF
 
           gh release create "$TAG" \
             release/compas_player_target \
-            release/compas_bootloader \
+            release/open_hiby_bootloader \
             release/SHA256SUMS \
             release/BUILD_INFO.txt \
             --verify-tag \
