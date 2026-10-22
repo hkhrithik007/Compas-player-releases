@@ -44,6 +44,45 @@ static pthread_mutex_t metadata_db_mutex;
 static pthread_mutex_t metadata_update_mutex;
 static _Thread_local unsigned metadata_query_depth;
 
+#define DISPLAY_SONG_CACHE_SIZE 32
+typedef struct {
+    bool valid;
+    song_row_t row;
+} display_song_cache_entry_t;
+static display_song_cache_entry_t display_song_cache[DISPLAY_SONG_CACHE_SIZE];
+static size_t display_song_cache_next;
+static pthread_mutex_t display_song_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Caller holds the database guard. Cache readers never acquire the database
+ * mutex, so mutation may safely invalidate in DB -> cache lock order. */
+static void display_song_cache_invalidate(void) {
+    pthread_mutex_lock(&display_song_cache_mutex);
+    memset(display_song_cache, 0, sizeof(display_song_cache));
+    display_song_cache_next = 0;
+    pthread_mutex_unlock(&display_song_cache_mutex);
+}
+
+static void display_song_cache_store(const song_row_t *row) {
+    size_t path_len = strnlen(row->path, sizeof(row->path));
+    if (path_len == 0 || path_len >= sizeof(row->path)) return;
+    pthread_mutex_lock(&display_song_cache_mutex);
+    size_t slot = DISPLAY_SONG_CACHE_SIZE;
+    for (size_t i = 0; i < DISPLAY_SONG_CACHE_SIZE; i++) {
+        if (display_song_cache[i].valid &&
+            strcmp(display_song_cache[i].row.path, row->path) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == DISPLAY_SONG_CACHE_SIZE) {
+        slot = display_song_cache_next;
+        display_song_cache_next = (display_song_cache_next + 1) % DISPLAY_SONG_CACHE_SIZE;
+    }
+    display_song_cache[slot].row = *row;
+    display_song_cache[slot].valid = true;
+    pthread_mutex_unlock(&display_song_cache_mutex);
+}
+
 static void metadata_db_mutex_init(void) {
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
@@ -257,6 +296,9 @@ static void copy_song(const tagcache_song_t * src, song_row_t * dst) {
     dst->tags.track_number = src->track_number;
     dst->tags.disc_number = src->disc_number;
     dst->tags.release_year = src->release_year;
+    /* Do not let a truncated path become a cache key for another song. */
+    if (strnlen(src->path, sizeof(dst->path)) < sizeof(dst->path))
+        display_song_cache_store(dst);
 }
 
 static void copy_group(const tagcache_group_t * src, group_row_t * dst) {
@@ -407,6 +449,7 @@ static metadata_db_load_outcome_t capture_tagcache_outcome(bool update_ready) {
 metadata_db_load_outcome_t metadata_db_open(void) {
     METADATA_UPDATE_GUARD;
     METADATA_DB_GUARD;
+    display_song_cache_invalidate();
     if (db_ready) {
         return last_outcome;
     }
@@ -552,6 +595,26 @@ bool metadata_db_try_get_generation(int32_t * out_generation) {
     return true;
 }
 
+bool metadata_db_try_get_catalog_library_id(char * out_id, size_t out_size) {
+    if (!out_id || out_size == 0) return false;
+    out_id[0] = '\0';
+    pthread_once(&metadata_db_mutex_once, metadata_db_mutex_init);
+    if (pthread_mutex_trylock(&metadata_db_mutex) != 0) return false;
+    bool available = db_ready && !catalog_rebuild_pending && catalog_library_id_ready &&
+                     !catalog_library_id_force_rotation && catalog_library_id[0] != '\0';
+    if (available) {
+        size_t id_len = strnlen(catalog_library_id, sizeof(catalog_library_id));
+        if (id_len >= out_size || id_len >= sizeof(catalog_library_id)) {
+            available = false;
+        } else {
+            memcpy(out_id, catalog_library_id, id_len + 1);
+        }
+    }
+    pthread_mutex_unlock(&metadata_db_mutex);
+    if (!available) out_id[0] = '\0';
+    return available;
+}
+
 /* Re-files every track under a new delimiter set. Held under the same guard as
  * every other tagcache access: the rebuild frees and replaces the published
  * indexes, so a reader or a background scan running concurrently would be left
@@ -584,6 +647,7 @@ bool metadata_db_try_artist_row(const char * raw_artist, int64_t * out_offset) {
 void metadata_db_close(void) {
     METADATA_UPDATE_GUARD;
     METADATA_DB_GUARD;
+    display_song_cache_invalidate();
     tagcache_close();
     catalog_unpin_directory();
     db_ready = false;
@@ -600,6 +664,7 @@ void metadata_db_begin_update(void) {
     METADATA_UPDATE_GUARD;
     METADATA_DB_GUARD;
     if (!db_ready) return;
+    display_song_cache_invalidate();
     tagcache_begin_update_with_lock(metadata_query_unlock, metadata_query_lock);
 }
 
@@ -607,13 +672,17 @@ void metadata_db_begin_targeted_update(void) {
     METADATA_UPDATE_GUARD;
     METADATA_DB_GUARD;
     if (!db_ready) return;
+    display_song_cache_invalidate();
     tagcache_begin_targeted_update_with_lock(metadata_query_unlock, metadata_query_lock);
 }
 
 bool metadata_db_delete_target_path(const char *path) {
     METADATA_UPDATE_GUARD;
     METADATA_DB_GUARD;
-    return db_ready && tagcache_delete_target_path(path);
+    if (!db_ready) return false;
+    bool deleted = tagcache_delete_target_path(path);
+    if (deleted) display_song_cache_invalidate();
+    return deleted;
 }
 
 bool metadata_db_get(const char * path, int64_t mtime, int64_t size, cached_tags_t * out) {
@@ -641,6 +710,7 @@ bool metadata_db_put(const char * path, int64_t mtime, int64_t size, const cache
     METADATA_UPDATE_GUARD;
     METADATA_DB_GUARD;
     if (!db_ready || !tags) return true;
+    display_song_cache_invalidate();
     bool tags_changed = true;
     tagcache_upsert_year_changed(path, clamp_i32(mtime), clamp_i32(size), tags->title, tags->artist, tags->album,
                                  tags->album_artist, tags->genre, tags->track_number, tags->disc_number,
@@ -656,6 +726,7 @@ bool metadata_db_end_update(void) {
     METADATA_DB_GUARD;
     if (!db_ready) return false;
     bool ok = tagcache_end_update_with_lock(metadata_query_unlock, metadata_query_lock);
+    display_song_cache_invalidate();
     capture_tagcache_outcome(true);
     if (ok && catalog_library_id_force_rotation && catalog_identity_prepare())
         catalog_rebuild_pending = false;
@@ -667,6 +738,7 @@ void metadata_db_abort_update(void) {
     METADATA_DB_GUARD;
     if (!db_ready) return;
     tagcache_abort_update();
+    display_song_cache_invalidate();
     capture_tagcache_outcome(true);
 }
 
@@ -851,6 +923,23 @@ bool metadata_db_get_song_by_path(const char * path, song_row_t * out_row) {
     return true;
 }
 
+bool metadata_db_try_get_cached_song_by_path(const char *path, song_row_t *out_row) {
+    if (!path || !out_row) return false;
+    size_t path_len = strnlen(path, sizeof(out_row->path));
+    if (path_len == 0 || path_len >= sizeof(out_row->path)) return false;
+    if (pthread_mutex_trylock(&display_song_cache_mutex) != 0) return false;
+    bool found = false;
+    for (size_t i = 0; i < DISPLAY_SONG_CACHE_SIZE; i++) {
+        if (display_song_cache[i].valid && strcmp(display_song_cache[i].row.path, path) == 0) {
+            *out_row = display_song_cache[i].row;
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&display_song_cache_mutex);
+    return found;
+}
+
 void metadata_db_get_songs_by_ids(const int64_t * ids, int count, song_row_t * out_rows) {
     METADATA_DB_GUARD;
     for (int i = 0; i < count; i++) out_rows[i].id = -1;
@@ -1011,6 +1100,308 @@ static metadata_db_catalog_result_t catalog_page_begin_locked(
     if (expected_revision && strcmp(expected_revision, out_page->revision) != 0)
         return METADATA_DB_CATALOG_STALE;
     return METADATA_DB_CATALOG_OK;
+}
+
+bool metadata_db_catalog_revision_matches(const char *expected_revision) {
+    if (!expected_revision || !expected_revision[0]) return false;
+    metadata_db_catalog_page_t page = {0};
+    METADATA_DB_GUARD;
+    return catalog_page_begin_locked(expected_revision, &page) == METADATA_DB_CATALOG_OK;
+}
+
+static bool metadata_db_query_try_lock(void) {
+    pthread_once(&metadata_db_mutex_once, metadata_db_mutex_init);
+    if (pthread_mutex_trylock(&metadata_db_mutex) != 0) return false;
+    metadata_query_depth++;
+    return true;
+}
+
+static void metadata_db_query_unlock(void) {
+    metadata_query_depth--;
+    pthread_mutex_unlock(&metadata_db_mutex);
+}
+
+metadata_db_catalog_result_t metadata_db_try_catalog_revision_check(const char *expected_revision) {
+    if (!expected_revision || !expected_revision[0]) return METADATA_DB_CATALOG_UNAVAILABLE;
+    if (!metadata_db_query_try_lock()) return METADATA_DB_CATALOG_BUSY;
+    metadata_db_catalog_page_t page = {0};
+    metadata_db_catalog_result_t result = catalog_page_begin_locked(expected_revision, &page);
+    metadata_db_query_unlock();
+    return result;
+}
+
+bool metadata_db_try_catalog_revision_matches(const char *expected_revision) {
+    return metadata_db_try_catalog_revision_check(expected_revision) == METADATA_DB_CATALOG_OK;
+}
+
+typedef struct {
+    int rank;
+    int disc_number;
+    int track_number;
+} collection_album_rank_t;
+
+static bool collection_cancelled(metadata_db_cancel_fn is_cancelled, void *userdata) {
+    return is_cancelled && is_cancelled(userdata);
+}
+
+static bool collection_pause_for_lock(metadata_db_cancel_fn is_cancelled, void *userdata) {
+    struct timespec pause = { .tv_sec = 0, .tv_nsec = 5000000L };
+    while (!metadata_db_query_try_lock()) {
+        if (collection_cancelled(is_cancelled, userdata)) return false;
+        nanosleep(&pause, NULL);
+    }
+    return true;
+}
+
+static bool append_collection_ranks(int **ranks, int *count, int *capacity,
+                                    const int *chunk, int chunk_count, int maximum) {
+    if (chunk_count <= 0) return true;
+    if (chunk_count > maximum - *count) return false;
+    int needed = *count + chunk_count;
+    if (needed > *capacity) {
+        int next_capacity = *capacity ? *capacity : 64;
+        while (next_capacity < needed) {
+            if (next_capacity > maximum / 2) { next_capacity = maximum; break; }
+            next_capacity *= 2;
+        }
+        if (next_capacity < needed || (size_t)next_capacity > SIZE_MAX / sizeof(**ranks)) return false;
+        int *next = realloc(*ranks, (size_t)next_capacity * sizeof(**ranks));
+        if (!next) return false;
+        *ranks = next;
+        *capacity = next_capacity;
+    }
+    memcpy(*ranks + *count, chunk, (size_t)chunk_count * sizeof(**ranks));
+    *count = needed;
+    return true;
+}
+
+static bool append_album_ranks(collection_album_rank_t **ranks, int *count, int *capacity,
+                               const collection_album_rank_t *chunk, int chunk_count,
+                               int maximum) {
+    if (chunk_count <= 0) return true;
+    if (chunk_count > maximum - *count) return false;
+    int needed = *count + chunk_count;
+    if (needed > *capacity) {
+        int next_capacity = *capacity ? *capacity : 64;
+        while (next_capacity < needed) {
+            if (next_capacity > maximum / 2) { next_capacity = maximum; break; }
+            next_capacity *= 2;
+        }
+        if (next_capacity < needed || (size_t)next_capacity > SIZE_MAX / sizeof(**ranks)) return false;
+        collection_album_rank_t *next = realloc(*ranks, (size_t)next_capacity * sizeof(**ranks));
+        if (!next) return false;
+        *ranks = next;
+        *capacity = next_capacity;
+    }
+    memcpy(*ranks + *count, chunk, (size_t)chunk_count * sizeof(**ranks));
+    *count = needed;
+    return true;
+}
+
+static bool collection_album_rank_before(const collection_album_rank_t *a,
+                                         const collection_album_rank_t *b,
+                                         const metadata_db_snapshot_t *snapshot,
+                                         bool *ok) {
+    int da = a->disc_number > 0 ? a->disc_number : 1;
+    int db = b->disc_number > 0 ? b->disc_number : 1;
+    if (da != db) return da < db;
+    int ta = a->track_number, tb = b->track_number;
+    if (ta > 0 || tb > 0) {
+        if (ta <= 0) return false;
+        if (tb <= 0) return true;
+        if (ta != tb) return ta < tb;
+    }
+    char path_a[600], path_b[600];
+    if (!tagcache_snapshot_path_at(snapshot, a->rank, path_a, sizeof(path_a)) ||
+        !tagcache_snapshot_path_at(snapshot, b->rank, path_b, sizeof(path_b))) {
+        *ok = false;
+        return a->rank < b->rank;
+    }
+    int paths = strcasecmp(path_a, path_b);
+    return paths ? paths < 0 : a->rank < b->rank;
+}
+
+static bool sort_album_collection_ranks(collection_album_rank_t *ranks, int count,
+                                        const metadata_db_snapshot_t *snapshot,
+                                        metadata_db_cancel_fn is_cancelled, void *userdata) {
+    if (count < 2) return true;
+    if ((size_t)count > SIZE_MAX / sizeof(*ranks)) return false;
+    collection_album_rank_t *scratch = malloc((size_t)count * sizeof(*scratch));
+    if (!scratch) return false;
+    bool ok = true;
+    for (int width = 1; width < count && ok;) {
+        for (int start = 0; start < count && ok; start += width * 2) {
+            if (collection_cancelled(is_cancelled, userdata)) { ok = false; break; }
+            int mid = start + width < count ? start + width : count;
+            int end = mid + width < count ? mid + width : count;
+            int left = start, right = mid, out = start;
+            while (left < mid && right < end) {
+                if (!ok) break;
+                if (collection_album_rank_before(&ranks[left], &ranks[right], snapshot, &ok))
+                    scratch[out++] = ranks[left++];
+                else scratch[out++] = ranks[right++];
+            }
+            while (left < mid) scratch[out++] = ranks[left++];
+            while (right < end) scratch[out++] = ranks[right++];
+            memcpy(ranks + start, scratch + start, (size_t)(end - start) * sizeof(*ranks));
+        }
+        if (width > count / 2) break;
+        width *= 2;
+    }
+    free(scratch);
+    return ok && !collection_cancelled(is_cancelled, userdata);
+}
+
+metadata_db_catalog_result_t metadata_db_filtered_snapshot_open(
+    const char *expected_revision, const char *artist, const char *album_artist,
+    bool exact_album_artist, const char *album, const char *genre,
+    metadata_db_snapshot_t **out_snapshot,
+    int **out_title_ranks, int *out_count, metadata_db_cancel_fn is_cancelled,
+    void *cancel_userdata) {
+    if (out_snapshot) *out_snapshot = NULL;
+    if (out_title_ranks) *out_title_ranks = NULL;
+    if (out_count) *out_count = 0;
+    if (!expected_revision || !expected_revision[0] || !out_snapshot ||
+        !out_title_ranks || !out_count ||
+        (genre && strlen(genre) >= METADATA_DB_TEXT_MAX))
+        return METADATA_DB_CATALOG_UNAVAILABLE;
+
+    metadata_db_snapshot_t *snapshot = NULL;
+    tagcache_query_t query;
+    uint64_t candidate_count = 0;
+    int32_t catalog_count = 0;
+    bool album_order = album && album[0];
+    bool album_artist_empty_filter = exact_album_artist && (!album_artist || !album_artist[0]);
+    bool need_song_fields = album_artist_empty_filter || (genre && genre[0]) || album_order;
+    int *ranks = NULL;
+    int count = 0, capacity = 0;
+    collection_album_rank_t *album_ranks = NULL;
+    int album_capacity = 0;
+    uint8_t *seen_ranks = NULL;
+    metadata_db_catalog_result_t result = METADATA_DB_CATALOG_OK;
+
+    if (!collection_pause_for_lock(is_cancelled, cancel_userdata)) return METADATA_DB_CATALOG_UNAVAILABLE;
+    metadata_db_catalog_page_t page = {0};
+    result = catalog_page_begin_locked(expected_revision, &page);
+    if (result == METADATA_DB_CATALOG_OK) {
+        catalog_count = tagcache_live_count();
+        if (catalog_count < 0) result = METADATA_DB_CATALOG_UNAVAILABLE;
+    }
+    if (result == METADATA_DB_CATALOG_OK) {
+        snapshot = tagcache_snapshot_open(false);
+        if (!snapshot || tagcache_snapshot_count(snapshot) != catalog_count) result = METADATA_DB_CATALOG_UNAVAILABLE;
+    }
+    if (result == METADATA_DB_CATALOG_OK) {
+        tagcache_query_begin(&query, TAGCACHE_QUERY_SONGS, NULL, artist, album_artist, album);
+        candidate_count = query.count;
+    }
+    metadata_db_query_unlock();
+    if (result != METADATA_DB_CATALOG_OK) goto collection_fail;
+    if ((size_t)catalog_count > SIZE_MAX - 7u) {
+        result = METADATA_DB_CATALOG_UNAVAILABLE;
+        goto collection_fail;
+    }
+    seen_ranks = calloc(((size_t)catalog_count + 7u) / 8u, 1);
+    if (catalog_count > 0 && !seen_ranks) {
+        result = METADATA_DB_CATALOG_UNAVAILABLE;
+        goto collection_fail;
+    }
+
+    while (query.position < candidate_count) {
+        if (!collection_pause_for_lock(is_cancelled, cancel_userdata)) {
+            result = METADATA_DB_CATALOG_UNAVAILABLE;
+            goto collection_fail;
+        }
+        page = (metadata_db_catalog_page_t){0};
+        result = catalog_page_begin_locked(expected_revision, &page);
+        if (result != METADATA_DB_CATALOG_OK) {
+            metadata_db_query_unlock();
+            goto collection_fail;
+        }
+        int chunk_ranks[64];
+        collection_album_rank_t chunk_albums[64];
+        int chunk_count = 0;
+        uint64_t end_position = query.position + 64;
+        if (end_position > candidate_count) end_position = candidate_count;
+        uint64_t full_query_count = query.count;
+        query.count = end_position;
+        int32_t rank;
+        while (query.position < end_position && tagcache_query_next(&query, &rank)) {
+            if (collection_cancelled(is_cancelled, cancel_userdata)) {
+                result = METADATA_DB_CATALOG_UNAVAILABLE;
+                break;
+            }
+            if (rank < 0 || rank >= catalog_count) {
+                result = METADATA_DB_CATALOG_UNAVAILABLE;
+                break;
+            }
+            tagcache_song_t song = {0};
+            if (need_song_fields && !tagcache_song_fields_at_title_rank(
+                    rank, (album_artist_empty_filter ? TAGCACHE_FIELD_ALBUM_ARTIST : 0u) |
+                         ((genre && genre[0]) ? TAGCACHE_FIELD_GENRE : 0u), &song)) {
+                result = METADATA_DB_CATALOG_UNAVAILABLE;
+                break;
+            }
+            if (album_artist_empty_filter && song.album_artist[0]) continue;
+            if (genre && genre[0] && strcasecmp(song.genre, genre) != 0) continue;
+            size_t seen_byte = (size_t)rank >> 3;
+            uint8_t seen_mask = (uint8_t)(1u << ((unsigned)rank & 7u));
+            if (seen_ranks[seen_byte] & seen_mask) {
+                result = METADATA_DB_CATALOG_UNAVAILABLE;
+                break;
+            }
+            seen_ranks[seen_byte] |= seen_mask;
+            if (album_order) {
+                chunk_albums[chunk_count++] = (collection_album_rank_t){
+                    .rank = rank, .disc_number = song.disc_number, .track_number = song.track_number
+                };
+            } else {
+                chunk_ranks[chunk_count++] = rank;
+            }
+        }
+        query.count = full_query_count;
+        if (result == METADATA_DB_CATALOG_OK && query.position < end_position)
+            result = METADATA_DB_CATALOG_UNAVAILABLE;
+        metadata_db_query_unlock();
+        if (result != METADATA_DB_CATALOG_OK) goto collection_fail;
+
+        bool appended = album_order
+            ? append_album_ranks(&album_ranks, &count, &album_capacity, chunk_albums, chunk_count, catalog_count)
+            : append_collection_ranks(&ranks, &count, &capacity, chunk_ranks, chunk_count, catalog_count);
+        if (!appended) {
+            result = METADATA_DB_CATALOG_UNAVAILABLE;
+            goto collection_fail;
+        }
+        if (collection_cancelled(is_cancelled, cancel_userdata)) {
+            result = METADATA_DB_CATALOG_UNAVAILABLE;
+            goto collection_fail;
+        }
+    }
+
+    if (album_order) {
+        if (!sort_album_collection_ranks(album_ranks, count, snapshot, is_cancelled, cancel_userdata)) {
+            result = METADATA_DB_CATALOG_UNAVAILABLE;
+            goto collection_fail;
+        }
+        if (count > 0) {
+            ranks = malloc((size_t)count * sizeof(*ranks));
+            if (!ranks) { result = METADATA_DB_CATALOG_UNAVAILABLE; goto collection_fail; }
+            for (int i = 0; i < count; i++) ranks[i] = album_ranks[i].rank;
+        }
+    }
+    free(seen_ranks);
+    free(album_ranks);
+    *out_snapshot = snapshot;
+    *out_title_ranks = ranks;
+    *out_count = count;
+    return METADATA_DB_CATALOG_OK;
+
+collection_fail:
+    free(seen_ranks);
+    free(album_ranks);
+    free(ranks);
+    if (snapshot) tagcache_snapshot_close(snapshot);
+    return result;
 }
 
 static bool catalog_album_representative_locked(const tagcache_song_t * song, int64_t * out_id) {

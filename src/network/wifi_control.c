@@ -12,6 +12,60 @@
 #define WIFI_INTERFACE "wlan0"
 #define WIFI_QUERY_TIMEOUT_MS 1500
 
+/* wpa_cli formats SSIDs with wpa_supplicant's printf_encode(): bytes which
+ * aren't safe to print are represented by backslash escapes. Decode into a
+ * byte buffer before applying the 802.11 32-byte limit. */
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Returns decoded byte count, or -1 for malformed escapes, embedded NUL,
+ * or an SSID longer than 32 bytes. */
+static int decode_wpa_ssid(const char *src, char *dst, size_t cap) {
+    unsigned char decoded[WIFI_MAX_SSID_LEN];
+    size_t n = 0;
+    for (size_t i = 0; src[i]; i++) {
+        unsigned char c = (unsigned char) src[i];
+        if (c == '\\') {
+            c = (unsigned char) src[++i];
+            if (!c) return -1;
+            if (c == 'x') {
+                if (!src[i + 1] || !src[i + 2]) return -1;
+                int hi = hex_value(src[i + 1]), lo = hex_value(src[i + 2]);
+                if (hi < 0 || lo < 0) return -1;
+                c = (unsigned char) ((hi << 4) | lo);
+                i += 2;
+            } else if (c == 'n') c = '\n';
+            else if (c == 'r') c = '\r';
+            else if (c == 't') c = '\t';
+            else if (c == 'e') c = 0x1b;
+            else if (c != '\\' && c != '"') return -1;
+        }
+        if (!c || n >= 32) return -1;
+        decoded[n++] = c;
+    }
+    if (n + 1 > cap) return -1;
+    memcpy(dst, decoded, n);
+    dst[n] = '\0';
+    return (int) n;
+}
+
+static bool copy_status_ssid(const char *status, char *dst, size_t cap) {
+    const char *p = strstr(status, "\nssid=");
+    if (!p) return false;
+    p += 6;
+    const char *end = strchr(p, '\n');
+    size_t len = end ? (size_t)(end - p) : strlen(p);
+    if (len >= 256) return false;
+    char encoded[256];
+    memcpy(encoded, p, len);
+    encoded[len] = '\0';
+    return decode_wpa_ssid(encoded, dst, cap) >= 0;
+}
+
 bool wifi_control_is_enabled(void) {
     return access("/var/run/wpa_supplicant/" WIFI_INTERFACE, F_OK) == 0;
 }
@@ -83,15 +137,7 @@ int wifi_control_get_results(wifi_network_t * out, int max_count) {
     char current_ssid[WIFI_MAX_SSID_LEN] = "";
     char * status_argv[] = { (char *) "wpa_cli", (char *) "-i", (char *) WIFI_INTERFACE, (char *) "status", NULL };
     if (subprocess_run(status_argv, status_buf, sizeof(status_buf))) {
-        const char * p = strstr(status_buf, "\nssid=");
-        if (p) {
-            p += 6;
-            const char * end = strchr(p, '\n');
-            size_t len = end ? (size_t) (end - p) : strlen(p);
-            if (len >= sizeof(current_ssid)) len = sizeof(current_ssid) - 1;
-            memcpy(current_ssid, p, len);
-            current_ssid[len] = '\0';
-        }
+        (void) copy_status_ssid(status_buf, current_ssid, sizeof(current_ssid));
     }
 
     int count = 0;
@@ -105,23 +151,31 @@ int wifi_control_get_results(wifi_network_t * out, int max_count) {
             continue;
         }
 
-        char * tab_save = NULL;
-        char * bssid = strtok_r(line, "\t", &tab_save);
-        char * freq = strtok_r(NULL, "\t", &tab_save);
-        char * signal = strtok_r(NULL, "\t", &tab_save);
-        char * flags = strtok_r(NULL, "\t", &tab_save);
-        char * ssid = strtok_r(NULL, "\t", &tab_save);
+        char * bssid = line;
+        char * freq = strchr(bssid, '\t');
+        if (freq) *freq++ = '\0';
+        char * signal = freq ? strchr(freq, '\t') : NULL;
+        if (signal) *signal++ = '\0';
+        char * flags = signal ? strchr(signal, '\t') : NULL;
+        if (flags) *flags++ = '\0';
+        char * ssid = flags ? strchr(flags, '\t') : NULL;
+        if (ssid) *ssid++ = '\0';
         (void) bssid;
         (void) freq;
 
         if (ssid && ssid[0] != '\0' && signal && flags) {
             int level = rssi_to_level(atoi(signal));
             bool secured = strstr(flags, "WPA") != NULL || strstr(flags, "WEP") != NULL;
-            bool is_current = current_ssid[0] != '\0' && strcmp(current_ssid, ssid) == 0;
+            char decoded_ssid[WIFI_MAX_SSID_LEN];
+            if (decode_wpa_ssid(ssid, decoded_ssid, sizeof(decoded_ssid)) < 0) {
+                line = strtok_r(NULL, "\n", &line_save);
+                continue;
+            }
+            bool is_current = current_ssid[0] != '\0' && strcmp(current_ssid, decoded_ssid) == 0;
 
             int existing = -1;
             for (int i = 0; i < count; i++) {
-                if (strcmp(out[i].ssid, ssid) == 0) {
+                if (strcmp(out[i].ssid, decoded_ssid) == 0) {
                     existing = i;
                     break;
                 }
@@ -131,7 +185,7 @@ int wifi_control_get_results(wifi_network_t * out, int max_count) {
                  * network) -- keep the strongest signal seen for it. */
                 if (level > out[existing].signal_level) out[existing].signal_level = level;
             } else {
-                snprintf(out[count].ssid, sizeof(out[count].ssid), "%s", ssid);
+                memcpy(out[count].ssid, decoded_ssid, strlen(decoded_ssid) + 1);
                 out[count].signal_level = level;
                 out[count].secured = secured;
                 out[count].is_current = is_current;
@@ -149,6 +203,9 @@ static void bytes_to_hex(const unsigned char * data, size_t len, char * out_hex)
 }
 
 bool wifi_control_connect(const char * ssid, const char * password) {
+    if (!ssid) return false;
+    size_t ssid_len = strlen(ssid);
+    if (ssid_len == 0 || ssid_len > 32) return false;
     char out[256];
 
     char * add_argv[] = { (char *) "wpa_cli", (char *) "-i", (char *) WIFI_INTERFACE, (char *) "add_network", NULL };
@@ -159,8 +216,6 @@ bool wifi_control_connect(const char * ssid, const char * password) {
     snprintf(id_str, sizeof(id_str), "%d", id);
 
     char ssid_hex[WIFI_MAX_SSID_LEN * 2 + 1];
-    size_t ssid_len = strlen(ssid);
-    if (ssid_len > WIFI_MAX_SSID_LEN - 1) ssid_len = WIFI_MAX_SSID_LEN - 1;
     bytes_to_hex((const unsigned char *) ssid, ssid_len, ssid_hex);
     ssid_hex[ssid_len * 2] = '\0';
 
@@ -249,14 +304,22 @@ int wifi_control_list_saved(wifi_saved_network_t * out, int max_count) {
         /* Capture the final column before strtok_r replaces separators. */
         const char * flags = strrchr(line, '\t');
         if (flags) flags++;
-        char * tab_save = NULL;
-        char * id_str = strtok_r(line, "\t", &tab_save);
-        char * ssid = strtok_r(NULL, "\t", &tab_save);
+        char * id_str = line;
+        char * ssid = strchr(id_str, '\t');
+        if (ssid) {
+            *ssid++ = '\0';
+            char *ssid_end = strchr(ssid, '\t');
+            if (ssid_end) *ssid_end = '\0';
+        }
         if (id_str && ssid) {
             wifi_saved_network_t * network = &out[count];
             memset(network, 0, sizeof(*network));
             network->id = atoi(id_str);
-            snprintf(network->ssid, sizeof(network->ssid), "%s", ssid);
+            if (decode_wpa_ssid(ssid, network->ssid, sizeof(network->ssid)) <= 0) {
+                memset(network, 0, sizeof(*network));
+                line = strtok_r(NULL, "\n", &line_save);
+                continue;
+            }
 
             /* list_networks has four tab-separated columns. Read flags from
              * the final column so an empty BSSID doesn't shift the parse. */
@@ -324,16 +387,8 @@ bool wifi_control_get_info(wifi_info_t * out) {
         return false;
     if (!strstr(status_buf, "wpa_state=COMPLETED")) return false;
 
-    const char * p = strstr(status_buf, "\nssid=");
-    if (p) {
-        p += 6;
-        const char * end = strchr(p, '\n');
-        size_t len = end ? (size_t) (end - p) : strlen(p);
-        if (len >= sizeof(out->ssid)) len = sizeof(out->ssid) - 1;
-        memcpy(out->ssid, p, len);
-        out->ssid[len] = '\0';
-    }
-    p = strstr(status_buf, "\nip_address=");
+    (void) copy_status_ssid(status_buf, out->ssid, sizeof(out->ssid));
+    const char *p = strstr(status_buf, "\nip_address=");
     if (p) sscanf(p + 12, "%15[^\n]", out->ip);
 
     char signal_buf[512];

@@ -621,6 +621,9 @@ bool settings_load(player_settings_t * out) {
         } else if (strcmp(key, "quick_drawer_order") == 0) {
             ui_item_order_t order;
             if (ui_order_parse(UI_ORDER_DRAWER, value, &order)) out->ui_customization.drawer = order;
+        } else if (strcmp(key, "music_order") == 0) {
+            ui_item_order_t order;
+            if (ui_order_parse(UI_ORDER_MUSIC, value, &order)) out->ui_customization.music = order;
         } else if (strcmp(key, "quick_drawer_enabled") == 0) {
             out->ui_customization.drawer_enabled = strcmp(value, "1") == 0;
         } else if (strcmp(key, "quick_drawer_eq_visible") == 0) {
@@ -693,7 +696,7 @@ bool settings_load(player_settings_t * out) {
 
     if (out->setup_step < 0 || out->setup_step > 7) out->setup_step = 0;
     if (out->usb_mode < 0 || out->usb_mode > 2) out->usb_mode = 0; /* defensive re-clamp, same reasoning as screen_timeout_seconds -- the settings file is plaintext and could be hand-edited out of range */
-    if (out->play_mode < 0 || out->play_mode > 3) out->play_mode = 0;
+    if (out->play_mode < 0 || out->play_mode > 4) out->play_mode = 0;
     if (out->font_size_tier < 0 || out->font_size_tier > 2) out->font_size_tier = 1;
     out->keyboard_layout = normalize_keyboard_layout(out->keyboard_layout);
     if (out->lyrics_font_size_tier != 1 && out->lyrics_font_size_tier != 2) out->lyrics_font_size_tier = 1; /* Medium/Large only, see settings.h */
@@ -872,6 +875,8 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "swipe_up_home_enabled=%d\n", settings->swipe_up_home_enabled ? 1 : 0);
     fprintf(f, "quick_drawer_volume_visible=%d\n", settings->quick_drawer_volume_visible ? 1 : 0);
     char ui_order_text[UI_ORDER_MAX * 24];
+    ui_order_format(UI_ORDER_MUSIC, &settings->ui_customization.music, ui_order_text, sizeof(ui_order_text));
+    fprintf(f, "music_order=%s\n", ui_order_text);
     if (!ui_drawer_order_matches_default(&settings->ui_customization.drawer, &ui_defaults)) {
         ui_order_format(UI_ORDER_DRAWER, &settings->ui_customization.drawer, ui_order_text, sizeof(ui_order_text));
         fprintf(f, "quick_drawer_order=%s\n", ui_order_text);

@@ -180,13 +180,13 @@ plugin.define({
 
 ### Checking what the player supports
 
-- `plugin.api_version()` returns the API version, currently `16`.
+- `plugin.api_version()` returns the API version, currently `18`.
 - `plugin.has_capability(name)` returns whether one feature exists. Prefer it
   over `api_min` when you only need one feature. Tokens:
 
   | Area | Tokens |
   | --- | --- |
-  | UI | `ui.list`, `ui.settings`, `ui.row_width`, `ui.text_input`, `ui.toast`, `ui.progress`, `ui.screenshot`, `ui.theme`, `ui.theme_refresh`, `ui.reload`, `ui.home_layout`, `ui.home_tiles`, `ui.launcher_layout`, `ui.home_background`, `ui.lock_screen`, `ui.quick_toggle`, `ui.text_view`, `ui.text_view_images`, `ui.list_grid`, `ui.list_showing`, `ui.list_update`, `ui.list_wrap`, `ui.settings_list_wrap`, `ui.settings_list_10_sliders`, `ui.order_editor`, `ui.player_layout_xml`, `ui.file_manager`, `ui.file_picker`, `ui.startup_image` |
+  | UI | `ui.list`, `ui.settings`, `ui.row_width`, `ui.text_input`, `ui.toast`, `ui.progress`, `ui.screenshot`, `ui.theme`, `ui.theme_refresh`, `ui.reload`, `ui.home_layout`, `ui.home_tiles`, `ui.launcher_layout`, `ui.home_background`, `ui.lock_screen`, `ui.button_lock`, `ui.quick_toggle`, `ui.text_view`, `ui.text_view_images`, `ui.list_grid`, `ui.list_showing`, `ui.list_update`, `ui.list_wrap`, `ui.settings_list_wrap`, `ui.settings_list_10_sliders`, `ui.order_editor`, `ui.player_layout_xml`, `ui.file_manager`, `ui.file_picker`, `ui.startup_image` |
   | Playback and audio | `playback.control`, `playback.state`, `playback.events`, `playback.progress`, `playback.remote`, `playback.transport_skip`, `playback.speed`, `playback.format`, `playback.output_info`, `playback.silent_volume`, `playback.transient_volume`, `playback.output_events`, `playback.settings`, `playback.ab_loop`, `playback.ab_switch`, `playback.http_seek`, `audio.peq`, `audio.peq.transient`, `audio.peq.state`, `audio.stereo_width`, `audio.crossfeed`, `audio.crossfeed.angle`, `audio.hw_volume_curve` |
   | Files | `filesystem.sd`, `filesystem.mkdir`, `filesystem.playlists`, `filesystem.file_ops` |
   | Storage | `storage.namespaced`, `storage.secrets`, `storage.secrets_get` |
@@ -214,7 +214,9 @@ plugin.define({
 | 13 | LED control, `get_volume`, `get_battery`, and the `volume_changed`, `battery_changed`, `suspending` and `system_resumed` events |
 | 14 | `zip_read`, `zip_list`, `zip_image_async`, `html_to_blocks`, `show_text_view` with pictures, grid lists, `is_list_showing`, and one long (4095-byte) HTTP header per request |
 | 15 | Full XML Player-layout support (`ui.player_layout_xml`), including plugin-bundle discovery, current named-widget features, companion PNG previews, and resolution-specific XML variants using `@WIDTHxHEIGHT` or `_WIDTHxHEIGHT` filenames |
-| 16 | Playback speed/stereo width/progress plus format/output snapshots, silent volume, transient EQ, output events, playback settings, native A–B loops/comparison, and finite HTTP seeking. Modeless progress bars and download byte snapshots are also available, as are File Manager operations and the native file picker. API 16 is the standard for new plugins. |
+| 16 | Playback speed/stereo width/progress plus format/output snapshots, silent volume, transient EQ, output events, playback settings, native A–B loops/comparison, and finite HTTP seeking. Modeless progress bars and download byte snapshots are also available, as are File Manager operations and the native file picker. |
+| 17 | Player-layout actions and owner-scoped layout restoration, including background layout replacement. Bundled Audiobooks and Podcasts Reading Room players require API 17; the store rejects installation on older firmware. |
+| 18 | Native hardware button lock through `plugin.configure_button_lock`, capability `ui.button_lock`, and the `button_lock_changed` event. The Lock Screen plugin requires API 18 so older firmware cannot install it. |
 
 All of these are additions; older plugins keep working.
 
@@ -537,6 +539,26 @@ The `screen_woke` event runs while the panel is still dark, allowing this call
 to prepare the lock screen before the first visible frame. Artwork decoding
 and blur generation run in the background.
 
+### `plugin.configure_button_lock(enabled)`
+
+Arms the native Power + Volume Up chord that toggles hardware button lock
+(API 18, capability `ui.button_lock`). Pass `true` to enable the chord, `false`
+to disarm it. Returns the board-specific shortcut text for use in settings.
+On R3II 2025, hold Power first and turn the volume knob up; knob-first
+remains an ordinary volume adjustment. The enabled preference is the plugin's to persist; the locked
+flag itself is transient and starts unlocked.
+
+Recognition and enforcement are native. Unlock still works if Lua fails.
+While locked, mapped actions including repeats are blocked. Short Power still
+wakes and sleeps the display. Long Power still opens the emergency power-off
+menu. The chord waits until both keys are released, suppresses the incidental
+Power and Volume Up actions in either press order on button-based boards, and does not use the
+screenshot chord (Power + Volume Down, or Power + Previous on R3II 2025).
+Disabling the plugin or calling `configure_button_lock(false)` unlocks and
+clears queued gestures. Configuration belongs to the calling plugin; a failed
+load or plugin teardown releases it, and a different plugin cannot disarm or
+take over an existing owner.
+
 ## Theming
 
 Themes are natively built into Compás and managed via the built-in system
@@ -587,6 +609,8 @@ if plugin.has_capability("ui.quick_drawer_layout") then
 end
 ```
 
+Native Music menu choices are saved under Settings → Display → Appearance. Plugin declarations remain session overrides: disabling Kids Mode restores the saved native choices. Music toolbar customization remains available to plugins and themes. Quick Drawer preferences remain independent.
+
 `plugin.set_music_layout(options)` accepts `order` and `toolbar` arrays.
 Music keys are `files`, `artists`, `albums`, `album_artist`, `genres`,
 `all_songs`, and `playlists`. Toolbar keys are `sound`, `playback`, and
@@ -616,9 +640,8 @@ combine: an item hidden by any plugin stays hidden, and a `false` request for
 drawer enablement, EQ visibility, or volume visibility wins over `true`.
 This keeps a later theme from undoing Kids Mode restrictions. Failed or unloaded plugins lose their
 declarations, restoring another plugin's declaration or the saved preferences.
-Music menu and toolbar customization is available only to plugins and themes.
-Users can configure the Quick Drawer under Settings > Display > Appearance >
-Quick Drawer. Plugin overrides can take precedence over these choices. These
+Users can configure Music menu and Quick Drawer under Settings > Display >
+Appearance. Music toolbar customization is available to plugins and themes. Plugin overrides can take precedence over these choices. These
 controls simplify navigation; they are not a device security boundary.
 Customized saved Drawer orders are explicit selections:
 new entries added in future releases remain hidden until selected. Unchanged
@@ -721,6 +744,30 @@ plugin.set_launcher_layout({
 })
 ```
 
+### `plugin.register_player_action(name, callback)`
+
+Requires `plugin.define` and capability `ui.player_actions`. Registers a named
+click action for XML Player layouts registered by this plugin with
+`plugin.set_player_layout`. Names are 1–63 ASCII letters, digits, `_`, `-` or
+`.`; `library` and `none` are reserved. The callback receives the action name
+and can use the normal UI APIs to open custom menus. Re-registering the same
+name replaces the callback; the shared registry holds at most 32 actions.
+Callbacks are removed when their plugin unloads or fails to load.
+
+Use `compas_artist_action`/`compas_album_action` XML constants or
+`<event_cb trigger="clicked" callback="compas_action" user_data="name" />`.
+Layout-local lyrics and click options, complete XML and Lua examples, and the
+lifetime rules are documented in [Player layouts](docs/PLAYER_LAYOUTS.md#interaction-options-and-plugin-menus).
+No LVGL patches, Lua evaluation from XML, or custom widget types are required.
+
+### `plugin.restore_player_layout()`
+
+Requires `plugin.define` and capability `ui.player_layout_restore`. Clears only
+this plugin's session layout selection and returns to the layout saved in
+Settings. Another plugin's selection is preserved. Returns whether the effective
+layout ID changed, not whether an override existed. This does not restore global
+background options or maintain a stack of plugin selections.
+
 ### `plugin.set_player_layout(options)`
 
 Changes the look of the Player (Now Playing) screen. Every field is optional.
@@ -760,9 +807,16 @@ in [docs/PLAYER_LAYOUTS.md](docs/PLAYER_LAYOUTS.md).
   the choice is remembered while the plugin stays installed and enabled. If
   the plugin is disabled or removed, the default layout is shown instead.
 - Called from a callback (a button, for example), the layout is selected right
-  away for this session, and the interface reloads to apply it if that changes
-  the active layout. It stays until the player restarts or the user picks
-  another layout in Settings.
+  away for this session. If that changes the active layout, the app queues a
+  Player-only rebuild on the UI loop. It preserves plugin Lua state, audio/DSP,
+  queue, navigation history, and any other screen currently in front. When
+  Player is visible, a retained frame covers it while its widgets are
+  replaced. A rebuild delayed by an interaction stays queued
+  and uses the latest request. The selection stays until the player restarts
+  or the user picks another layout in Settings.
+- The native layout picker and `plugin.restore_player_layout()` use this same
+  deferred Player-only rebuild path. They do not restart plugins or recreate
+  other screens.
 - Check `ui.player_layout_xml` first if the plugin should also run on older
   firmware.
 
@@ -1540,6 +1594,7 @@ called. Up to 16 subscribers per event; an unknown event name is an error.
 | `battery_changed` | same table as `get_battery()` | A battery value changes. |
 | `screenshot_saved` | `path` | A screenshot was saved. |
 | `screenshot_failed` | `reason` | A screenshot couldn't be saved. |
+| `button_lock_changed` | `locked` | Native hardware button lock toggled. |
 | `suspending` | none | The player is about to sleep (it can't be stopped). |
 | `system_resumed` | none | The player woke from sleep. |
 
