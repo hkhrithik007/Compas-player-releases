@@ -43,17 +43,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          test -x scripts/install_mips_toolchain.sh
+          if [[ ! -x scripts/install_mips_toolchain.sh ]]; then
+            echo "::error::Missing scripts/install_mips_toolchain.sh"
+            exit 1
+          fi
 
           toolchain_dir="$(scripts/install_mips_toolchain.sh "$RUNNER_TEMP")"
 
-          test -d "$toolchain_dir/bin"
+          if [[ ! -x "$toolchain_dir/bin/mipsel-linux-musl-gcc" ]]; then
+            echo "::error::MIPS GCC was not installed correctly"
+            exit 1
+          fi
+
+          if [[ ! -x "$toolchain_dir/bin/mipsel-linux-musl-g++" ]]; then
+            echo "::error::MIPS G++ was not installed correctly"
+            exit 1
+          fi
 
           echo "$toolchain_dir/bin" >> "$GITHUB_PATH"
 
           echo "Toolchain installed:"
-          "$toolchain_dir/bin/mipsel-linux-musl-gcc" --version | head -n 1
-          "$toolchain_dir/bin/mipsel-linux-musl-g++" --version | head -n 1
+          "$toolchain_dir/bin/mipsel-linux-musl-gcc" --version
+          "$toolchain_dir/bin/mipsel-linux-musl-g++" --version
 
       # ============================================================
       # INSTALL VALIDATION TOOLS
@@ -72,7 +83,7 @@ jobs:
             zip
 
       # ============================================================
-      # CLEAN BUILD
+      # CLEAN BUILD OUTPUTS
       # ============================================================
 
       - name: Clean build
@@ -83,8 +94,18 @@ jobs:
           make clean || true
 
           rm -f compas_player_target
+          rm -f compas_loader
+          rm -f compas_loader.tmp
           rm -f compas_bootloader
           rm -f open_hiby_bootloader
+
+          # Remove the previous combined R1 image so that
+          # verification cannot accidentally pass on a stale file.
+          rm -f build/rockbox-bootloader/r1/compas_rockbox_bootloader
+
+          rm -rf release
+
+          echo "Build outputs cleaned."
 
       # ============================================================
       # BUILD PLAYER
@@ -96,16 +117,18 @@ jobs:
           set -euo pipefail
 
           echo "=========================================="
-          echo "Building Compass Player"
+          echo "Building Compass Player for HiBy R1"
           echo "=========================================="
 
           make -j2 BOARD=r1 target
 
-          echo
+          if [[ ! -s compas_player_target ]]; then
+            echo "::error::compas_player_target was not generated."
+            ls -lah
+            exit 1
+          fi
+
           echo "Player build completed."
-
-          test -s compas_player_target
-
           ls -lh compas_player_target
 
       # ============================================================
@@ -118,7 +141,7 @@ jobs:
           set -euo pipefail
 
           echo "=========================================="
-          echo "Building HiBy R1 bootloader"
+          echo "Building HiBy R1 combined bootloader"
           echo "=========================================="
 
           make -j2 BOARD=r1 bootloader
@@ -126,12 +149,29 @@ jobs:
           echo
           echo "Bootloader build command completed."
 
-          # IMPORTANT:
-          # The expected root-level output is open_hiby_bootloader.
-          test -s open_hiby_bootloader
+          # The repository Makefile generates compas_loader.
+          if [[ ! -s compas_loader ]]; then
+            echo "::error::Expected compas_loader was not generated."
 
+            echo
+            echo "Repository root:"
+            pwd
+            ls -lah
+
+            echo
+            echo "Generated bootloader files:"
+            find build/rockbox-bootloader/r1 \
+              -maxdepth 3 \
+              -type f \
+              -print 2>/dev/null || true
+
+            exit 1
+          fi
+
+          echo
           echo "Bootloader output verified:"
-          ls -lh open_hiby_bootloader
+          file compas_loader
+          ls -lh compas_loader
 
       # ============================================================
       # VERIFY PLAYER
@@ -155,21 +195,19 @@ jobs:
           mipsel-linux-musl-readelf -h "$BINARY" \
             | grep -E "Machine:.*MIPS" >/dev/null
 
-          echo
           echo "Compass Player verification successful."
-
           ls -lh "$BINARY"
 
       # ============================================================
       # VERIFY BOOTLOADER
       # ============================================================
 
-      - name: Verify bootloader
+      - name: Verify HiBy R1 bootloader
         shell: bash
         run: |
           set -euo pipefail
 
-          BINARY="open_hiby_bootloader"
+          BINARY="compas_loader"
 
           echo "=========================================="
           echo "Verifying HiBy R1 bootloader"
@@ -182,9 +220,7 @@ jobs:
           mipsel-linux-musl-readelf -h "$BINARY" \
             | grep -E "Machine:.*MIPS" >/dev/null
 
-          echo
-          echo "Bootloader verification successful."
-
+          echo "HiBy R1 bootloader verification successful."
           ls -lh "$BINARY"
 
       # ============================================================
@@ -197,11 +233,11 @@ jobs:
           set -euo pipefail
 
           echo "=========================================="
-          echo "Final binaries"
+          echo "Final binary validation"
           echo "=========================================="
 
           test -s compas_player_target
-          test -s open_hiby_bootloader
+          test -s compas_loader
 
           echo
           echo "Player:"
@@ -209,19 +245,19 @@ jobs:
 
           echo
           echo "Bootloader:"
-          ls -lh open_hiby_bootloader
+          ls -lh compas_loader
 
           echo
           echo "SHA256:"
           sha256sum \
             compas_player_target \
-            open_hiby_bootloader
+            compas_loader
 
       # ============================================================
       # PACKAGE
       # ============================================================
 
-      - name: Package firmware
+      - name: Package firmware binaries
         shell: bash
         run: |
           set -euo pipefail
@@ -232,13 +268,16 @@ jobs:
           cp compas_player_target \
             release/compas_player_target
 
-          cp open_hiby_bootloader \
-            release/open_hiby_bootloader
+          cp compas_loader \
+            release/compas_loader
 
-          sha256sum \
-            release/compas_player_target \
-            release/open_hiby_bootloader \
-            > release/SHA256SUMS
+          (
+            cd release
+            sha256sum \
+              compas_player_target \
+              compas_loader \
+              > SHA256SUMS
+          )
 
           cat > release/BUILD_INFO.txt <<EOF
           Compass Player Firmware
@@ -252,31 +291,30 @@ jobs:
           compas_player_target
 
           Bootloader:
-          open_hiby_bootloader
+          compas_loader
           EOF
 
-          echo
-          echo "Release package:"
+          echo "Package contents:"
           find release -maxdepth 1 -type f -print
 
+          echo
+          echo "Checksums:"
+          cat release/SHA256SUMS
+
       # ============================================================
-      # GITHUB ACTION ARTIFACT
+      # UPLOAD GITHUB ACTIONS ARTIFACT
       # ============================================================
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: compass-player-firmware-${{ github.run_number }}
-          path: |
-            release/compas_player_target
-            release/open_hiby_bootloader
-            release/SHA256SUMS
-            release/BUILD_INFO.txt
+          path: release/
           if-no-files-found: error
           retention-days: 30
 
       # ============================================================
-      # MAIN BRANCH RELEASE
+      # CREATE MAIN BRANCH RELEASE
       # ============================================================
 
       - name: Create main build release
@@ -290,31 +328,43 @@ jobs:
           TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
 
           cat > release-notes.txt <<EOF
-          Automatic Compass Player firmware build
+          Automatic Compass Player firmware build.
 
           Commit: ${GITHUB_SHA}
           Build: ${GITHUB_RUN_NUMBER}
 
-          Included:
+          Included assets:
 
           - compas_player_target
-          - open_hiby_bootloader
+          - compas_loader
           - SHA256SUMS
           - BUILD_INFO.txt
           EOF
 
-          gh release create "$TAG" \
-            release/compas_player_target \
-            release/open_hiby_bootloader \
-            release/SHA256SUMS \
-            release/BUILD_INFO.txt \
-            --target "$GITHUB_SHA" \
-            --title "Compass Player Build ${GITHUB_RUN_NUMBER}" \
-            --notes-file release-notes.txt \
-            --latest
+          ASSETS=(
+            release/compas_player_target
+            release/compas_loader
+            release/SHA256SUMS
+            release/BUILD_INFO.txt
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; updating its assets."
+
+            gh release upload "$TAG" \
+              "${ASSETS[@]}" \
+              --clobber
+          else
+            gh release create "$TAG" \
+              "${ASSETS[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "Compass Player Build ${GITHUB_RUN_NUMBER}" \
+              --notes-file release-notes.txt \
+              --latest
+          fi
 
       # ============================================================
-      # VERSION TAG RELEASE
+      # CREATE VERSION TAG RELEASE
       # ============================================================
 
       - name: Create version release
@@ -332,20 +382,32 @@ jobs:
 
           Commit: ${GITHUB_SHA}
 
-          Included:
+          Included assets:
 
           - compas_player_target
-          - open_hiby_bootloader
+          - compas_loader
           - SHA256SUMS
           - BUILD_INFO.txt
           EOF
 
-          gh release create "$TAG" \
-            release/compas_player_target \
-            release/open_hiby_bootloader \
-            release/SHA256SUMS \
-            release/BUILD_INFO.txt \
-            --verify-tag \
-            --title "Compass Player Firmware ${TAG}" \
-            --notes-file release-notes.txt \
-            --latest
+          ASSETS=(
+            release/compas_player_target
+            release/compas_loader
+            release/SHA256SUMS
+            release/BUILD_INFO.txt
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; updating its assets."
+
+            gh release upload "$TAG" \
+              "${ASSETS[@]}" \
+              --clobber
+          else
+            gh release create "$TAG" \
+              "${ASSETS[@]}" \
+              --verify-tag \
+              --title "Compass Player Firmware ${TAG}" \
+              --notes-file release-notes.txt \
+              --latest
+          fi
