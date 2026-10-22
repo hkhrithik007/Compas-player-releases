@@ -685,10 +685,10 @@ $(TARGET_CODE_SECTION_FLAGS_STAMP): FORCE_TARGET_CODE_SECTION_FLAGS
 CFLAGS += -Isonic
 
 APP_SRCS = src/main.c src/ui/gui.c src/ui/gui_subsonic.c src/ui/gui_settings.c src/ui/gui_network.c src/ui/gui_theme.c src/ui/gui_notifications.c src/ui/gui_library.c src/ui/gui_queue.c src/ui/gui_player.c src/ui/gui_track_info.c src/ui/gui_plugins.c src/ui/gui_shell.c src/ui/gui_navigation.c src/ui/gui_books.c src/ui/gui_file_manager.c src/ui/gui_text_input.c src/ui/gui_lyrics.c src/ui/gui_reload.c src/audio/audio.c src/library/file_browser.c src/library/file_ops.c src/hardware/hw_buttons.c src/hardware/button_mapping.c src/hardware/input_device_utils.c src/library/metadata.c src/library/metadata_db.c src/core/settings.c src/core/startup_splash.c src/core/screenshot.c src/core/app_version.c src/audio/aiff_decoder.c src/audio/dsd_filter.c src/audio/dsd_decoder.c src/audio/aac_decoder.c src/audio/mp4_demux.c src/audio/ape_demux.c src/audio/ape_decoder.c src/audio/ape_ffmpeg_core.c src/audio/peq.c src/audio/mseb.c src/audio/audio_tempo.c src/ui/assets.c src/ui/screen_builders.c src/ui/cover_card_preview.c src/hardware/battery.c src/network/wifi_status.c src/network/ca_bundle.c src/network/http_conn.c src/network/http_client.c src/network/http_stream.c src/network/http_stream_file.c src/network/subsonic_client.c src/library/cover_decode.c src/library/image_thumb.c src/library/lyrics.c src/audio/asf_demux.c src/audio/wma_decoder.c src/audio/ogg_probe.c src/audio/opus_decoder.c src/audio/opusfile_alloc.c src/audio/wavpack_decoder.c src/audio/caf_decoder.c src/audio/vorbis_decoder.c src/library/cue_parser.c src/ui/fallback_font.c src/ui/gui_text_view.c \
-src/core/subprocess.c src/network/wifi_control.c src/network/bluetooth_control.c src/network/hiby_sys_server.c src/hardware/backlight.c src/network/import_web.c src/network/airplay_control.c src/network/airplay_bridge.c src/network/airplay_metadata.c src/hardware/headphone_status.c src/hardware/device_config.c src/hardware/led_control.c src/hardware/charge_limiter.c src/core/idle_shutdown.c src/hardware/power_suspend.c src/core/text_reader.c src/hardware/usb_mode_control.c src/hardware/usb_dac_bridge.c src/hardware/usb_audio_output.c src/core/firmware_update.c src/core/player_update.c src/core/reboot_handoff.c src/library/playlist_files.c src/library/favorite_writer.c src/network/firmware_ota.c src/network/plugin_store.c src/network/store_common.c src/network/emulator_store.c src/core/emulator_registry.c src/core/timezone_data.c src/core/timezone_apply.c src/core/hostname_apply.c src/network/dlna_control.c src/network/remote_control.c src/network/catalog_source_cache.c src/network/remote_control_mdns.c src/plugins/plugin_manager.c
+src/core/subprocess.c src/network/wifi_control.c src/network/bluetooth_control.c src/network/hiby_sys_server.c src/hardware/backlight.c src/network/import_web.c src/network/remote_import_files.c src/network/airplay_control.c src/network/airplay_bridge.c src/network/airplay_metadata.c src/hardware/headphone_status.c src/hardware/device_config.c src/hardware/led_control.c src/hardware/charge_limiter.c src/core/idle_shutdown.c src/hardware/power_suspend.c src/core/text_reader.c src/hardware/usb_mode_control.c src/hardware/usb_dac_bridge.c src/hardware/usb_audio_output.c src/core/firmware_update.c src/core/player_update.c src/core/reboot_handoff.c src/library/playlist_files.c src/library/favorite_writer.c src/network/firmware_ota.c src/network/plugin_store.c src/network/store_common.c src/network/emulator_store.c src/core/emulator_registry.c src/core/timezone_data.c src/core/timezone_apply.c src/core/hostname_apply.c src/network/dlna_control.c src/network/remote_control.c src/network/remote_control_discovery.c src/network/catalog_source_cache.c src/network/remote_control_mdns.c src/plugins/plugin_manager.c
 APP_SRCS += src/ui/gui_setup.c src/ui/gui_setup_plugins.c src/core/timezone_location.c
 APP_SRCS += src/ui/lyrics_layout.c src/ui/transition_compositor.c src/ui/frosted_glass.c src/ui/hw_volume_coalesce.c
-APP_SRCS += src/core/ui_wake.c src/core/ui_customization.c src/library/cover_raster_cache.c src/library/track_metadata_worker.c
+APP_SRCS += src/core/ui_wake.c src/core/ui_customization.c src/library/cover_raster_cache.c src/library/track_metadata_worker.c src/library/player_cover_prefetch.c
 APP_SRCS += src/core/firmware_image.c
 APP_SRCS += src/core/boot_trace.c
 APP_SRCS += src/core/player_install.c src/bootloader/scanner.c src/bootloader/selector_request.c src/bootloader/internal_storage.c
@@ -1253,6 +1253,14 @@ i18n-check:
 # file: every .d this generates references targets/variables (BUILD_
 # TARGET_DIR, BUILD_HOST_DIR) that need to already be fully resolved.
 -include $(shell find $(BUILD_TARGET_DIR) $(BUILD_HOST_DIR) -name '*.d' 2>/dev/null)
+
+.PHONY: test-wifi-ssid
+test-wifi-ssid:
+	sh scripts/tests/run_wifi_ssid_escape_test.sh
+
+.PHONY: test-file-browser-natural-sort
+test-file-browser-natural-sort:
+	sh scripts/tests/file_browser_natural_sort_test.sh
 
 $(BUILD_HOST_DIR)/sonic/%.o: sonic/%.c
 	@mkdir -p $(dir $@)
