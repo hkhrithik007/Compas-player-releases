@@ -8,7 +8,7 @@
 #include "button_mapping.h"
 #include "ui_customization.h"
 
-#define DEFAULT_ACCENT_COLOR 0xF4E58C /* soft light yellow */
+#define DEFAULT_ACCENT_COLOR 0xB0142B /* deep red; keep startup_splash.c and the bootloader in sync */
 
 /* Discrete screen-timeout presets. The original useful coarse progression
  * is preserved, with a new 15-second choice added at the beginning. */
@@ -100,6 +100,7 @@ typedef struct {
     uint32_t accent_color;     /* packed 0xRRGGBB, applied to sliders/switches app-wide */
     bool accent_dynamic;       /* "Match album art": the playing cover's color replaces accent_color while shown */
     bool startup_splash_tint;  /* Tint the built-in startup splash with the accent color. */
+    bool titlebar_icon_tint;   /* Breeze title-bar icons take the accent instead of the text color. */
     bool crossfade_enabled;    /* if true, fade into the next queued track near the current one's end */
 
     /* Default true -- gapless is this pipeline's normal behavior, not an
@@ -143,6 +144,8 @@ typedef struct {
 
     /* Lyrics: enable the player's lyrics icon/view. On by default. */
     bool lyrics_enabled;
+    /* Keep visible lyrics awake during playback; paused uses normal timeout. */
+    bool lyrics_keep_screen_on;
 
     /* Subsonic-compatible (Subsonic/Navidrome/Airsonic/...) server config.
      * Stored in plaintext like every other setting here -- this project has
@@ -171,6 +174,12 @@ typedef struct {
         bool verify_tls;
     } subsonic_saved[SETTINGS_SUBSONIC_SAVED_MAX];
     int subsonic_saved_count;
+
+    /* Local Cirrus DAC controls. Filter enum 0..3; NOS disables the
+     * interpolation filter. DRE defaults on to match the R3 Pro II codec. */
+    int dac_filter;
+    bool dac_nos;
+    bool dac_dre;
 
     /* Bluetooth output settings -- see bluetooth_control.h for the BlueALSA
      * 5 service behavior. */
@@ -307,9 +316,10 @@ typedef struct {
      * song artwork is independent. Defaults on to preserve the existing UI. */
     bool show_artist_images;
     int file_sort_mode; /* 0 Name, 1 Newest Modified; directories stay first. */
-    int album_sort_mode; /* 0 Name, 1 Recently Added, 2 Release Year (oldest first). */
+    int album_sort_mode; /* 0 Name, 1 Recently Added, 2 Release Year, 3 Album Artist then Year (oldest first). */
     int artist_albums_sort_mode; /* Ordering within an Artist's Albums view. */
     int album_artist_albums_sort_mode; /* Ordering within an Album Artist's Albums view. */
+    int genre_view_mode; /* Inside a genre: 0 All Songs, 1 Artists, 2 Album Artist, 3 Albums. */
 
     /* Idle action after a long stretch idle (screen off, not playing, not
      * charging) -- either power_suspend_now() (suspend-to-RAM, see

@@ -6,15 +6,20 @@
 
 #define ACCENT_PALETTE_COUNT 16
 /* Native defaults only: live surfaces/text continue to use mutable styles
- * so plugin palettes (including light themes) remain authoritative. */
-#define GUI_COLOR_SCREEN 0x000000
-#define GUI_COLOR_ROW 0x1C2026
-#define GUI_COLOR_PANEL 0x252A32
-#define GUI_COLOR_PRESSED 0x303743
-#define GUI_COLOR_PRIMARY 0xF1F3F5
-#define GUI_COLOR_SECONDARY 0xA8B0BC
-#define GUI_COLOR_BORDER 0x343B46
+ * so plugin palettes (including light themes) remain authoritative.
+ * KDE Breeze Dark (Plasma 6): View background and alternate, Button
+ * background, Normal and Inactive text. Pressed is the text mixed 12.5% over
+ * a row; border is Breeze's frame, the text mixed 20% over a card. */
+#define GUI_COLOR_SCREEN 0x141618
+#define GUI_COLOR_ROW 0x1D1F22
+#define GUI_COLOR_PANEL 0x292C30
+#define GUI_COLOR_PRESSED 0x393B3D
+#define GUI_COLOR_PRIMARY 0xFCFCFC
+#define GUI_COLOR_SECONDARY 0xA1A9B1
+#define GUI_COLOR_BORDER 0x535659
 #define GUI_ROW_GAP BOARD_SCALE_PX(8)
+/* List rows are cards inset this far from each screen edge (as Home's). */
+#define GUI_LIST_SIDE_MARGIN BOARD_SCALE_PX(16)
 #define GUI_TEXT_INSET BOARD_SCALE_PX(24)
 #define GUI_ROW_HEIGHT BOARD_SCALE_PX(96)
 /* Compatibility names for call sites that need to express row content, not
@@ -55,6 +60,10 @@ lv_style_t * gui_theme_accent_style(void);
 lv_style_t * gui_theme_accent_knob_style(void);
 lv_style_t * gui_theme_accent_outline_style(void);
 lv_style_t * gui_theme_muted_text_style(void);
+/* Accent recolor for Breeze title-bar icons while "Tint title bar icons" is
+ * on; an empty style otherwise. Saves and applies the setting. */
+lv_style_t * gui_theme_titlebar_tint_style(void);
+void gui_theme_set_titlebar_tint(bool on);
 const lv_font_t * gui_theme_font(gui_font_role_t role);
 /* The accent in use: the saved pick, or the playing cover's color while
  * "Match album art" is on and a cover is showing. */
@@ -73,3 +82,22 @@ void gui_theme_set_accent_dynamic(bool on);
 void gui_theme_set_cover_accent(bool valid, uint32_t rgb);
 bool gui_theme_cover_accent(uint32_t * out_rgb);
 void gui_theme_update_surface_contrast(void);
+
+/* KDE Breeze foregrounds (Breeze Dark and Breeze Light "Normal" and
+ * "Inactive" text) for surfaces whose background the theme does not paint,
+ * such as the Now Playing artwork backdrop. */
+#define GUI_BREEZE_TEXT_ON_DARK   0xFCFCFC
+#define GUI_BREEZE_MUTED_ON_DARK  0xA1A9B1
+#define GUI_BREEZE_TEXT_ON_LIGHT  0x232629
+#define GUI_BREEZE_MUTED_ON_LIGHT 0x707D8A
+/* Breeze "Negative" text, for destructive actions on either theme. */
+#define GUI_BREEZE_NEGATIVE       0xDA4453
+/* WCAG 2 thresholds: body text, and secondary or large text. */
+#define GUI_CONTRAST_TEXT  4.5f
+#define GUI_CONTRAST_MUTED 3.0f
+/* WCAG 2 contrast ratio between two colors, 1.0 to 21.0. */
+float gui_theme_contrast_ratio(lv_color_t a, lv_color_t b);
+/* True when light text reads better than dark text on bg. */
+bool gui_theme_prefers_light_text(lv_color_t bg);
+/* True for a color closer to black than white, e.g. dark text. */
+bool gui_theme_color_is_dark(lv_color_t color);

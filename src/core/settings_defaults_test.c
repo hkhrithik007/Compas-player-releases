@@ -40,6 +40,8 @@ int main(void) {
     assert(settings.idle_shutdown_enabled);
     assert(settings.idle_suspend_enabled);
     assert(settings.idle_shutdown_minutes == 10);
+    assert(settings.dac_filter == 0 && !settings.dac_nos && settings.dac_dre);
+    assert(settings.lyrics_keep_screen_on);
 
     write_settings("keyboard_layout=0\nidle_shutdown_enabled=1\n"
                    "idle_suspend_enabled=0\nidle_shutdown_minutes=30\n");
@@ -55,6 +57,48 @@ int main(void) {
     assert(settings.keyboard_layout == KEYBOARD_LAYOUT_QWERTY);
     assert(settings.idle_shutdown_enabled && settings.idle_suspend_enabled);
     assert(settings.idle_shutdown_minutes == 10);
+    assert(settings.dac_filter == 0 && !settings.dac_nos && settings.dac_dre);
+    assert(settings.lyrics_keep_screen_on);
+
+    write_settings("volume=0.5\nlyrics_keep_screen_on=0\n");
+    assert(settings_load(&settings));
+    assert(!settings.lyrics_keep_screen_on);
+    settings_save(&settings);
+    assert(settings_load(&settings));
+    assert(!settings.lyrics_keep_screen_on);
+    settings.lyrics_keep_screen_on = true;
+    settings_save(&settings);
+    assert(settings_load(&settings));
+    assert(settings.lyrics_keep_screen_on);
+
+    /* The new global Albums order persists as mode 3, while the two nested
+     * collections stay within their existing three sorting choices. */
+    write_settings("album_sort_mode=3\n");
+    assert(settings_load(&settings));
+    assert(settings.album_sort_mode == 3);
+    assert(settings.artist_albums_sort_mode == 0);
+    assert(settings.album_artist_albums_sort_mode == 0);
+    settings_save(&settings);
+    assert(settings_load(&settings));
+    assert(settings.album_sort_mode == 3);
+    assert(settings.artist_albums_sort_mode == 0);
+    assert(settings.album_artist_albums_sort_mode == 0);
+    write_settings("album_sort_mode=3\nartist_albums_sort_mode=3\n"
+                   "album_artist_albums_sort_mode=3\n");
+    assert(settings_load(&settings));
+    assert(settings.album_sort_mode == 3);
+    assert(settings.artist_albums_sort_mode == 0);
+    assert(settings.album_artist_albums_sort_mode == 0);
+
+    write_settings("dac_filter=3\ndac_nos=1\ndac_dre=0\n");
+    assert(settings_load(&settings));
+    assert(settings.dac_filter == 3 && settings.dac_nos && !settings.dac_dre);
+    settings_save(&settings);
+    assert(settings_load(&settings));
+    assert(settings.dac_filter == 3 && settings.dac_nos && !settings.dac_dre);
+    write_settings("dac_filter=4\ndac_nos=invalid\ndac_dre=invalid\n");
+    assert(settings_load(&settings));
+    assert(settings.dac_filter == 0 && !settings.dac_nos && settings.dac_dre);
 
     /* Legacy files without the migration marker keep explicit idle choices. */
     write_settings("keyboard_layout=1\nidle_shutdown_enabled=0\n"

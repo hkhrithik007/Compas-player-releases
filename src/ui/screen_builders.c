@@ -1,10 +1,12 @@
 #include "screen_builders.h"
+#include "lvgl/src/themes/lv_theme_private.h"
 #include "cover_card_preview.h"
 #include "i18n.h"
 #include "gui_theme.h"
 #include "gui_plugins.h"
 #include "gui_navigation.h"
 #include "assets.h"
+#include "gui_themes.h"
 #include "debug_log.h"
 #include "lvgl/src/display/lv_display_private.h"
 
@@ -35,6 +37,11 @@ lv_style_t icon_press_style;
 static lv_style_t row_marquee_style;
 static lv_anim_t row_marquee_anim;
 #define ICON_GRID_ICON_LABEL_GAP 4
+/* Card tiles: a rounded card with a hairline Breeze outline, and at least
+ * this much space around and between cards so they read as separate. */
+#define ICON_GRID_TILE_RADIUS BOARD_SCALE_PX(20)
+#define ICON_GRID_TILE_BORDER BOARD_SCALE_PX(2)
+#define ICON_GRID_CARD_GAP BOARD_SCALE_PX(16)
 
 /* Theming: three shared, mutable-in-place bg_color styles, one per
  * "background category" the app has -- every screen root
@@ -54,6 +61,11 @@ static lv_anim_t row_marquee_anim;
  * every screen's background to whatever accent color is picked. */
 lv_style_t style_theme_screen_bg;
 lv_style_t style_theme_card_bg;
+lv_style_t style_theme_tile;
+lv_style_t style_theme_tile_pressed;
+lv_style_t style_theme_scrollbar;
+lv_style_t style_theme_switch_track;
+lv_style_t style_theme_switch_knob;
 
 /* Same mechanism, for text color -- see screen_builders.h's own comment on
  * style_theme_text_primary/style_theme_text_muted for why destructive-red
@@ -62,9 +74,8 @@ lv_style_t style_theme_text_primary;
 lv_style_t style_theme_text_muted;
 
 /* Runtime geometry replaces the original panel-specific 448/464/476px
- * constants. Rows span the active display: parent lists already own their
- * scrolling/clipping bounds, so subtracting a second gutter here produced
- * asymmetric empty space whenever a flex list left-aligned its children. */
+ * constants. Rows are Breeze cards inset from both screen edges, the same
+ * edge spacing as the Home cards; lists centre them. */
 static int32_t active_display_width(void) {
     lv_display_t * display = lv_display_get_default();
     int32_t width = display ? lv_display_get_horizontal_resolution(display) : 480;
@@ -72,24 +83,48 @@ static int32_t active_display_width(void) {
 }
 
 /* Keep the scrollbar easy to follow while it is moving, then let LVGL hide
- * it again. The live accent style keeps it in step with the selected theme. */
+ * it again. Breeze draws it neutral, in the theme's secondary text color. */
 static void configure_content_scrollbar(lv_obj_t * list) {
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_width(list, BOARD_SCALE_PX(3), LV_PART_SCROLLBAR);
     lv_obj_set_style_radius(list, BOARD_SCALE_PX(2), LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_opa(list, LV_OPA_50, LV_PART_SCROLLBAR);
-    lv_obj_add_style(list, gui_theme_accent_style(), LV_PART_SCROLLBAR);
+    lv_obj_add_style(list, &style_theme_scrollbar, LV_PART_SCROLLBAR);
 }
 
 static void compact_list_refresh_font_layout(lv_obj_t * list);
 static void row_label_layout_identity(lv_obj_t * row, lv_obj_t * secondary, int32_t height);
 
 int32_t ui_list_row_width(void) {
-    return active_display_width();
+    return active_display_width() - 2 * GUI_LIST_SIDE_MARGIN;
 }
 
 int32_t ui_list_row_width_wide(void) {
-    return active_display_width();
+    return active_display_width() - 2 * GUI_LIST_SIDE_MARGIN;
+}
+
+/* Every switch, app-wide, in Breeze's form: a frame-grey track, the accent
+ * when on (the accent style the switches already carry), and a knob in the
+ * text color. A theme layer over LVGL's default reaches each lv_switch as it
+ * is created, so no call site has to remember it. */
+static lv_theme_t breeze_theme;
+static void breeze_theme_apply(lv_theme_t * theme, lv_obj_t * obj) {
+    (void)theme;
+    if (lv_obj_check_type(obj, &lv_switch_class)) {
+        lv_obj_add_style(obj, &style_theme_switch_track, LV_PART_MAIN);
+        lv_obj_add_style(obj, &style_theme_switch_knob, LV_PART_KNOB);
+    }
+}
+static void install_breeze_theme(void) {
+    static bool installed;
+    lv_display_t * display = lv_display_get_default();
+    if (installed || !display) return;
+    lv_theme_t * base = lv_display_get_theme(display);
+    if (!base) return;
+    breeze_theme = *base;
+    lv_theme_set_parent(&breeze_theme, base);
+    lv_theme_set_apply_cb(&breeze_theme, breeze_theme_apply);
+    lv_display_set_theme(display, &breeze_theme);
+    installed = true;
 }
 
 void screen_builders_init_list_row_style(void) {
@@ -114,6 +149,11 @@ void screen_builders_init_list_row_style(void) {
         lv_style_reset(&style_theme_card_bg);
         lv_style_reset(&style_theme_text_primary);
         lv_style_reset(&style_theme_text_muted);
+        lv_style_reset(&style_theme_tile);
+        lv_style_reset(&style_theme_tile_pressed);
+        lv_style_reset(&style_theme_scrollbar);
+        lv_style_reset(&style_theme_switch_track);
+        lv_style_reset(&style_theme_switch_knob);
     }
     already_initialized = true;
 
@@ -182,6 +222,29 @@ void screen_builders_init_list_row_style(void) {
     lv_style_set_text_color(&style_theme_text_muted, lv_color_hex(GUI_COLOR_SECONDARY));
     lv_style_set_image_recolor(&style_theme_text_muted, lv_color_hex(GUI_COLOR_SECONDARY));
     lv_style_set_image_recolor_opa(&style_theme_text_muted, LV_OPA_COVER);
+
+    lv_style_init(&style_theme_tile);
+    lv_style_set_bg_opa(&style_theme_tile, LV_OPA_COVER);
+    lv_style_set_border_width(&style_theme_tile, ICON_GRID_TILE_BORDER);
+    lv_style_set_border_opa(&style_theme_tile, LV_OPA_COVER);
+    lv_style_set_radius(&style_theme_tile, ICON_GRID_TILE_RADIUS);
+    lv_style_init(&style_theme_tile_pressed);
+    lv_style_set_bg_opa(&style_theme_tile_pressed, LV_OPA_COVER);
+
+    /* Rows carry the same Breeze frame as the tiles. */
+    lv_style_set_border_width(&list_row_style, ICON_GRID_TILE_BORDER);
+    lv_style_set_border_opa(&list_row_style, LV_OPA_COVER);
+    lv_style_set_border_width(&pill_row_bg_style, ICON_GRID_TILE_BORDER);
+    lv_style_set_border_opa(&pill_row_bg_style, LV_OPA_COVER);
+    lv_style_init(&style_theme_scrollbar);
+    lv_style_set_bg_opa(&style_theme_scrollbar, LV_OPA_COVER);
+    lv_style_init(&style_theme_switch_track);
+    lv_style_set_bg_opa(&style_theme_switch_track, LV_OPA_COVER);
+    lv_style_init(&style_theme_switch_knob);
+    lv_style_set_bg_opa(&style_theme_switch_knob, LV_OPA_COVER);
+    lv_style_set_shadow_width(&style_theme_switch_knob, 0);
+    install_breeze_theme();
+    gui_theme_update_surface_contrast();
 }
 
 /* The height row_label_apply_bounded_height() will set for this font, for
@@ -588,6 +651,83 @@ void add_icon_glow(lv_obj_t * tile, lv_obj_t * wrapper, uint32_t color,
 /* STATUS_BAR_CLEARANCE / TITLE_ROW_HEIGHT now live in screen_builders.h --
  * gui.c's hand-built screens (player, accent color, EQ, ...) need them too. */
 
+static const char * breeze_asset_if_present(const char * relative);
+
+/* Breeze art for title-bar actions (see titlebar/BREEZE_SOURCES.txt). A
+ * theme that brings its own copy of one of these keeps it, and the stock icon
+ * stays the fallback when the Breeze file is missing. The override root is
+ * not consulted: on devices it mostly holds stock copies left by the legacy
+ * Themes plugin. */
+static const struct {
+    const char * stock;
+    const char * breeze;
+} titlebar_breeze_icons[] = {
+    { "navigation/back.png", "titlebar/breeze_back.png" },
+    { "navigation/search.png", "titlebar/breeze_search.png" },
+    { "navigation/more.png", "titlebar/breeze_menu.png" },
+    { "settings/sound.png", "titlebar/breeze_sound.png" },
+    { "settings/playback.png", "titlebar/breeze_playback.png" },
+    { "submenu/music_database.png", "titlebar/breeze_database.png" },
+    { "playlist_actions/trash.png", "titlebar/breeze_delete.png" },
+    { "stream_media/download.png", "titlebar/breeze_download.png" },
+    { "playing_plane/collect_in.png", "titlebar/breeze_favorite.png" },
+    { "playing_plane/collect_out.png", "titlebar/breeze_favorite_off.png" },
+};
+
+const char * titlebar_breeze_icon(const char * asset) {
+    if (!asset) return NULL;
+    for (size_t i = 0; i < sizeof(titlebar_breeze_icons) / sizeof(titlebar_breeze_icons[0]); i++) {
+        const char * stock = asset_path(titlebar_breeze_icons[i].stock);
+        if (!stock || strcmp(asset, stock) != 0) continue;
+        char layer[GUI_THEMES_MAX_PATH + 64];
+        if (gui_themes_resolve_icon_layer(titlebar_breeze_icons[i].stock, layer, sizeof(layer)) &&
+            !strstr(layer, asset_stock_root())) return NULL;
+        const char * breeze = asset_path_plain(titlebar_breeze_icons[i].breeze);
+        if (!breeze || access(breeze, R_OK) != 0) return NULL;
+        return text_glyph_asset(titlebar_breeze_icons[i].breeze);
+    }
+    return NULL;
+}
+
+/* Breeze glyphs are pre-tinted in the text color (text_glyph_asset()); only
+ * "Tint title bar icons" recolors them, to follow the live accent. */
+void style_titlebar_breeze_icon(lv_obj_t * image) {
+    lv_obj_add_style(image, gui_theme_titlebar_tint_style(), 0);
+}
+
+static const char * breeze_asset_if_present(const char * relative) {
+    const char * plain = asset_path_plain(relative);
+    return plain && access(plain, R_OK) == 0 ? asset_path(relative) : NULL;
+}
+
+/* White Breeze glyphs ship pre-tinted twice: <name>.png in Breeze's text
+ * color for dark surfaces and <name>_dark.png for light ones. Picking the
+ * file replaces a per-draw recolor. */
+const char * text_glyph_asset(const char * relative) {
+    lv_style_value_t text;
+    bool dark_text = lv_style_get_prop(&style_theme_text_primary, LV_STYLE_TEXT_COLOR, &text) ==
+                         LV_STYLE_RES_FOUND && gui_theme_color_is_dark(text.color);
+    if (dark_text) {
+        char dark[128];
+        const char * dot = strrchr(relative, '.');
+        int n = dot ? snprintf(dark, sizeof(dark), "%.*s_dark%s", (int) (dot - relative), relative, dot) : -1;
+        if (n > 0 && (size_t) n < sizeof(dark)) {
+            const char * variant = breeze_asset_if_present(dark);
+            if (variant) return variant;
+        }
+    }
+    return asset_path(relative);
+}
+
+void set_reorder_handle_icon(lv_obj_t * grip) {
+    if (breeze_asset_if_present("titlebar/breeze_handle.png")) {
+        lv_image_set_src(grip, text_glyph_asset("titlebar/breeze_handle.png"));
+        return;
+    }
+    lv_image_set_src(grip, asset_path("navigation/reorder.png"));
+    lv_obj_add_style(grip, &style_theme_text_primary, 0);
+}
+
 static lv_obj_t * build_header_icon_button(lv_obj_t * scr, const char * asset,
                                           lv_align_t alignment, lv_event_cb_t cb) {
     /* Hitbox is deliberately larger than the visual icon -- real-hardware
@@ -606,10 +746,12 @@ static lv_obj_t * build_header_icon_button(lv_obj_t * scr, const char * asset,
     lv_obj_set_style_radius(btn, 12, 0);
 
     if (asset) {
+        const char * breeze = titlebar_breeze_icon(asset);
         lv_obj_t * arrow = lv_image_create(btn);
-        lv_image_set_src(arrow, asset);
+        lv_image_set_src(arrow, breeze ? breeze : asset);
         lv_obj_align(arrow, LV_ALIGN_CENTER, 0, 0);
         lv_obj_remove_flag(arrow, LV_OBJ_FLAG_CLICKABLE);
+        if (breeze) style_titlebar_breeze_icon(arrow);
     }
 
     if (cb) lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
@@ -617,13 +759,15 @@ static lv_obj_t * build_header_icon_button(lv_obj_t * scr, const char * asset,
 }
 
 lv_obj_t * build_header_back_button(lv_obj_t * scr, lv_event_cb_t cb) {
-    lv_obj_t * button = build_header_icon_button(scr, asset_path("navigation/back.png"), LV_ALIGN_TOP_LEFT, cb);
+    const char * asset = asset_path("navigation/back.png");
+    lv_obj_t * button = build_header_icon_button(scr, asset, LV_ALIGN_TOP_LEFT, cb);
     if (!button) return NULL;
     lv_obj_t * image = lv_obj_get_child(button, 0);
     if (image) {
         lv_obj_set_size(image, BOARD_SCALE_PX(44), BOARD_SCALE_PX(44));
         lv_image_set_inner_align(image, LV_IMAGE_ALIGN_CONTAIN);
-        lv_obj_add_style(image, &style_theme_text_primary, 0);
+        if (titlebar_breeze_icon(asset)) style_titlebar_breeze_icon(image);
+        else lv_obj_add_style(image, &style_theme_text_primary, 0);
     }
     return button;
 }
@@ -658,7 +802,9 @@ void align_screen_header_action(lv_obj_t * action, int32_t right_inset) {
  * placed like the Wi-Fi/Bluetooth Rescan action. The glyph is small, so its
  * touch area is widened. */
 static void header_refresh_rotation_cb(void * var, int32_t angle) {
-    lv_obj_set_style_transform_rotation((lv_obj_t *) var, angle, 0);
+    /* Images rotate in their own draw; the fallback glyph needs a transform. */
+    if (lv_obj_check_type((lv_obj_t *) var, &lv_image_class)) lv_image_set_rotation((lv_obj_t *) var, angle);
+    else lv_obj_set_style_transform_rotation((lv_obj_t *) var, angle, 0);
 }
 
 lv_obj_t * build_header_refresh_action(lv_obj_t * scr, lv_event_cb_t click_cb) {
@@ -666,6 +812,17 @@ lv_obj_t * build_header_refresh_action(lv_obj_t * scr, lv_event_cb_t click_cb) {
      * centered so this remains easy to hit on a small display. */
     lv_obj_t * button = build_header_icon_button(scr, NULL, LV_ALIGN_TOP_RIGHT, click_cb);
     align_screen_header_action(button, 20);
+
+    const char * breeze = asset_path_plain("titlebar/breeze_refresh.png");
+    if (breeze && access(breeze, R_OK) == 0) {
+        lv_obj_t * image = lv_image_create(button);
+        lv_image_set_src(image, text_glyph_asset("titlebar/breeze_refresh.png"));
+        lv_obj_align(image, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_remove_flag(image, LV_OBJ_FLAG_CLICKABLE);
+        style_titlebar_breeze_icon(image);
+        set_header_refresh_action_busy(button, false);
+        return button;
+    }
 
     lv_obj_t * icon = lv_label_create(button);
     lv_label_set_text(icon, LV_SYMBOL_REFRESH);
@@ -695,7 +852,7 @@ void set_header_refresh_action_busy(lv_obj_t * button, bool busy) {
         lv_anim_set_exec_cb(&anim, header_refresh_rotation_cb);
         lv_anim_start(&anim);
     } else {
-        lv_obj_set_style_transform_rotation(icon, 0, 0);
+        header_refresh_rotation_cb(icon, 0);
     }
     lv_obj_set_style_opa(button, busy ? LV_OPA_60 : LV_OPA_COVER, 0);
     if (busy) lv_obj_remove_flag(button, LV_OBJ_FLAG_CLICKABLE);
@@ -822,6 +979,7 @@ lv_obj_t * build_icon_grid_screen(const char * title, lv_event_cb_t back_btn_cb,
      * real ceiling rather than a cosmetic one. */
     if (tile_gap < 0) tile_gap = 0;
     if (tile_gap > BOARD_SCALE_PX(64)) tile_gap = BOARD_SCALE_PX(64);
+    if (tile_gap < ICON_GRID_CARD_GAP) tile_gap = ICON_GRID_CARD_GAP;
 
     int32_t target_icon_px = (BOARD_SCALE_PX(ICON_GRID_TARGET_ICON_PX) * icon_scale_percent) / 100;
 
@@ -869,6 +1027,9 @@ lv_obj_t * build_icon_grid_screen(const char * title, lv_event_cb_t back_btn_cb,
     lv_obj_set_style_bg_opa(grid, 0, 0);
     lv_obj_set_style_border_width(grid, 0, 0);
     lv_obj_set_style_pad_all(grid, 0, 0);
+    /* Half a gap at the screen edges, completing the other half each tile's
+     * margin adds, so outer and inner spacing match. */
+    lv_obj_set_style_pad_hor(grid, tile_gap / 2, 0);
     /* Zero row/column pad gaps so the grid height precisely matches row_count * row_h. */
     lv_obj_set_style_pad_row(grid, 0, 0);
     lv_obj_set_style_pad_column(grid, 0, 0);
@@ -893,6 +1054,9 @@ lv_obj_t * build_icon_grid_screen(const char * title, lv_event_cb_t back_btn_cb,
          * with tile_gap / 2 per side so adjacent tiles have a total gap of tile_gap. */
         if (tile_gap > 0) lv_obj_set_style_margin_all(tile, tile_gap / 2, 0);
         lv_obj_set_style_bg_opa(tile, 0, 0);
+        /* Native tiles are theme cards; a tile a theme paints itself keeps
+         * its own color or image. */
+        bool card = !item->has_bg_color && !item->bg_image;
         /* Per-tile style overrides (plugin.set_home_layout()'s per-tile
          * config) -- every native tile leaves these unset, so this changes
          * nothing about today's transparent-background tiles. */
@@ -909,15 +1073,22 @@ lv_obj_t * build_icon_grid_screen(const char * title, lv_event_cb_t back_btn_cb,
             lv_obj_set_style_bg_image_src(tile, asset_path(item->bg_image), 0);
             lv_obj_set_style_bg_image_opa(tile, LV_OPA_COVER, 0);
         }
-        /* Apply a 25% press tint, preserving opaque custom tile backgrounds. */
-        const lv_opa_t press_opa = 64; /* 25% of 255 */
-        lv_color_t press_color = lv_color_hex(GUI_COLOR_PRESSED);
-        if (item->has_bg_color)
-            press_color = lv_color_mix(press_color, lv_color_hex(item->bg_color), press_opa);
-        lv_obj_set_style_bg_opa(tile, item->has_bg_color ? LV_OPA_COVER : press_opa, LV_STATE_PRESSED);
-        lv_obj_set_style_bg_color(tile, press_color, LV_STATE_PRESSED);
         /* Zero default card border so only grid-level divider lines are drawn. */
         lv_obj_set_style_border_width(tile, 0, 0);
+        if (card) {
+            lv_obj_remove_local_style_prop(tile, LV_STYLE_BG_OPA, 0);
+            lv_obj_remove_local_style_prop(tile, LV_STYLE_BORDER_WIDTH, 0);
+            lv_obj_add_style(tile, &style_theme_tile, 0);
+            lv_obj_add_style(tile, &style_theme_tile_pressed, LV_STATE_PRESSED);
+        } else {
+            /* Apply a 25% press tint, preserving opaque custom tile backgrounds. */
+            const lv_opa_t press_opa = 64; /* 25% of 255 */
+            lv_color_t press_color = lv_color_hex(GUI_COLOR_PRESSED);
+            if (item->has_bg_color)
+                press_color = lv_color_mix(press_color, lv_color_hex(item->bg_color), press_opa);
+            lv_obj_set_style_bg_opa(tile, item->has_bg_color ? LV_OPA_COVER : press_opa, LV_STATE_PRESSED);
+            lv_obj_set_style_bg_color(tile, press_color, LV_STATE_PRESSED);
+        }
         lv_obj_set_style_pad_all(tile, ICON_GRID_TILE_PAD, 0);
         lv_obj_remove_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(tile, LV_OBJ_FLAG_CLICKABLE);
@@ -1005,7 +1176,8 @@ lv_obj_t * build_icon_grid_screen(const char * title, lv_event_cb_t back_btn_cb,
             lv_obj_align(label, LV_ALIGN_TOP_MID, 0, top_offset + target_icon_h + ICON_GRID_ICON_LABEL_GAP);
         }
 
-        if (item->icon_glow_color && !item->has_bg_color) {
+        /* A card already sets its icon apart; the glow only muddies it. */
+        if (item->icon_glow_color && !item->has_bg_color && !card) {
             int32_t diameter = target_icon_px * 4 / 3;
             int32_t max_diameter = active_display_width() / col_count - tile_gap - 2 * ICON_GRID_TILE_PAD;
             if (diameter > max_diameter) diameter = max_diameter;
@@ -1237,7 +1409,6 @@ lv_obj_t * build_pill_list_screen(const char * title, lv_event_cb_t back_btn_cb,
         if (item->has_radius) lv_obj_set_style_radius(row, item->radius, 0);
         if (item->has_bg_color) lv_obj_set_style_bg_color(row, lv_color_hex(item->bg_color), 0);
         lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(row, 0, 0);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
         lv_obj_t * label = lv_label_create(row);
@@ -1525,9 +1696,24 @@ static void category_row_event_cb(lv_event_t * e) {
     }
 }
 
+bool breeze_row_icon(const char * stock, char * out, size_t out_size) {
+    int n = snprintf(out, out_size, "breeze_rows/%s", stock);
+    if (n <= 0 || (size_t) n >= out_size || strchr(stock, '/') != strrchr(stock, '/')) return false;
+    for (char * c = out + strlen("breeze_rows/"); *c; c++) if (*c == '/') *c = '_';
+    char layer[GUI_THEMES_MAX_PATH + 64];
+    if (gui_themes_resolve_icon_layer(stock, layer, sizeof(layer)) && !strstr(layer, asset_stock_root()))
+        return false;
+    return breeze_asset_if_present(out) != NULL;
+}
+
 static void decorate_category_row_impl(lv_obj_t * row, const char * icon_asset, const char * bg_asset,
                                        const char * plugin_icon) {
     if (!row) return;
+    /* Stock row art gives way to pre-tinted Breeze art named after it,
+     * breeze_rows/<folder>_<name>.png, unless the active theme brings its
+     * own (see breeze_rows/BREEZE_SOURCES.txt). */
+    char breeze_row[96];
+    if (icon_asset && breeze_row_icon(icon_asset, breeze_row, sizeof(breeze_row))) icon_asset = breeze_row;
     category_row_context_t * context = calloc(1, sizeof(*context));
     if (!context) return;
     /* build_pill_list_screen() creates the primary label first. */
@@ -1656,9 +1842,13 @@ lv_obj_t * build_category_menu_screen(const char * title, lv_event_cb_t back_btn
         bool show_icon = items[i].has_icon ? items[i].icon
                        : !(layout && layout->has_icon && !layout->icon);
         bool custom_background = items[i].has_bg_color || (layout && layout->has_bg_color);
-        if (row_objects[i])
-            decorate_category_row(row_objects[i], show_icon ? items[i].icon_asset : NULL,
-                                  custom_background ? NULL : items[i].bg_image);
+        if (row_objects[i]) {
+            if (show_icon && items[i].plugin_icon)
+                decorate_category_row_plugin_icon(row_objects[i], items[i].plugin_icon);
+            else
+                decorate_category_row(row_objects[i], show_icon ? items[i].icon_asset : NULL,
+                                      custom_background ? NULL : items[i].bg_image);
+        }
     }
     return scr;
 }
@@ -2023,6 +2213,26 @@ static void compact_list_align_row_decoration(compact_list_virtual_data_t * data
  * list_set_paged_provider() refreshes the data with window_start reset to
  * -1) must still be checked even if the visible window itself hasn't
  * moved, so the cache check runs before that early return. */
+/* Rows rebind while scrolling, so the Breeze lookup for their trailing
+ * action (title-bar art such as the menu glyph) is cached; the text color
+ * picks the pre-tinted variant. */
+static const char * compact_trailing_src(const char * trailing_asset) {
+    static char cached_asset[64];
+    static const char * cached_src;
+    static lv_color_t cached_text;
+    lv_style_value_t text;
+    lv_color_t color = lv_style_get_prop(&style_theme_text_primary, LV_STYLE_TEXT_COLOR, &text) ==
+                       LV_STYLE_RES_FOUND ? text.color : lv_color_white();
+    if (cached_src && lv_color_eq(color, cached_text) && !strcmp(cached_asset, trailing_asset))
+        return cached_src;
+    const char * stock = asset_path(trailing_asset);
+    const char * breeze = titlebar_breeze_icon(stock);
+    snprintf(cached_asset, sizeof(cached_asset), "%s", trailing_asset);
+    cached_text = color;
+    cached_src = breeze ? breeze : stock;
+    return cached_src;
+}
+
 static void compact_list_update_window(lv_obj_t * list, compact_list_virtual_data_t * data) {
 #ifdef UI_PERF_TRACE
     struct timespec perf_start_ts;
@@ -2107,7 +2317,7 @@ static void compact_list_update_window(lv_obj_t * list, compact_list_virtual_dat
         lv_obj_remove_flag(row, LV_OBJ_FLAG_HIDDEN);
         lv_obj_t * trailing = data->trailing_images[slot];
         if (trailing_asset && trailing_asset[0]) {
-            lv_image_set_src(trailing, asset_path(trailing_asset));
+            lv_image_set_src(trailing, compact_trailing_src(trailing_asset));
             lv_obj_remove_flag(trailing, LV_OBJ_FLAG_HIDDEN);
             lv_obj_set_style_pad_right(row, 70, 0);
         } else {
@@ -2760,7 +2970,6 @@ lv_obj_t * add_pill_row_base(lv_obj_t * parent, const char * label_text) {
     lv_obj_add_style(row, &pill_row_bg_style, 0);
     lv_obj_add_style(row, &list_row_pressed_style, LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t * label = lv_label_create(row);
@@ -2831,7 +3040,7 @@ lv_obj_t * build_check_box(lv_obj_t * parent, bool checked) {
         lv_obj_t * check = lv_label_create(box);
         lv_label_set_text(check, LV_SYMBOL_OK);
         lv_color_t check_color = lv_color_brightness(accent_lv_color()) > 160
-            ? lv_color_hex(0x14170B) : lv_color_white();
+            ? lv_color_hex(GUI_BREEZE_TEXT_ON_LIGHT) : lv_color_white();
         lv_obj_set_style_text_color(check, check_color, 0);
         lv_obj_center(check);
         lv_obj_remove_flag(check, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
@@ -3037,11 +3246,11 @@ lv_obj_t * build_popup_surface(lv_event_cb_t backdrop_cb, lv_obj_t ** out_backdr
     lv_obj_set_style_max_height(popup,
         lv_display_get_vertical_resolution(lv_display_get_default()) - 2 * STATUS_BAR_CLEARANCE, 0);
     lv_obj_align(popup, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_radius(popup, BOARD_SCALE_PX(20), 0);
+    lv_obj_set_style_radius(popup, LIST_ROW_RADIUS, 0);
+    /* The card's Breeze frame (its border color follows the theme). */
     lv_obj_add_style(popup, &style_theme_card_bg, 0);
     lv_obj_set_style_bg_opa(popup, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(popup, 1, 0);
-    lv_obj_set_style_border_color(popup, lv_color_hex(GUI_COLOR_BORDER), 0);
+    lv_obj_set_style_border_width(popup, ICON_GRID_TILE_BORDER, 0);
     lv_obj_set_style_pad_all(popup, BOARD_SCALE_PX(12), 0);
     lv_obj_set_style_pad_row(popup, GUI_ROW_GAP, 0);
     lv_obj_set_scroll_dir(popup, LV_DIR_VER);
@@ -3067,6 +3276,10 @@ void style_popup_action_row(lv_obj_t * row) {
      * labels without reducing the surrounding touch target. */
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+}
+
+static bool popup_text_is_cancel(const char * text) {
+    return text && (strcmp(text, "Cancel") == 0 || strcmp(text, TR("Cancel")) == 0);
 }
 
 lv_obj_t * add_popup_action_row(lv_obj_t * popup, const char * text, lv_color_t color,
@@ -3174,7 +3387,7 @@ lv_obj_t * build_confirm_popup_with_labels(const char * title_text, lv_label_lon
     lv_obj_add_event_cb(cancel_row, cancel_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * cancel_label = lv_label_create(cancel_row);
     lv_label_set_text(cancel_label, cancel_text);
-    lv_obj_set_style_text_color(cancel_label, strcmp(cancel_text, "Cancel") == 0
+    lv_obj_set_style_text_color(cancel_label, popup_text_is_cancel(cancel_text)
         ? lv_color_make(255, 120, 120) : cancel_color, 0);
     lv_obj_set_style_text_font(cancel_label, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
     lv_obj_set_width(cancel_label, lv_pct(100));
@@ -3207,7 +3420,6 @@ static lv_obj_t * power_hub_card(lv_obj_t * parent, const char * title,
     lv_obj_set_style_radius(card, BOARD_SCALE_PX(16), 0);
     lv_obj_add_style(card, &pill_row_bg_style, 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(card, 0, 0);
     lv_obj_set_style_pad_all(card, BOARD_SCALE_PX(8), 0);
     lv_obj_add_style(card, &list_row_pressed_style, LV_STATE_PRESSED);
     lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
@@ -3217,7 +3429,8 @@ static lv_obj_t * power_hub_card(lv_obj_t * parent, const char * title,
     lv_obj_set_style_pad_row(card, BOARD_SCALE_PX(8), 0);
     lv_obj_add_event_cb(card, cb, LV_EVENT_CLICKED, (void *)(intptr_t)index);
 
-    const char * source = asset_path(icon_path);
+    char breeze[96];
+    const char * source = asset_path(breeze_row_icon(icon_path, breeze, sizeof(breeze)) ? breeze : icon_path);
     if (source) {
         lv_obj_t * icon = lv_image_create(card);
         lv_image_set_src(icon, source);

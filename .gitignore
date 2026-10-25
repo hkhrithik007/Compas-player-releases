@@ -46,12 +46,15 @@
 !/assets/theme2/power_action/
 # Player layout XML files (src/ui/player_layouts.c scans this directory).
 !/assets/theme2/player_layouts/
+# Picker preview of the built-in Breeze Dark theme (src/ui/gui_themes.c).
+!/assets/theme2/themes/
 !/assets/theme2/pull_down/
 /assets/theme2/pull_down/bg.png
 !/assets/theme2/topbar/
 /assets/theme2/topbar/*
-!/assets/theme2/topbar/lucide_*.png
-!/assets/theme2/topbar/LUCIDE_SOURCES.txt
+!/assets/theme2/topbar/breeze_*.png
+!/assets/theme2/topbar/BREEZE_SOURCES.txt
+!/assets/theme2/topbar/BREEZE_COPYING-ICONS.txt
 !/assets/theme2/topbar/SOURCES.txt
 !/assets/theme2/topbar/aac.png
 !/assets/theme2/topbar/sbc.png
@@ -67,6 +70,8 @@
 !/assets/theme2/topbar/wifi_connect_1.png
 !/assets/theme2/topbar/wifi_connect_2.png
 !/assets/theme2/topbar/wifi_connect_3.png
+!/assets/theme2/titlebar/
+!/assets/theme2/breeze_rows/
 !/assets/theme2/boot_animation/
 /assets/theme2/boot_animation/*
 !/assets/theme2/boot_animation/en/
@@ -85,6 +90,8 @@
 !/assets/theme2/stream_media/radio_row.png
 !/assets/theme2/stream_media/radio_row_s.png
 !/assets/theme2/stream_media/podcasts_row.png
+!/assets/theme2/stream_media/jellyfin_row.png
+!/assets/theme2/stream_media/jellyfin_row_s.png
 !/assets/theme2/stream_media/podcasts_row_s.png
 !/assets/theme2/stream_media/qobuz_row.png
 !/assets/theme2/stream_media/qobuz_row_s.png
@@ -120,6 +127,11 @@
 # Navigation icons are project artwork in a separate namespace, with pinned
 # Phosphor source attribution in navigation/SOURCES.txt.
 !/assets/theme2/navigation/
+
+# Playlist multiselect icons are project Phosphor artwork with source and MIT
+# attribution in playlist_actions/.
+!/assets/theme2/playlist_actions/
+!/assets/theme2/playlist_actions/*
 
 # Home launcher tiles. Mixed directory: the six tile glyphs and their _s
 # duplicates are Phosphor/Material redraws swapped in place (SOURCES.txt),
@@ -251,6 +263,8 @@
 # `compile_commands.json` target invokes -- this one ships with the repo.
 !/generate_compile_commands.py
 !/scripts/offline_library_scan.py
+!/scripts/generate_remote_webapp.py
+!/scripts/generate_brand_marks.py
 !/scripts/install_startup_trace.py
 !/scripts/kernel/*.py
 
@@ -277,6 +291,8 @@
 !/scripts/assets/settings_category_icons/*.svg
 !/scripts/assets/submenu_icons/
 !/scripts/assets/submenu_icons/*.svg
+!/scripts/assets/playlist_action_icons/
+!/scripts/assets/playlist_action_icons/*
 
 # Local-only known-issues tracker (not part of the public docs)
 /ISSUES.md
@@ -514,3 +530,10 @@ __pycache__/
 !/scripts/test_player_layout_xml_cache.sh
 !/src/ui/player_layout_xml_cache_test.c
 !/scripts/test_gui_player_swipe_lifetime.py
+
+# Playlist bulk-edit regression source
+!src/library/playlist_bulk_delete_test.c
+
+# Website-ready user manual and its editorial handoff.
+!/docs/manual/**/*.md
+!/docs/manual/*.md

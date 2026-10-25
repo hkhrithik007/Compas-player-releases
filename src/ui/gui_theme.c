@@ -4,27 +4,49 @@
 #include "settings.h"
 #include "screen_builders.h"
 #include "fallback_font.h"
+#include <math.h>
 #include <stdio.h>
 
 static lv_style_t style_accent;
 static lv_style_t style_accent_knob;
 static lv_style_t style_accent_outline;
+/* Added after style_theme_text_primary on Breeze title-bar icons: empty
+ * unless "Tint title bar icons" is on, so they follow the text color. */
+static lv_style_t style_titlebar_tint;
 
 lv_style_t * gui_theme_accent_style(void) { return &style_accent; }
 lv_style_t * gui_theme_accent_knob_style(void) { return &style_accent_knob; }
 lv_style_t * gui_theme_accent_outline_style(void) { return &style_accent_outline; }
 lv_style_t * gui_theme_muted_text_style(void) { return &style_theme_text_muted; }
+lv_style_t * gui_theme_titlebar_tint_style(void) { return &style_titlebar_tint; }
+
+static void update_titlebar_tint(void) {
+    lv_style_reset(&style_titlebar_tint);
+    if (current_settings.titlebar_icon_tint) {
+        lv_style_set_image_recolor(&style_titlebar_tint, accent_lv_color());
+        lv_style_set_image_recolor_opa(&style_titlebar_tint, LV_OPA_COVER);
+    }
+    lv_obj_report_style_change(&style_titlebar_tint);
+}
+
+void gui_theme_set_titlebar_tint(bool on) {
+    current_settings.titlebar_icon_tint = on;
+    settings_save_async(&current_settings);
+    update_titlebar_tint();
+    /* Cached transition frames hold the previous icon color. */
+    gui_navigation_invalidate_theme_snapshots();
+}
 
 const uint32_t accent_palette[ACCENT_PALETTE_COUNT] = {
     0x2196F3, /* blue */
     0x4CAF50, /* green */
-    0xF44336, /* red */
+    DEFAULT_ACCENT_COLOR, /* deep red (default) */
     0xFF9800, /* orange */
     0x9C27B0, /* purple */
     0x009688, /* teal */
     0xE91E63, /* pink */
     0xE0E0E0, /* light gray */
-    DEFAULT_ACCENT_COLOR, /* light yellow (default) */
+    0xF4E58C, /* light yellow */
     0x00BCD4, /* cyan */
     0x3F51B5, /* indigo */
     0xFFC107, /* amber */
@@ -85,6 +107,30 @@ static uint32_t resolve_accent(void) {
     return current_settings.accent_color & 0xFFFFFF;
 }
 
+static float srgb_channel_linear(uint8_t v) {
+    float c = v / 255.0f;
+    return c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f);
+}
+
+static float relative_luminance(lv_color_t c) {
+    return 0.2126f * srgb_channel_linear(c.red) + 0.7152f * srgb_channel_linear(c.green) +
+           0.0722f * srgb_channel_linear(c.blue);
+}
+
+float gui_theme_contrast_ratio(lv_color_t a, lv_color_t b) {
+    float la = relative_luminance(a), lb = relative_luminance(b);
+    return la > lb ? (la + 0.05f) / (lb + 0.05f) : (lb + 0.05f) / (la + 0.05f);
+}
+
+bool gui_theme_prefers_light_text(lv_color_t bg) {
+    return gui_theme_contrast_ratio(bg, lv_color_hex(GUI_BREEZE_TEXT_ON_DARK)) >=
+           gui_theme_contrast_ratio(bg, lv_color_hex(GUI_BREEZE_TEXT_ON_LIGHT));
+}
+
+bool gui_theme_color_is_dark(lv_color_t color) {
+    return gui_theme_prefers_light_text(color);
+}
+
 void gui_theme_update_surface_contrast(void) {
     lv_style_value_t text, row, card;
     if (lv_style_get_prop(&style_theme_text_primary, LV_STYLE_TEXT_COLOR, &text) != LV_STYLE_RES_FOUND ||
@@ -93,9 +139,37 @@ void gui_theme_update_surface_contrast(void) {
     /* Contrast follows the plugin's own foreground, so a light palette
      * darkens on press instead of flashing a hardcoded charcoal surface. */
     lv_style_set_bg_color(&list_row_pressed_style, lv_color_mix(text.color, row.color, 32));
-    lv_style_set_border_color(&style_theme_card_bg, lv_color_mix(text.color, card.color, 24));
+    /* Breeze's frame contrast: the text mixed 20% over the surface. */
+    lv_style_set_border_color(&style_theme_card_bg, lv_color_mix(text.color, card.color, 51));
+    /* Icon-grid tiles: Breeze's frame outline is the text mixed 20% over
+     * the surface (KDE's default frame contrast). */
+    lv_style_set_bg_color(&style_theme_tile, card.color);
+    lv_style_set_border_color(&style_theme_tile, lv_color_mix(text.color, card.color, 51));
+    lv_style_set_bg_color(&style_theme_tile_pressed, lv_color_mix(text.color, card.color, 32));
+    /* Rows take the same frame over their own surface. */
+    lv_color_t frame = lv_color_mix(text.color, row.color, 51);
+    lv_style_set_border_color(&list_row_style, frame);
+    lv_style_set_border_color(&pill_row_bg_style, frame);
+    lv_style_value_t muted;
+    lv_color_t secondary = lv_style_get_prop(&style_theme_text_muted, LV_STYLE_TEXT_COLOR, &muted) ==
+                           LV_STYLE_RES_FOUND ? muted.color : text.color;
+    lv_style_set_bg_color(&style_theme_scrollbar, secondary);
+    lv_style_set_bg_color(&style_theme_switch_track, lv_color_mix(text.color, row.color, 64));
+    /* The knob is the lighter of text and surface: light on a dark theme,
+     * a framed white knob on a light one. */
+    bool light_surface = !gui_theme_prefers_light_text(row.color);
+    lv_style_set_bg_color(&style_theme_switch_knob, light_surface ? row.color : text.color);
+    lv_style_set_border_width(&style_theme_switch_knob, light_surface ? BOARD_SCALE_PX(2) : 0);
+    lv_style_set_border_color(&style_theme_switch_knob, frame);
     lv_obj_report_style_change(&list_row_pressed_style);
+    lv_obj_report_style_change(&list_row_style);
+    lv_obj_report_style_change(&pill_row_bg_style);
+    lv_obj_report_style_change(&style_theme_scrollbar);
+    lv_obj_report_style_change(&style_theme_switch_track);
+    lv_obj_report_style_change(&style_theme_switch_knob);
     lv_obj_report_style_change(&style_theme_card_bg);
+    lv_obj_report_style_change(&style_theme_tile);
+    lv_obj_report_style_change(&style_theme_tile_pressed);
 }
 
 /* Recolors the shared styles and the decoded accent art. Skipped when the
@@ -119,6 +193,8 @@ static void refresh_accent(void) {
 
         lv_style_set_border_color(&style_accent_outline, c);
         lv_obj_report_style_change(&style_accent_outline);
+
+        update_titlebar_tint();
 
         player_transition_mark_dirty();
         /* Play/pause art is a white disc with a baked-in cyan glyph -- LVGL
@@ -174,6 +250,7 @@ static void init_style_objects(void) {
         lv_style_reset(&style_accent);
         lv_style_reset(&style_accent_knob);
         lv_style_reset(&style_accent_outline);
+        lv_style_reset(&style_titlebar_tint);
     }
     already_initialized = true;
     accent_rgb = resolve_accent();
@@ -201,6 +278,9 @@ static void init_style_objects(void) {
     lv_style_set_border_width(&style_accent_outline, 2);
     lv_style_set_border_opa(&style_accent_outline, LV_OPA_COVER);
     lv_style_set_bg_opa(&style_accent_outline, 0); /* outline only, no fill -- callers that want a fill set their own bg_color/bg_opa separately */
+
+    lv_style_init(&style_titlebar_tint);
+    update_titlebar_tint();
 
     screen_builders_init_list_row_style();
 }

@@ -144,6 +144,16 @@ extern lv_style_t style_theme_card_bg;
  * text_color too when slot is "primary" so rows stay in sync. */
 extern lv_style_t style_theme_text_primary;
 extern lv_style_t style_theme_text_muted;
+/* Icon-grid tiles (Home, More): a card in the theme's card color with a
+ * Breeze frame outline, and its pressed state. Kept in step with the theme
+ * by gui_theme_update_surface_contrast(). */
+extern lv_style_t style_theme_tile;
+extern lv_style_t style_theme_tile_pressed;
+/* List scrollbars and every lv_switch (track and knob), in Breeze's neutral
+ * colors; see gui_theme_update_surface_contrast(). */
+extern lv_style_t style_theme_scrollbar;
+extern lv_style_t style_theme_switch_track;
+extern lv_style_t style_theme_switch_knob;
 void screen_builders_init_list_row_style(void);
 
 typedef struct {
@@ -191,6 +201,9 @@ typedef struct {
     /* Optional compact, transparent glow centered on the icon (0 = none).
      * Unlike bg_image this has no card surface or visible tile boundary. */
     uint32_t icon_glow_color;
+    /* Category menus only: plugin icon path (absolute or relative to .plugins),
+     * resolved with the same rules as register_list_item options.icon. */
+    const char * plugin_icon;
 } icon_grid_item_t;
 
 /* Titled screen: real back-arrow button (top-left, invokes back_btn_cb) and
@@ -226,6 +239,20 @@ lv_obj_t * build_icon_grid_screen(const char * title, lv_event_cb_t back_btn_cb,
  * asset_path()/asset_path_plain() first, same as every other icon in this
  * codebase). click_cb may be NULL for a purely decorative icon. */
 lv_obj_t * build_top_right_icon_button(lv_obj_t * scr, const char * icon_asset, lv_event_cb_t click_cb);
+/* For title-bar images built by hand: the Breeze replacement for a resolved
+ * asset path, or NULL when there is none (keep the asset and its styling). */
+const char * titlebar_breeze_icon(const char * asset);
+/* Text color, or the accent while "Tint title bar icons" is on. */
+void style_titlebar_breeze_icon(lv_obj_t * image);
+/* Drag handle art for reorder rows: pre-tinted Breeze handle-sort, else the
+ * stock grip in the text color. */
+void set_reorder_handle_icon(lv_obj_t * grip);
+/* Resolved path of a white Breeze glyph's pre-tinted variant matching the
+ * theme text color (<name>.png or <name>_dark.png). */
+const char * text_glyph_asset(const char * relative);
+/* breeze_rows/<folder>_<name>.png for a stock row icon, when present and the
+ * active theme does not supply the stock image itself. */
+bool breeze_row_icon(const char * stock, char * out, size_t out_size);
 /* Shared back control for screens that retain its handle to toggle visibility. */
 lv_obj_t * build_header_back_button(lv_obj_t * scr, lv_event_cb_t cb);
 /* Align existing text actions/switches by their actual height, not an
