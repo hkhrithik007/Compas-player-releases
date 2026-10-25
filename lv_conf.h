@@ -9,6 +9,12 @@
 /* Color depth: 16-bit (RGB565) is standard for many MIPS LCD screens */
 #define LV_COLOR_DEPTH 16
 
+/* Shape Arabic/Persian letters and detect each label's reading direction.
+ * AUTO keeps Latin text left-to-right without mirroring container layouts. */
+#define LV_USE_BIDI 1
+#define LV_BIDI_BASE_DIR_DEF LV_BASE_DIR_AUTO
+#define LV_USE_ARABIC_PERSIAN_CHARS 1
+
 /* LVGL's own built-in default is 33ms (~30fps) -- a software-imposed cap
  * unrelated to any real panel/hardware limit (the fbdev double-buffer pan
  * mechanism this device uses has no inherent 30fps ceiling). Real-hardware
@@ -149,9 +155,8 @@ uint32_t gui_anim_ms(uint32_t base_ms); /* src/ui/gui_theme.c */
 #define LV_FS_POSIX_PATH ""
 #define LV_FS_POSIX_CACHE_SIZE 0
 
-/* Import via Wi-Fi screen (gui.c): renders the device's own IP as a QR
- * code so a phone can jump straight to the upload page without typing an
- * address. */
+/* Remote Control screen (gui_network.c): renders the device's own address
+ * as a QR code so a phone can connect without typing it. */
 #define LV_USE_QRCODE 1
 
 /* LVGL's general-purpose image cache (decoded bitmaps, keyed by source

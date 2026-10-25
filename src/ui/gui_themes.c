@@ -20,6 +20,7 @@
 #include "src/ui/gui_navigation.h"
 #include "src/ui/gui_reload.h"
 #include "src/ui/screen_builders.h"
+#include "src/ui/assets.h"
 #include "src/ui/home_layout.h"
 #include "src/ui/launcher_layout.h"
 #include "src/ui/i18n.h"
@@ -130,20 +131,21 @@ static const char * const s_legacy_asset_inventory[] = {
     "pull_down/dlna.png", "pull_down/dlna_s.png",
     "pull_down/gapless_play.png", "pull_down/gapless_play_s.png",
     "pull_down/hibylink.png", "pull_down/hibylink_s.png",
+    "pull_down/car_mode.png", "pull_down/car_mode_s.png",
     "navigation/search.png", "navigation/more.png",
     "navigation/chevron-right.png", "navigation/back.png",
     "sub_back/bg_search.png", "sub_back/btn_back.png", "sub_back/btn_search.png", "sub_back/close.png",
     "sub_back/btn_playlist.png", "sub_back/set.png",
-    "topbar/lucide_audio_lines.png", "topbar/lucide_headphones.png",
-    "topbar/lucide_volume_2.png", "topbar/lucide_usb.png",
-    "topbar/lucide_play.png", "topbar/lucide_pause.png",
-    "topbar/lucide_battery.png", "topbar/lucide_battery_charging.png",
-    "topbar/lucide_battery_full.png", "topbar/lucide_battery_medium.png",
-    "topbar/lucide_battery_low.png",
-    "topbar/lucide_bluetooth.png", "topbar/lucide_bluetooth_off.png",
-    "topbar/lucide_wifi.png", "topbar/lucide_wifi_high.png",
-    "topbar/lucide_wifi_low.png", "topbar/lucide_wifi_zero.png",
-    "topbar/lucide_wifi_off.png",
+    "topbar/breeze_audio_lines.png", "topbar/breeze_headphones.png",
+    "topbar/breeze_volume_2.png", "topbar/breeze_usb.png",
+    "topbar/breeze_play.png", "topbar/breeze_pause.png",
+    "topbar/breeze_battery.png", "topbar/breeze_battery_charging.png",
+    "topbar/breeze_battery_full.png", "topbar/breeze_battery_medium.png",
+    "topbar/breeze_battery_low.png",
+    "topbar/breeze_bluetooth.png", "topbar/breeze_bluetooth_off.png",
+    "topbar/breeze_wifi.png", "topbar/breeze_wifi_high.png",
+    "topbar/breeze_wifi_low.png", "topbar/breeze_wifi_zero.png",
+    "topbar/breeze_wifi_off.png",
     "topbar/wifi_connect_0.png", "topbar/wifi_connect_1.png", "topbar/wifi_connect_2.png", "topbar/wifi_connect_3.png",
     "topbar/sbc.png", "topbar/aac.png", "topbar/aptx.png", "topbar/aptx_hd.png", "topbar/ldac.png", "topbar/ssc.png", "topbar/uat.png",
     "touch_list/a_z_result_bg.png", "touch_list/del.png", "touch_list/item_bg.png",
@@ -849,6 +851,41 @@ static void perform_legacy_migration_if_needed(void) {
     }
 }
 
+/* An inventory override that is only a copy of stock artwork (the legacy
+ * Themes plugin writes theme2's into the override root) would pin that one
+ * icon to the dark set under every theme. Migration excludes the copies it
+ * finds once; this also catches copies written after it, and assets added to
+ * the inventory later. */
+static void exclude_stock_override_copies(void) {
+    if (!s_has_imported_legacy) return;
+    size_t added = 0;
+    size_t inventory_count = sizeof(s_legacy_asset_inventory) / sizeof(s_legacy_asset_inventory[0]);
+    for (size_t i = 0; i < inventory_count && s_exclusion_count < GUI_THEMES_MAX_EXCLUSIONS; i++) {
+        const char *rel = s_legacy_asset_inventory[i];
+        bool known = false;
+        for (size_t k = 0; k < s_exclusion_count && !known; k++)
+            known = strcmp(s_exclusions[k].relpath, rel) == 0;
+        if (known) continue;
+        char override_file[GUI_THEMES_MAX_PATH], stock[GUI_THEMES_MAX_PATH];
+        struct stat st;
+        if (!copy_path2(override_file, sizeof(override_file), s_override_root, rel, false) ||
+            stat(override_file, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        bool stock_copy =
+            (copy_path2(stock, sizeof(stock), s_theme2_root, rel, false) && files_are_identical(override_file, stock)) ||
+            (copy_path2(stock, sizeof(stock), s_theme1_root, rel, false) && files_are_identical(override_file, stock));
+        if (!stock_copy) continue;
+        gui_theme_legacy_exclusion_t *e = &s_exclusions[s_exclusion_count];
+        uint64_t fsize = 0;
+        if (!compute_file_sha256(override_file, e->sha256, &fsize)) continue;
+        snprintf(e->relpath, sizeof(e->relpath), "%s", rel);
+        e->size = fsize;
+        e->mtime = (int64_t)st.st_mtime;
+        s_exclusion_count++;
+        added++;
+    }
+    if (added) save_state_atomic_candidate(s_selected_filename, true, s_exclusions, s_exclusion_count);
+}
+
 /* --------------------------------------------------------------------------
  * Directory Scanning
  * -------------------------------------------------------------------------- */
@@ -914,6 +951,8 @@ static void scan_dir_recursive(const char *base_dir, const char *sub_prefix,
     closedir(d);
 }
 
+#define BREEZE_DARK_PREVIEW "themes/breeze_dark.png"
+
 size_t gui_themes_scan(gui_theme_entry_t *out_entries, size_t max_entries) {
     if (!out_entries || max_entries == 0) return 0;
 
@@ -922,7 +961,8 @@ size_t gui_themes_scan(gui_theme_entry_t *out_entries, size_t max_entries) {
     /* Entry 0 is ALWAYS Default */
     gui_theme_entry_t *def = &out_entries[count++];
     def->filename[0] = '\0';
-    snprintf(def->name, sizeof(def->name), "%s", TR("Default"));
+    /* The native palette is KDE Breeze Dark; a proper name, not translated. */
+    snprintf(def->name, sizeof(def->name), "%s", "Breeze Dark");
     def->fullpath[0] = '\0';
     def->is_default = true;
     def->preview_color = GUI_COLOR_PANEL;
@@ -1231,6 +1271,7 @@ void gui_themes_init(void) {
     }
     /* Attempt legacy migration if not yet imported (e.g. SD mounted now) */
     perform_legacy_migration_if_needed();
+    exclude_stock_override_copies();
 }
 
 /* --------------------------------------------------------------------------
@@ -1300,7 +1341,11 @@ static void populate_theme_picker_grid(lv_obj_t * list) {
         char preview_resolved[GUI_THEMES_MAX_PATH + 8];
         const char *img_src = NULL;
 
-        if (!entry->is_default && entry->fullpath[0]) {
+        if (entry->is_default) {
+            /* The built-in theme's preview ships with the firmware. */
+            const char *plain = asset_path_plain(BREEZE_DARK_PREVIEW);
+            if (plain && access(plain, R_OK) == 0) img_src = asset_path(BREEZE_DARK_PREVIEW);
+        } else if (entry->fullpath[0]) {
             char preview_path[GUI_THEMES_MAX_PATH];
             snprintf(preview_path, sizeof(preview_path), "%s", entry->fullpath);
             char *dot = strrchr(preview_path, '.');

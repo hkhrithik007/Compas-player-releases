@@ -102,12 +102,14 @@ bool gui_plugin_list_is_top(int slot);
  * When update_existing is true, an already-live screen with this title is
  * repopulated in place and is not pushed again; absent a match, a new screen
  * is opened normally. */
+struct plugin_control_dashboard_options;
 int gui_plugin_show_settings_list(const char * title, const int * row_types, const char * const * labels,
                                    const bool * toggle_initial, const int * slider_min, const int * slider_max,
                                    const int * slider_value, const char * const * icon_paths, const int32_t * heights,
                                    const int32_t * widths, const char * const * text_sizes,
                                    const bool * wrap_labels, int count, bool update_existing,
-                                   const gui_lock_screen_options_t * preview);
+                                   const gui_lock_screen_options_t * preview,
+                                   const struct plugin_control_dashboard_options * dashboard);
 
 /* Opens the single plugin order editor screen. The editor copies all input
  * strings and state. The change callback is owned by plugin_manager.c and is
@@ -533,7 +535,6 @@ extern char bt_connected_mac_cached[18];
 extern char bt_connected_codec_cached[32];
 /* Negotiated sampling frequency of the same A2DP link, 0 when unknown. */
 extern unsigned int bt_connected_rate_cached;
-extern gui_busy_handle_t import_web_stop_token;
 void quick_drawer_wifi_event_cb(lv_event_t * e);
 void quick_drawer_bt_event_cb(lv_event_t * e);
 

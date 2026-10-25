@@ -7,8 +7,10 @@
 #include "playlist_files.h" /* playlist_files_resolve_path() -- shared M3U line resolution */
 #include "library_endian.h"
 #include "cue_parser.h"
+#include "sacd_iso.h"
 #include "fallback_font.h"
 #include "file_ops.h" /* file_op_path_in_root() */
+#include "ui_frame_trace.h"
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -69,6 +71,11 @@ struct file_browser {
     lv_obj_t * screen;
     lv_obj_t * path_label;
     lv_obj_t * list;
+    lv_obj_t * pager;
+    lv_obj_t * pager_previous;
+    lv_obj_t * pager_next;
+    lv_obj_t * pager_label;
+    int32_t list_full_height;
     gui_popup_t page_jump_popup;
     lv_obj_t * page_jump_slider;
     lv_obj_t * page_jump_label;
@@ -178,7 +185,7 @@ static void set_path_label(file_browser_t *fb) {
 
 /* Kept in sync with audio.c's decoder dispatch. */
 static const char * const PLAYABLE_EXTENSIONS[] = {
-    ".flac", ".mp3", ".wav", ".rf64", ".w64", ".aiff", ".aif", ".aifc", ".dsf", ".dff", ".aac", ".m4a", ".m4b", ".mp4", ".alac", ".wv", ".caf", ".ape", ".wma", ".opus", ".ogg", ".oga",
+    ".flac", ".mp3", ".wav", ".rf64", ".w64", ".aiff", ".aif", ".aifc", ".dsf", ".dff", ".iso", ".aac", ".m4a", ".m4b", ".mp4", ".alac", ".wv", ".caf", ".ape", ".wma", ".opus", ".ogg", ".oga",
 };
 
 bool file_browser_is_playable_name(const char * name) {
@@ -213,6 +220,17 @@ static bool is_cue_file(const char * name) {
     const char * ext = strrchr(name, '.');
     if (!ext) return false;
     return strcasecmp(ext, ".cue") == 0;
+}
+
+/* ISO is a generic container extension; the library walk admits only SACD
+ * images. Keep this check out of the pure filename classifier and UI index. */
+static bool is_sacd_iso_path(const char * path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    sacd_area_t area;
+    bool ok = sacd_read_area(file, &area);
+    fclose(file);
+    return ok;
 }
 
 static unsigned char filename_ascii_fold(unsigned char c) {
@@ -994,6 +1012,8 @@ static file_browser_t * browser_of(lv_event_t * e) {
     return lv_obj_get_user_data(lv_obj_get_parent(lv_event_get_current_target_obj(e)));
 }
 
+static void page_move_to(file_browser_t * fb, int next);
+
 static int browser_page_count(const file_browser_t * fb) {
     return fb->entry_count > 0 ? 1 + (fb->entry_count - 1) / FILE_BROWSER_PAGE_SIZE : 1;
 }
@@ -1032,14 +1052,7 @@ static void page_jump_apply_cb(lv_event_t * e) {
     if (page < 1) page = 1;
     if (page > page_count) page = page_count;
     page_jump_hide(fb);
-    int next = (page - 1) * FILE_BROWSER_PAGE_SIZE;
-    if (next == fb->page_start) return;
-    fb->page_start = next;
-    if (!load_visible_entries(fb)) {
-        atomic_store(&fb->index_worker_error, true);
-        fb->entry_count = -1;
-    }
-    rebuild_list(fb);
+    page_move_to(fb, (page - 1) * FILE_BROWSER_PAGE_SIZE);
 }
 
 static lv_obj_t * page_jump_action_row(lv_obj_t * parent, const char * text,
@@ -1074,11 +1087,11 @@ static void page_jump_create(file_browser_t * fb) {
     lv_obj_set_style_max_height(popup,
         lv_display_get_vertical_resolution(lv_display_get_default()) - 2 * STATUS_BAR_CLEARANCE, 0);
     lv_obj_center(popup);
-    lv_obj_set_style_radius(popup, BOARD_SCALE_PX(20), 0);
+    /* Same Breeze frame as build_popup_surface(). */
+    lv_obj_set_style_radius(popup, LIST_ROW_RADIUS, 0);
     lv_obj_add_style(popup, &style_theme_card_bg, 0);
     lv_obj_set_style_bg_opa(popup, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(popup, 1, 0);
-    lv_obj_set_style_border_color(popup, lv_color_hex(GUI_COLOR_BORDER), 0);
+    lv_obj_set_style_border_width(popup, BOARD_SCALE_PX(2), 0);
     lv_obj_set_style_pad_all(popup, BOARD_SCALE_PX(12), 0);
     lv_obj_set_style_pad_row(popup, GUI_ROW_GAP, 0);
     lv_obj_set_flex_flow(popup, LV_FLEX_FLOW_COLUMN);
@@ -1151,23 +1164,21 @@ static void page_pager_next_cb(lv_event_t * e) {
     if (fb) page_move_to(fb, fb->page_start + FILE_BROWSER_PAGE_SIZE);
 }
 
-static lv_obj_t * page_pager_button(lv_obj_t * pager, const char * label_text,
-                                    lv_event_cb_t callback, bool enabled, int32_t height) {
+/* Previous/Next are pinned under the path, outside the scrolling list, so
+ * they stay in reach on long pages (issue #189). */
+static int32_t page_pager_height(void) {
+    int32_t height = lv_font_get_line_height(gui_theme_font(GUI_FONT_ROLE_SUBTEXT)) + BOARD_SCALE_PX(24);
+    return height < BOARD_SCALE_PX(64) ? BOARD_SCALE_PX(64) : height;
+}
+
+static lv_obj_t * page_pager_button(lv_obj_t * pager, const char * label_text, lv_event_cb_t callback) {
     lv_obj_t * button = lv_obj_create(pager);
-    lv_obj_set_size(button, lv_pct(30), height);
+    lv_obj_set_size(button, lv_pct(30), lv_pct(100));
     lv_obj_add_style(button, &pill_row_bg_style, 0);
     lv_obj_add_style(button, &list_row_pressed_style, LV_STATE_PRESSED);
     lv_obj_remove_flag(button, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(button, 0, 0);
-    lv_obj_set_style_border_width(button, 0, 0);
-    if (enabled) {
-        lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, NULL);
-    } else {
-        lv_obj_remove_flag(button, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_state(button, LV_STATE_DISABLED);
-        lv_obj_set_style_opa(button, LV_OPA_50, 0);
-    }
+    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t * label = lv_label_create(button);
     lv_label_set_text(label, label_text);
@@ -1181,36 +1192,58 @@ static lv_obj_t * page_pager_button(lv_obj_t * pager, const char * label_text,
     return button;
 }
 
-static void add_page_pager(file_browser_t * fb) {
-    lv_obj_t * pager = lv_obj_create(fb->list);
-    int32_t height = lv_font_get_line_height(gui_theme_font(GUI_FONT_ROLE_SUBTEXT)) + BOARD_SCALE_PX(24);
-    if (height < BOARD_SCALE_PX(64)) height = BOARD_SCALE_PX(64);
-    lv_obj_set_size(pager, LIST_ROW_WIDTH_WIDE, height);
+static void set_pager_button_enabled(lv_obj_t * button, bool enabled) {
+    if (enabled) {
+        lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_state(button, LV_STATE_DISABLED);
+        lv_obj_set_style_opa(button, LV_OPA_COVER, 0);
+    } else {
+        lv_obj_remove_flag(button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_state(button, LV_STATE_DISABLED);
+        lv_obj_set_style_opa(button, LV_OPA_50, 0);
+    }
+}
+
+/* The bar takes the top of the list's area; the list shrinks below it. */
+static void create_page_pager(file_browser_t * fb, lv_obj_t * parent, int32_t list_top) {
+    lv_obj_t * pager = lv_obj_create(parent);
+    fb->pager = pager;
+    lv_obj_set_size(pager, LIST_ROW_WIDTH_WIDE, page_pager_height());
     lv_obj_set_style_bg_opa(pager, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(pager, 0, 0);
     lv_obj_set_style_pad_all(pager, 0, 0);
-    lv_obj_set_style_pad_gap(pager, 0, 0);
     lv_obj_set_flex_flow(pager, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(pager, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(pager, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(pager, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_user_data(pager, fb);
+    lv_obj_align(pager, LV_ALIGN_TOP_MID, 0, list_top + GUI_ROW_GAP);
 
-    bool has_previous = fb->page_start > 0;
-    bool has_next = fb->page_start + FILE_BROWSER_PAGE_SIZE < fb->entry_count;
-    page_pager_button(pager, TR("Previous"), page_pager_previous_cb, has_previous, height);
-
-    lv_obj_t * page_label = lv_label_create(pager);
-    lv_label_set_text_fmt(page_label, "%d / %d", fb->page_start / FILE_BROWSER_PAGE_SIZE + 1,
-                          browser_page_count(fb));
-    lv_obj_add_style(page_label, &style_theme_text_primary, 0);
-    lv_obj_set_style_text_font(page_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
-    lv_obj_set_width(page_label, lv_pct(40));
-    lv_obj_set_style_text_align(page_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_remove_flag(page_label, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-
-    page_pager_button(pager, TR("Next"), page_pager_next_cb, has_next, height);
+    fb->pager_previous = page_pager_button(pager, TR("Previous"), page_pager_previous_cb);
+    fb->pager_label = lv_label_create(pager);
+    lv_obj_add_style(fb->pager_label, &style_theme_text_primary, 0);
+    lv_obj_set_style_text_font(fb->pager_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_obj_set_width(fb->pager_label, lv_pct(40));
+    lv_obj_set_style_text_align(fb->pager_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_remove_flag(fb->pager_label, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    fb->pager_next = page_pager_button(pager, TR("Next"), page_pager_next_cb);
     enable_gesture_bubble_recursive(pager);
+    lv_obj_add_flag(pager, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Shows the bar only for folders with more than one page. */
+static void update_page_pager(file_browser_t * fb) {
+    if (!fb->pager) return;
+    if (!file_browser_can_jump_pages(fb)) {
+        lv_obj_add_flag(fb->pager, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_height(fb->list, fb->list_full_height);
+        return;
+    }
+    lv_label_set_text_fmt(fb->pager_label, "%d / %d", fb->page_start / FILE_BROWSER_PAGE_SIZE + 1,
+                          browser_page_count(fb));
+    set_pager_button_enabled(fb->pager_previous, fb->page_start > 0);
+    set_pager_button_enabled(fb->pager_next, fb->page_start + FILE_BROWSER_PAGE_SIZE < fb->entry_count);
+    lv_obj_remove_flag(fb->pager, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_height(fb->list, fb->list_full_height - page_pager_height() - GUI_ROW_GAP);
 }
 
 /* Entries in the folder's index; entry_count is -1 after a read error. */
@@ -1333,7 +1366,21 @@ static void entry_long_press_cb(lv_event_t * e) {
  * in the app (LIST_ROW_* in screen_builders.h). `icon_asset` is NULL for a
  * plain file (just an indented label); directories and playlists each get
  * their own real icon. In selection mode entry rows end in a check box. */
-static lv_obj_t * add_file_row(file_browser_t * fb, const char * label_text, const char * icon_asset,
+/* A row icon resolved once per page rather than once per row: resolving
+ * costs several file-system lookups. Breeze replacements come pre-tinted in
+ * the text color; only the stock fallback is recolored. */
+typedef struct {
+    const char * src;
+    bool text_color;
+} file_row_icon_t;
+
+static file_row_icon_t resolve_file_row_icon(const char * stock) {
+    char breeze[96];
+    bool use_breeze = breeze_row_icon(stock, breeze, sizeof(breeze));
+    return (file_row_icon_t){ use_breeze ? text_glyph_asset(breeze) : asset_path(stock), false };
+}
+
+static lv_obj_t * add_file_row(file_browser_t * fb, const char * label_text, const file_row_icon_t * icon_asset,
                                lv_event_cb_t cb, void * user_data, bool check_box, bool checked) {
     lv_obj_t * row = lv_obj_create(fb->list);
     /* Files uses the same font-aware ordinary row height as other native
@@ -1351,10 +1398,12 @@ static lv_obj_t * add_file_row(file_browser_t * fb, const char * label_text, con
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
 
     int32_t check_space = check_box ? BOARD_SCALE_PX(40) : 0;
-    if (icon_asset) {
+    if (icon_asset && icon_asset->src) {
         lv_obj_t * icon = lv_image_create(row);
-        lv_image_set_src(icon, asset_path(icon_asset));
-        lv_obj_align(icon, LV_ALIGN_LEFT_MID, 16, 0);
+        lv_image_set_src(icon, icon_asset->src);
+        if (icon_asset->text_color) lv_obj_add_style(icon, &style_theme_text_primary, 0);
+        /* Glyph lines up with the category menus' row icons. */
+        lv_obj_align(icon, LV_ALIGN_LEFT_MID, 7, 0);
         lv_obj_align(label, LV_ALIGN_LEFT_MID, 72, 0);
         lv_obj_set_width(label, LIST_ROW_WIDTH_WIDE - BOARD_SCALE_PX(88) - check_space);
     } else {
@@ -1374,6 +1423,7 @@ static lv_obj_t * add_file_row(file_browser_t * fb, const char * label_text, con
 static void rebuild_list(file_browser_t * fb) {
     lv_obj_clean(fb->list);
     set_path_label(fb);
+    update_page_pager(fb);
     if (fb->entry_count < 0) {
         add_file_row(fb, atomic_load(&fb->index_worker_oversized)
                      ? TR("Folder too large to index (tap Back)")
@@ -1381,12 +1431,12 @@ static void rebuild_list(file_browser_t * fb) {
         return;
     }
 
-    if (file_browser_can_jump_pages(fb)) {
-        add_page_pager(fb);
-    }
-
     if (fb->entry_count == 0) {
-        if (fb->list_flags & LIST_ALL_FILES)
+        /* No index yet: the worker is still reading the folder, so don't
+         * claim it is empty (issue #190). index_poll_cb rebuilds on arrival. */
+        if (!fb->current_index)
+            build_list_message(fb->list, TR("Loading..."), NULL);
+        else if (fb->list_flags & LIST_ALL_FILES)
             build_list_message(fb->list, TR("This folder is empty"), NULL);
         else
             build_list_message(fb->list,
@@ -1399,21 +1449,33 @@ static void rebuild_list(file_browser_t * fb) {
 
     int page_end = fb->page_start + FILE_BROWSER_PAGE_SIZE;
     if (page_end > fb->entry_count) page_end = fb->entry_count;
+    UI_TRACE_SPAN_BEGIN(perf_rows);
+#ifdef FILE_BROWSER_NO_ROW_ICONS
+    const file_row_icon_t folder_icon = { NULL, false }, list_icon = { NULL, false }, song_icon = { NULL, false };
+#else
+    const file_row_icon_t folder_icon = resolve_file_row_icon("touch_list/list_folder.png");
+    const file_row_icon_t list_icon = resolve_file_row_icon("sub_back/btn_playlist.png");
+    char song_breeze[96];
+    /* Songs have no stock art: without the Breeze file they stay text rows. */
+    const file_row_icon_t song_icon = breeze_row_icon("touch_list/list_song.png", song_breeze, sizeof(song_breeze))
+        ? (file_row_icon_t){ text_glyph_asset(song_breeze), false } : (file_row_icon_t){ NULL, false };
+#endif
     for (int i = fb->page_start; i < page_end; i++) {
-        const char * icon_asset = NULL;
+        const file_row_icon_t * icon_asset = NULL;
         dir_entry_t *entry = &fb->entries[i - fb->page_start];
-        if (entry->is_dir) icon_asset = "touch_list/list_folder.png";
-        else if (entry->is_playlist) icon_asset = "sub_back/btn_playlist.png";
+        if (entry->is_dir) icon_asset = &folder_icon;
+        else if (entry->is_playlist) icon_asset = &list_icon;
         /* No dedicated cue-sheet icon asset exists in this theme -- reuses
          * the playlist one, the closest existing match semantically (both
          * represent "tap to see a list of tracks", not a single song). */
-        else if (entry->is_cue) icon_asset = "sub_back/btn_playlist.png";
+        else if (entry->is_cue) icon_asset = &list_icon;
+        else if (!entry->is_other) icon_asset = &song_icon;
         lv_obj_t * row = add_file_row(fb, entry->name, icon_asset, entry_click_cb, (void *) (intptr_t) i,
                                       fb->selecting, is_selected(fb, (unsigned) i));
         if (fb->callbacks.on_selection || fb->callbacks.on_long_press)
             lv_obj_add_event_cb(row, entry_long_press_cb, LV_EVENT_LONG_PRESSED, (void *) (intptr_t) i);
     }
-
+    UI_TRACE_SPAN_END(UI_TRACE_SPAN_FILE_ROWS, perf_rows);
 }
 
 /* Maximum directory recursion depth when walking song directories. */
@@ -1485,6 +1547,8 @@ static bool walk_all_songs_recursive(const char * dir_path, file_browser_song_vi
             continue;
         }
         if (!file_browser_is_playable_name(de->d_name)) continue;
+        const char *ext = strrchr(de->d_name, '.');
+        if (ext && strcasecmp(ext, ".iso") == 0 && !is_sacd_iso_path(path_buf)) continue;
 
         if (add_files) {
             (*count)++;
@@ -1567,9 +1631,13 @@ file_browser_t * file_browser_create(lv_obj_t * parent, const char * root,
     lv_obj_set_style_pad_gap(list, GUI_ROW_GAP, 0);
     lv_obj_set_style_pad_top(list, GUI_ROW_GAP, 0);
     lv_obj_set_style_pad_bottom(list, BOARD_SCALE_PX(8), 0);
-    /* Rows follow the live display width. Explicit cross-axis centering also
-     * keeps this correct if a future parent is narrower than the display. */
-    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+    /* Rows follow the live display width. The single column track is centered
+     * too: with START it sat at the left edge, leaving both side margins on
+     * the right. */
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_update_layout(list);
+    fb->list_full_height = lv_obj_get_height(list);
+    create_page_pager(fb, parent, lv_obj_get_y(list));
 
     fb->index_poll_timer = lv_timer_create(index_poll_cb, 100, fb);
     scan_current_dir(fb);

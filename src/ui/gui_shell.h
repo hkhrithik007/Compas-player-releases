@@ -4,6 +4,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* Interactive Player, Back and Home swipes share this recognition threshold.
+ * Drawer/widget drag jitter thresholds remain separate and unchanged. */
+#define NAV_SWIPE_DEADZONE_PX 12
+
 lv_obj_t * gui_shell_get_home_screen(void);
 lv_obj_t * gui_shell_get_dac_home_screen(void);
 void gui_shell_refresh_home(void);
@@ -54,6 +58,10 @@ void refresh_wifi_topbar(void);
 void refresh_volume_topbar(int32_t percent);
 void gui_shell_apply_topbar_settings(void);
 void quick_drawer_mark_snapshot_dirty(void);
+/* Repaints the drawer and status bar from the current theme slots. */
+void gui_shell_refresh_theme_colors(void);
+/* The drawer's control-row surface, shared with the volume popup. */
+lv_style_t * gui_shell_drawer_row_style(void);
 /* Frees the drawer's cached full-screen frames; quick_drawer_mark_snapshot_dirty()
  * rebuilds them. Used before an emulator runs. */
 void gui_shell_release_memory_for_external_session(void);

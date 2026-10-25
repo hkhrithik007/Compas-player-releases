@@ -212,6 +212,7 @@ static void set_defaults(player_settings_t * out) {
     out->accent_color = DEFAULT_ACCENT_COLOR;
     out->accent_dynamic = false;
     out->startup_splash_tint = false;
+    out->titlebar_icon_tint = false;
     out->crossfade_enabled = false;
     out->gapless_enabled = true; /* on by default -- see settings.h */
     out->replaygain_mode = 1; /* Per Track -- preserves the old replaygain_enabled=true default */
@@ -220,6 +221,7 @@ static void set_defaults(player_settings_t * out) {
     out->car_mode_autoresume_enabled = true;
     out->inline_remote_enabled = true;
     out->lyrics_enabled = true;
+    out->lyrics_keep_screen_on = true;
     out->subsonic_url[0] = '\0';
     out->subsonic_username[0] = '\0';
     out->subsonic_password[0] = '\0';
@@ -230,6 +232,9 @@ static void set_defaults(player_settings_t * out) {
     memset(out->subsonic_saved, 0, sizeof(out->subsonic_saved));
     out->subsonic_saved_count = 0;
     out->bt_volume_sync_enabled = true;
+    out->dac_filter = 0;
+    out->dac_nos = false;
+    out->dac_dre = true;
     out->bt_dac_mode_enabled = false;
     out->bt_speexrate_enabled = true;
     out->bt_sample_rate = 0;
@@ -261,6 +266,7 @@ static void set_defaults(player_settings_t * out) {
     out->album_sort_mode = 0;
     out->artist_albums_sort_mode = 0;
     out->album_artist_albums_sort_mode = 0;
+    out->genre_view_mode = 0;
     /* Defaults on: a device left screen-off with idle_shutdown_enabled=false
      * sits at full power indefinitely. Suspend-to-RAM (not a full poweroff)
      * avoids resetting the music queue. 10 minutes (IDLE_SHUTDOWN_STEPS min)
@@ -458,6 +464,8 @@ bool settings_load(player_settings_t * out) {
             out->accent_dynamic = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "startup_splash_tint") == 0) {
             out->startup_splash_tint = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "titlebar_icon_tint") == 0) {
+            out->titlebar_icon_tint = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "crossfade") == 0) {
             out->crossfade_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "gapless") == 0) {
@@ -482,6 +490,8 @@ bool settings_load(player_settings_t * out) {
             out->inline_remote_enabled = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "lyrics_enabled") == 0) {
             out->lyrics_enabled = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "lyrics_keep_screen_on") == 0) {
+            out->lyrics_keep_screen_on = (strcmp(value, "1") == 0);
         } else if (strcmp(key, "subsonic_url") == 0) {
             snprintf(out->subsonic_url, sizeof(out->subsonic_url), "%s", value);
         } else if (strcmp(key, "subsonic_username") == 0) {
@@ -517,6 +527,15 @@ bool settings_load(player_settings_t * out) {
             }
         } else if (strcmp(key, "bt_volume_sync") == 0) {
             out->bt_volume_sync_enabled = (strcmp(value, "1") == 0);
+        } else if (strcmp(key, "dac_filter") == 0) {
+            out->dac_filter = value[0] >= '0' && value[0] <= '3' && value[1] == '\0'
+                ? value[0] - '0' : 0;
+        } else if (strcmp(key, "dac_nos") == 0) {
+            out->dac_nos = strcmp(value, "1") == 0;
+        } else if (strcmp(key, "dac_dre") == 0) {
+            out->dac_dre = true;
+            if (strcmp(value, "0") == 0) out->dac_dre = false;
+            else if (strcmp(value, "1") == 0) out->dac_dre = true;
         } else if (strcmp(key, "bt_device_rate") == 0) {
             /* "AA:BB:CC:DD:EE:FF,44100" */
             const char * comma = strchr(value, ',');
@@ -591,12 +610,17 @@ bool settings_load(player_settings_t * out) {
         } else if (strcmp(key, "file_sort_mode") == 0) {
             out->file_sort_mode = strcmp(value, "1") == 0 ? 1 : 0;
         } else if (strcmp(key, "album_sort_mode") == 0) {
-            out->album_sort_mode = strcmp(value, "1") == 0 ? 1 : (strcmp(value, "2") == 0 ? 2 : 0);
+            out->album_sort_mode = strcmp(value, "1") == 0 ? 1 :
+                                   (strcmp(value, "2") == 0 ? 2 :
+                                    (strcmp(value, "3") == 0 ? 3 : 0));
         } else if (strcmp(key, "artist_albums_sort_mode") == 0) {
             out->artist_albums_sort_mode = strcmp(value, "1") == 0 ? 1 : (strcmp(value, "2") == 0 ? 2 : 0);
             artist_albums_sort_seen = true;
         } else if (strcmp(key, "album_artist_albums_sort_mode") == 0) {
             out->album_artist_albums_sort_mode = strcmp(value, "1") == 0 ? 1 : (strcmp(value, "2") == 0 ? 2 : 0);
+        } else if (strcmp(key, "genre_view_mode") == 0) {
+            int mode = atoi(value);
+            out->genre_view_mode = mode >= 0 && mode <= 3 ? mode : 0;
             album_artist_albums_sort_seen = true;
         } else if (strcmp(key, "show_artist_images") == 0) {
             out->show_artist_images = (strcmp(value, "1") == 0);
@@ -741,8 +765,10 @@ bool settings_load(player_settings_t * out) {
 
     /* Existing installs inherit their previous global album order in each
      * nested collection until the user chooses a context-specific order. */
-    if (!artist_albums_sort_seen) out->artist_albums_sort_mode = out->album_sort_mode;
-    if (!album_artist_albums_sort_seen) out->album_artist_albums_sort_mode = out->album_sort_mode;
+    if (!artist_albums_sort_seen)
+        out->artist_albums_sort_mode = out->album_sort_mode <= 2 ? out->album_sort_mode : 0;
+    if (!album_artist_albums_sort_seen)
+        out->album_artist_albums_sort_mode = out->album_sort_mode <= 2 ? out->album_sort_mode : 0;
     return true;
 }
 
@@ -809,6 +835,7 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "accent_color=%06X\n", (unsigned int) (settings->accent_color & 0xFFFFFF));
     fprintf(f, "accent_dynamic=%d\n", settings->accent_dynamic ? 1 : 0);
     fprintf(f, "startup_splash_tint=%d\n", settings->startup_splash_tint ? 1 : 0);
+    fprintf(f, "titlebar_icon_tint=%d\n", settings->titlebar_icon_tint ? 1 : 0);
     fprintf(f, "crossfade=%d\n", settings->crossfade_enabled ? 1 : 0);
     fprintf(f, "gapless=%d\n", settings->gapless_enabled ? 1 : 0);
     fprintf(f, "replaygain_mode=%d\n", settings->replaygain_mode);
@@ -817,6 +844,7 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "car_mode_autoresume_enabled=%d\n", settings->car_mode_autoresume_enabled ? 1 : 0);
     fprintf(f, "inline_remote_enabled=%d\n", settings->inline_remote_enabled ? 1 : 0);
     fprintf(f, "lyrics_enabled=%d\n", settings->lyrics_enabled ? 1 : 0);
+    fprintf(f, "lyrics_keep_screen_on=%d\n", settings->lyrics_keep_screen_on ? 1 : 0);
     fprintf(f, "subsonic_url=%s\n", settings->subsonic_url);
     fprintf(f, "subsonic_username=%s\n", settings->subsonic_username);
     fprintf(f, "subsonic_password=%s\n", settings->subsonic_password);
@@ -831,6 +859,9 @@ static void settings_write_file(const player_settings_t * settings) {
         fprintf(f, "subsonic_saved_%d_verify_tls=%d\n", i, settings->subsonic_saved[i].verify_tls ? 1 : 0);
     }
     fprintf(f, "bt_volume_sync=%d\n", settings->bt_volume_sync_enabled ? 1 : 0);
+    fprintf(f, "dac_filter=%d\n", settings->dac_filter >= 0 && settings->dac_filter <= 3 ? settings->dac_filter : 0);
+    fprintf(f, "dac_nos=%d\n", settings->dac_nos ? 1 : 0);
+    fprintf(f, "dac_dre=%d\n", settings->dac_dre ? 1 : 0);
     fprintf(f, "bt_speexrate=%d\n", settings->bt_speexrate_enabled ? 1 : 0);
     fprintf(f, "bt_sample_rate=%u\n", settings->bt_sample_rate);
     for (int i = 0; i < settings->bt_device_rate_count && i < BT_DEVICE_RATE_MAX; i++)
@@ -862,9 +893,10 @@ static void settings_write_file(const player_settings_t * settings) {
     fprintf(f, "show_battery_percent=%d\n", settings->show_battery_percent ? 1 : 0);
     fprintf(f, "show_artist_images=%d\n", settings->show_artist_images ? 1 : 0);
     fprintf(f, "file_sort_mode=%d\n", settings->file_sort_mode == 1 ? 1 : 0);
-    fprintf(f, "album_sort_mode=%d\n", settings->album_sort_mode >= 0 && settings->album_sort_mode <= 2 ? settings->album_sort_mode : 0);
+    fprintf(f, "album_sort_mode=%d\n", settings->album_sort_mode >= 0 && settings->album_sort_mode <= 3 ? settings->album_sort_mode : 0);
     fprintf(f, "artist_albums_sort_mode=%d\n", settings->artist_albums_sort_mode >= 0 && settings->artist_albums_sort_mode <= 2 ? settings->artist_albums_sort_mode : 0);
     fprintf(f, "album_artist_albums_sort_mode=%d\n", settings->album_artist_albums_sort_mode >= 0 && settings->album_artist_albums_sort_mode <= 2 ? settings->album_artist_albums_sort_mode : 0);
+    fprintf(f, "genre_view_mode=%d\n", settings->genre_view_mode >= 0 && settings->genre_view_mode <= 3 ? settings->genre_view_mode : 0);
     fprintf(f, "idle_shutdown_enabled=%d\n", settings->idle_shutdown_enabled ? 1 : 0);
     fprintf(f, "idle_shutdown_minutes=%d\n", settings->idle_shutdown_minutes);
     fprintf(f, "idle_suspend_enabled=%d\n", settings->idle_suspend_enabled ? 1 : 0);

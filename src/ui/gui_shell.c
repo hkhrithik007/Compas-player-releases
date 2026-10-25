@@ -1,6 +1,9 @@
 #include "gui_shell.h"
+#include "ui_label_text.h"
 #include "i18n.h"
 #include "app_clock.h"
+#include "ui_frame_trace.h"
+#include "ui_snapshot_prefetch.h"
 #include "gui.h"
 #include "gui_theme.h"
 #include "gui_notifications.h"
@@ -45,6 +48,7 @@
 #include "usb_mode_control.h"
 #include "backlight.h"
 #include "plugin_manager.h"
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -139,8 +143,8 @@ static bool wifi_toggle_queued = false;
 static bool wifi_toggle_queued_target = false;
 
 /* Read-only effective-Wi-Fi-state accessor for callers outside this file
- * (gui_network.c's Wi-Fi dependency guard for AirPlay/DLNA/Remote Control/
- * Import via Wi-Fi) that need the same "in-flight toggle counts as its
+ * (gui_network.c's Wi-Fi dependency guard for AirPlay/DLNA/Remote Control
+ * and remote file import) that need the same "in-flight toggle counts as its
  * target state" logic refresh_wifi_icon() below already uses -- plain
  * wifi_control_is_enabled() can briefly still report the OLD hardware state
  * while wifi_toggle_active is true (see wifi_toggle_thread_func()'s own
@@ -199,6 +203,9 @@ static hw_volume_coalesce_t quick_drawer_volume_hv = { .pending = -1 };
  * QD_TOGGLE_COUNT + ... because that enum is declared below this point. */
 #define QUICK_DRAWER_TOGGLE_SLOTS (9 + PLUGIN_MAX_QUICK_TOGGLES)
 static lv_obj_t * quick_drawer_toggle_state[QUICK_DRAWER_TOGGLE_SLOTS];
+/* Theme-dependent caption colors; see gui_shell_refresh_theme_colors(). */
+static lv_color_t shell_drawer_off_color;
+static lv_color_t shell_drawer_on_color(void);
 /* Stable references let customization move a complete toggle without
  * rebuilding widgets or changing their event callbacks. IDs 0..8 are the
  * native toggles; ID 9 is represented by plugin indices below. */
@@ -703,8 +710,8 @@ static void quick_drawer_set_toggle_state_text(int index, bool enabled, const ch
     if (index < 0 || index >= QUICK_DRAWER_TOGGLE_SLOTS) return;
     if (!quick_drawer_toggle_state[index]) return;
     const char * caption = text ? text : (enabled ? TR("On") : TR("Off"));
-    lv_color_t color = enabled ? accent_lv_color() : lv_color_hex(0x8d918f);
-    if (strcmp(lv_label_get_text(quick_drawer_toggle_state[index]), caption) == 0 &&
+    lv_color_t color = enabled ? shell_drawer_on_color() : shell_drawer_off_color;
+    if (ui_label_text_matches(quick_drawer_toggle_state[index], caption) &&
         lv_color_eq(lv_obj_get_style_text_color(quick_drawer_toggle_state[index], 0), color)) return;
     lv_label_set_text(quick_drawer_toggle_state[index], caption);
     lv_obj_set_style_text_color(quick_drawer_toggle_state[index], color, 0);
@@ -853,21 +860,156 @@ static const char * bt_codec_get_asset(bt_codec_type_t type) {
 
 static void sync_bt_codec_status_icon(void);
 
+/* The drawer and status bar paint their own surfaces from the theme slots
+ * (Breeze Dark natively), with text that fails to contrast replaced by
+ * Breeze's. Shared styles, so a theme change reaches the live widgets
+ * without a rebuild. The native palette's white status glyph art is used
+ * as drawn; any other palette recolors it. */
+static lv_style_t shell_drawer_bg_style, shell_drawer_panel_style, shell_drawer_row_style,
+    shell_drawer_card_style, shell_drawer_handle_style, shell_topbar_glyph_style;
+static bool shell_theme_styles_ready;
+static bool shell_theme_native = true;
+static lv_color_t shell_bar_color, shell_bar_glyph_color, shell_drawer_surface;
+
+static lv_color_t shell_theme_slot(lv_style_t * style, lv_style_prop_t prop, uint32_t fallback) {
+    lv_style_value_t value;
+    return lv_style_get_prop(style, prop, &value) == LV_STYLE_RES_FOUND ? value.color : lv_color_hex(fallback);
+}
+
+/* Theme text over a theme surface, or the Breeze color that reads on it. */
+static lv_color_t shell_legible(lv_color_t text, lv_color_t bg, float minimum, bool muted) {
+    if (gui_theme_contrast_ratio(text, bg) >= minimum) return text;
+    bool light = gui_theme_prefers_light_text(bg);
+    return lv_color_hex(muted ? (light ? GUI_BREEZE_MUTED_ON_DARK : GUI_BREEZE_MUTED_ON_LIGHT)
+                              : (light ? GUI_BREEZE_TEXT_ON_DARK : GUI_BREEZE_TEXT_ON_LIGHT));
+}
+
+static void shell_theme_styles_init(void) {
+    if (shell_theme_styles_ready) return;
+    lv_style_t * bg_styles[] = { &shell_drawer_bg_style, &shell_drawer_panel_style, &shell_drawer_row_style,
+                                 &shell_drawer_card_style, &shell_drawer_handle_style };
+    for (unsigned i = 0; i < sizeof(bg_styles) / sizeof(bg_styles[0]); i++) lv_style_init(bg_styles[i]);
+    lv_style_init(&shell_topbar_glyph_style);
+    shell_theme_styles_ready = true;
+    gui_shell_refresh_theme_colors();
+}
+
+/* "On" captions use the accent where it reads on the drawer, else the text color. */
+static lv_color_t shell_drawer_on_color(void) {
+    lv_color_t accent = accent_lv_color();
+    if (gui_theme_contrast_ratio(accent, shell_drawer_surface) >= GUI_CONTRAST_MUTED) return accent;
+    return shell_legible(shell_theme_slot(&style_theme_text_primary, LV_STYLE_TEXT_COLOR, GUI_COLOR_PRIMARY),
+                         shell_drawer_surface, GUI_CONTRAST_TEXT, false);
+}
+
+static void shell_set_topbar_glyphs(lv_color_t color, bool recolor) {
+    lv_style_value_t current;
+    if (lv_style_get_prop(&shell_topbar_glyph_style, LV_STYLE_TEXT_COLOR, &current) == LV_STYLE_RES_FOUND &&
+        lv_color_eq(current.color, color) &&
+        lv_style_get_prop(&shell_topbar_glyph_style, LV_STYLE_IMAGE_RECOLOR_OPA, &current) == LV_STYLE_RES_FOUND &&
+        (current.num == LV_OPA_COVER) == recolor) return;
+    lv_style_set_text_color(&shell_topbar_glyph_style, color);
+    lv_style_set_image_recolor(&shell_topbar_glyph_style, color);
+    lv_style_set_image_recolor_opa(&shell_topbar_glyph_style, recolor ? LV_OPA_COVER : LV_OPA_TRANSP);
+    lv_obj_report_style_change(&shell_topbar_glyph_style);
+}
+
+static void quick_drawer_set_toggle_state_text(int index, bool enabled, const char * text);
+
+/* Every label and image on the bar takes the glyph color; warnings (red
+ * volume digits, low battery) override it locally. */
+static void topbar_add_glyph_style(lv_obj_t * parent) {
+    for (uint32_t i = 0; i < lv_obj_get_child_count(parent); i++) {
+        lv_obj_t * child = lv_obj_get_child(parent, (int32_t) i);
+        if (lv_obj_check_type(child, &lv_label_class) || lv_obj_check_type(child, &lv_image_class))
+            lv_obj_add_style(child, &shell_topbar_glyph_style, 0);
+        topbar_add_glyph_style(child);
+    }
+}
+
+lv_style_t * gui_shell_drawer_row_style(void) {
+    shell_theme_styles_init();
+    return &shell_drawer_row_style;
+}
+
+void gui_shell_refresh_theme_colors(void) {
+    if (!shell_theme_styles_ready) {
+        shell_theme_styles_init();
+        return;
+    }
+    lv_color_t screen = shell_theme_slot(&style_theme_screen_bg, LV_STYLE_BG_COLOR, GUI_COLOR_SCREEN);
+    lv_color_t card = shell_theme_slot(&style_theme_card_bg, LV_STYLE_BG_COLOR, GUI_COLOR_PANEL);
+    lv_color_t row = shell_theme_slot(&list_row_style, LV_STYLE_BG_COLOR, GUI_COLOR_ROW);
+    lv_color_t primary = shell_theme_slot(&style_theme_text_primary, LV_STYLE_TEXT_COLOR, GUI_COLOR_PRIMARY);
+    lv_color_t muted = shell_theme_slot(&style_theme_text_muted, LV_STYLE_TEXT_COLOR, GUI_COLOR_SECONDARY);
+    shell_theme_native = lv_color_eq(screen, lv_color_hex(GUI_COLOR_SCREEN)) &&
+                         lv_color_eq(card, lv_color_hex(GUI_COLOR_PANEL)) &&
+                         lv_color_eq(row, lv_color_hex(GUI_COLOR_ROW)) &&
+                         lv_color_eq(primary, lv_color_hex(GUI_COLOR_PRIMARY)) &&
+                         lv_color_eq(muted, lv_color_hex(GUI_COLOR_SECONDARY));
+    lv_color_t old_off = shell_drawer_off_color;
+    lv_color_t off = shell_legible(muted, card, GUI_CONTRAST_MUTED, true);
+    lv_style_set_bg_color(&shell_drawer_bg_style, screen);
+    lv_style_set_bg_color(&shell_drawer_panel_style, card);
+    lv_style_set_bg_color(&shell_drawer_row_style, row);
+    lv_style_set_bg_color(&shell_drawer_card_style, row);
+    lv_style_set_bg_color(&shell_drawer_handle_style, lv_color_mix(off, card, LV_OPA_60));
+    shell_drawer_surface = card;
+    shell_drawer_off_color = off;
+    shell_bar_color = screen;
+    shell_bar_glyph_color = shell_legible(primary, screen, GUI_CONTRAST_TEXT, false);
+    lv_style_t * bg_styles[] = { &shell_drawer_bg_style, &shell_drawer_panel_style, &shell_drawer_row_style,
+                                 &shell_drawer_card_style, &shell_drawer_handle_style };
+    for (unsigned i = 0; i < sizeof(bg_styles) / sizeof(bg_styles[0]); i++) {
+        lv_style_set_bg_opa(bg_styles[i], LV_OPA_COVER);
+        lv_obj_report_style_change(bg_styles[i]);
+    }
+    /* Captions carry their state color locally; move the "Off" ones over. */
+    for (int i = 0; i < QUICK_DRAWER_TOGGLE_SLOTS; i++) {
+        lv_obj_t * state = quick_drawer_toggle_state[i];
+        if (!state) continue;
+        bool off = lv_color_eq(lv_obj_get_style_text_color(state, 0), old_off);
+        lv_obj_set_style_text_color(state, off ? shell_drawer_off_color : shell_drawer_on_color(), 0);
+    }
+    if (status_bar_band) gui_shell_set_status_bar_screen_context(lv_screen_active());
+    quick_drawer_mark_snapshot_dirty();
+}
+
 void gui_shell_set_status_bar_screen_context(lv_obj_t * screen) {
     if (!status_bar_band) return;
+    shell_theme_styles_init();
 
-    /* White status glyphs need a stable black surface on ordinary screens,
-     * especially when a light theme is active. Player and Lyrics draw
-     * edge-to-edge artwork, as can Home with a background image, so keep
-     * their backing translucent. Keeping this
-     * on the persistent band also lets transition snapshots composite it. */
+    /* The bar is the theme's screen color with glyphs in its text color.
+     * Player and Lyrics draw edge-to-edge artwork, as can Home with a
+     * background image, so there it is translucent. Keeping this on the
+     * persistent band also lets transition snapshots composite it. */
     bool home_background = screen && screen == home_screen &&
                            lv_obj_get_style_bg_image_src(screen, LV_PART_MAIN) != NULL;
     bool over_artwork = screen == gui_player_get_screen() || screen == gui_lyrics_get_screen() ||
                         home_background;
-    lv_obj_set_style_bg_color(status_bar_band, lv_color_black(), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(status_bar_band, over_artwork ? LV_OPA_50 : LV_OPA_COVER,
+    /* An open drawer is a themed surface of its own, whatever is under it. */
+    lv_color_t band = shell_bar_color, glyph = shell_bar_glyph_color;
+    bool recolor = !shell_theme_native;
+    if (over_artwork && !quick_drawer_open) {
+        /* Over the frost, follow what the player's text picked for it.
+         * Lyrics and Home wallpapers stay on the classic dark scrim. */
+        lv_style_value_t text;
+        bool player = screen == gui_player_get_screen() &&
+                      lv_style_get_prop(gui_player_backdrop_text_style(false), LV_STYLE_TEXT_COLOR, &text) ==
+                          LV_STYLE_RES_FOUND;
+        if (player && gui_theme_color_is_dark(text.color)) {
+            glyph = text.color;
+            recolor = true;
+        } else {
+            band = lv_color_black();
+            glyph = lv_color_white();
+            recolor = false;
+        }
+    }
+    lv_obj_set_style_bg_color(status_bar_band, band, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(status_bar_band, over_artwork && !quick_drawer_open ? LV_OPA_50 : LV_OPA_COVER,
                             LV_PART_MAIN);
+    shell_set_topbar_glyphs(glyph, recolor);
 }
 
 void sync_player_topbar_visibility(lv_obj_t * screen) {
@@ -921,7 +1063,6 @@ void sync_player_topbar_visibility(lv_obj_t * screen) {
 
 static void style_topbar_text(lv_obj_t * label, const lv_font_t * font) {
     lv_obj_set_style_text_font(label, font, 0);
-    lv_obj_set_style_text_color(label, lv_color_white(), 0);
     lv_obj_set_style_text_opa(label, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(label, 0, 0);
 }
@@ -945,10 +1086,10 @@ static const lv_font_t * topbar_ampm_font(void) {
 #endif
 }
 
-/* Normalize Lucide art by its visible source bounds so icon ink shares the
+/* Normalize Breeze art by its visible source bounds so icon ink shares the
  * text's centerline and target height. Two pixels of padding around the
  * visible bounds keeps neighboring status items legible without crowding. */
-static void layout_lucide_topbar_image_sized(lv_obj_t * image, int left, int top,
+static void layout_glyph_topbar_image_sized(lv_obj_t * image, int left, int top,
                                              int width, int height,
                                              int target_px) {
     int target = BOARD_SCALE_PX(target_px);
@@ -965,42 +1106,91 @@ static void layout_lucide_topbar_image_sized(lv_obj_t * image, int left, int top
                                            - (top * scale + LV_SCALE_NONE / 2) / LV_SCALE_NONE));
 }
 
-static void layout_lucide_topbar_image(lv_obj_t * image, int left, int top,
-                                       int width, int height) {
-    layout_lucide_topbar_image_sized(image, left, top, width, height, 20);
+/* Status glyphs are Breeze. Firmware images that predate it only ship the
+ * Lucide set, so fall back to those names and their measured bounds when
+ * the Breeze art cannot be found. */
+typedef struct {
+    int left, top, width, height, target_px;
+} topbar_bounds_t;
+
+#define BOUNDS_SIZED(l, t, w, h, px) ((topbar_bounds_t){ (l), (t), (w), (h), (px) })
+#define BOUNDS(l, t, w, h) BOUNDS_SIZED(l, t, w, h, 20)
+/* Breeze art is rasterized from its 22 px SVGs straight to the 28 px it is
+ * shown at, so it is drawn unscaled and only needs its horizontal ink span
+ * for the slot width. */
+#define NATIVE_SIZED(l, w, px) BOUNDS_SIZED(l, 0, w, px, 0)
+#define NATIVE(l, w) NATIVE_SIZED(l, w, BREEZE_ICON_PX)
+#define BREEZE_ICON_PX 28
+
+static bool topbar_breeze_icons(void) {
+    static int available = -1;
+    if (available < 0) {
+        const char * probe = asset_path_plain("topbar/breeze_play.png");
+        available = probe && access(probe, R_OK) == 0;
+    }
+    return available;
+}
+
+static const char * topbar_icon(const char * name) {
+    char relative[64];
+    snprintf(relative, sizeof(relative), "topbar/%s_%s.png",
+             topbar_breeze_icons() ? "breeze" : "lucide", name);
+    return asset_path(relative);
+}
+
+static void layout_native_topbar_image(lv_obj_t * image, int left, int width,
+                                       int canvas_px) {
+    int padding = BOARD_SCALE_PX(2);
+    lv_image_set_inner_align(image, LV_IMAGE_ALIGN_TOP_LEFT);
+    lv_image_set_pivot(image, 0, 0);
+    lv_image_set_scale(image, LV_SCALE_NONE);
+    lv_obj_set_size(image, width + 2 * padding, STATUS_BAR_CLEARANCE);
+    lv_obj_set_style_translate_y(image, 0, 0);
+    lv_image_set_offset_x(image, (int16_t)(padding - left));
+    lv_image_set_offset_y(image, (int16_t)((STATUS_BAR_CLEARANCE - canvas_px) / 2));
+}
+
+static void layout_topbar_glyph(lv_obj_t * image, topbar_bounds_t breeze,
+                                topbar_bounds_t lucide) {
+    if (topbar_breeze_icons()) {
+        layout_native_topbar_image(image, breeze.left, breeze.width, breeze.height);
+        return;
+    }
+    layout_glyph_topbar_image_sized(image, lucide.left, lucide.top, lucide.width,
+                                    lucide.height, lucide.target_px);
 }
 
 /* All battery states use the same measured family envelope. The resulting
  * fixed-width slot keeps the percentage group anchored through state swaps. */
 static void layout_battery_topbar_image(lv_obj_t * image) {
-    layout_lucide_topbar_image(image, 1, 5, 22, 14);
+    /* The Breeze battery is short and wide, so it is rasterized at 35 px to
+     * give its body the same ink height as the other glyphs. */
+    layout_topbar_glyph(image, NATIVE_SIZED(1, 33, 35), BOUNDS(1, 5, 22, 14));
 }
 
 static void layout_radio_topbar_image(lv_obj_t * image) {
-    /* All Wi-Fi strengths/off states share these family canvas bounds.
-     * Keeping them identical preserves partial-state art. */
-    layout_lucide_topbar_image(image, 1, 1, 22, 22);
+    /* All Wi-Fi strengths/off states share these family bounds. Keeping
+     * them identical preserves partial-state art. */
+    layout_topbar_glyph(image, NATIVE(0, 28), BOUNDS(1, 1, 22, 22));
 }
 
 static void layout_bluetooth_topbar_image(lv_obj_t * image) {
-    /* Bluetooth's connected glyph is much narrower than the shared radio
-     * envelope. Enlarge both states together so they remain optically balanced
-     * without changing the slot or shifting when the state changes. */
-    layout_lucide_topbar_image_sized(image, 1, 1, 22, 22, 24);
+    /* Both states share one envelope so the slot does not shift. Lucide's
+     * connected glyph is much narrower, so that set is enlarged to 24 px. */
+    layout_topbar_glyph(image, NATIVE(0, 28), BOUNDS_SIZED(1, 1, 22, 22, 24));
 }
 
-/* Connected strengths share the full-signal arcs' bounds, which leave the
- * top of the canvas empty; sizing them by the off glyph's square made the
- * arcs visibly smaller than the neighboring icons. */
+/* Breeze strengths share the off glyph's bounds; Lucide's connected arcs
+ * leave the top of the canvas empty, so they use the full-signal bounds. */
 static void layout_wifi_connected_topbar_image(lv_obj_t * image) {
-    layout_lucide_topbar_image(image, 1, 4, 22, 17);
+    layout_topbar_glyph(image, NATIVE(0, 28), BOUNDS(1, 4, 22, 17));
 }
 
 /* Codec badges share these measured solid alpha bounds (alpha >= 128) on a
  * 48x30 canvas. Scaling the 40x24 mark directly gives a clear, consistent
  * 24 px badge height while preserving two pixels of horizontal slot padding. */
 static void layout_codec_topbar_image(lv_obj_t * image) {
-    layout_lucide_topbar_image_sized(image, 4, 3, 40, 24, 24);
+    layout_glyph_topbar_image_sized(image, 4, 3, 40, 24, 24);
 }
 
 static void build_status_bar(void) {
@@ -1094,8 +1284,8 @@ static void build_status_bar(void) {
 
     /* Normalize against the sprite's measured visible glyph bounds. */
     volume_topbar_icon = lv_image_create(volume_topbar_group);
-    lv_image_set_src(volume_topbar_icon, asset_path("topbar/lucide_volume_2.png"));
-    layout_lucide_topbar_image(volume_topbar_icon, 1, 3, 22, 18);
+    lv_image_set_src(volume_topbar_icon, topbar_icon("volume_2"));
+    layout_topbar_glyph(volume_topbar_icon, NATIVE(3, 22), BOUNDS(1, 3, 22, 18));
 
     /* White by default (the sprite's own native color, no recolor style
      * applied at creation); refresh_volume_topbar() below switches each
@@ -1113,8 +1303,8 @@ static void build_status_bar(void) {
      * by refresh_headphone_icon() when a headphone/dongle is plugged in
      * (see headphone_status.h). */
     volume_topbar_headphone = lv_image_create(volume_topbar_group);
-    lv_image_set_src(volume_topbar_headphone, asset_path("topbar/lucide_headphones.png"));
-    layout_lucide_topbar_image(volume_topbar_headphone, 2, 2, 20, 20);
+    lv_image_set_src(volume_topbar_headphone, topbar_icon("headphones"));
+    layout_topbar_glyph(volume_topbar_headphone, NATIVE(3, 22), BOUNDS(2, 2, 20, 20));
     lv_obj_add_flag(volume_topbar_headphone, LV_OBJ_FLAG_HIDDEN);
 
     /* Same flex row as the headphone-jack glyph above, not a separate fixed
@@ -1126,8 +1316,8 @@ static void build_status_bar(void) {
      * by the volume digit slots above, does this for free -- no manual
      * "replace" logic needed). */
     a2dp_status_icon = lv_image_create(volume_topbar_group);
-    lv_image_set_src(a2dp_status_icon, asset_path("topbar/lucide_audio_lines.png"));
-    layout_lucide_topbar_image(a2dp_status_icon, 1, 2, 22, 20);
+    lv_image_set_src(a2dp_status_icon, topbar_icon("audio_lines"));
+    layout_topbar_glyph(a2dp_status_icon, NATIVE(2, 22), BOUNDS(1, 2, 22, 20));
     lv_obj_add_flag(a2dp_status_icon, LV_OBJ_FLAG_HIDDEN); /* shown by poll_refresh_bt_icon() once an A2DP source PCM exists */
 
     /* Same flex-collapse shape as the headphone/A2DP glyphs above -- shown/
@@ -1139,8 +1329,8 @@ static void build_status_bar(void) {
     usb_audio_status_icon = lv_image_create(volume_topbar_group);
     /* Uses topbar/usb.png for the topbar status row (distinct from
      * usb/usb.png used by the full-screen USB DAC mode overlay). */
-    lv_image_set_src(usb_audio_status_icon, asset_path("topbar/lucide_usb.png"));
-    layout_lucide_topbar_image(usb_audio_status_icon, 2, 2, 20, 20);
+    lv_image_set_src(usb_audio_status_icon, topbar_icon("usb"));
+    layout_topbar_glyph(usb_audio_status_icon, NATIVE(7, 14), BOUNDS(2, 2, 20, 20));
     lv_obj_add_flag(usb_audio_status_icon, LV_OBJ_FLAG_HIDDEN);
 
     /* Rightmost in this row -- always after whichever headphone-output
@@ -1149,8 +1339,8 @@ static void build_status_bar(void) {
      * hidden entirely when stopped/nothing loaded --
      * refresh_play_pause_topbar(). */
     play_pause_status_icon = lv_image_create(volume_topbar_group);
-    lv_image_set_src(play_pause_status_icon, asset_path("topbar/lucide_play.png"));
-    layout_lucide_topbar_image(play_pause_status_icon, 2, 2, 20, 20);
+    lv_image_set_src(play_pause_status_icon, topbar_icon("play"));
+    layout_topbar_glyph(play_pause_status_icon, NATIVE(3, 22), BOUNDS(2, 2, 20, 20));
     lv_obj_add_flag(play_pause_status_icon, LV_OBJ_FLAG_HIDDEN);
 
     /* Negotiated Bluetooth codec indicator (e.g. sbc.png, aac.png, aptx.png,
@@ -1168,7 +1358,7 @@ static void build_status_bar(void) {
     /* One Lucide image owns the complete battery silhouette. Swapping whole
      * states avoids the old independently-rounded frame/fill/terminal seams. */
     battery_icon_frame = lv_image_create(band);
-    lv_image_set_src(battery_icon_frame, asset_path("topbar/lucide_battery.png"));
+    lv_image_set_src(battery_icon_frame, topbar_icon("battery"));
     layout_battery_topbar_image(battery_icon_frame);
     lv_obj_align(battery_icon_frame, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(4), 0);
 
@@ -1203,16 +1393,19 @@ static void build_status_bar(void) {
     lv_obj_align_to(battery_topbar_group, battery_icon_frame, LV_ALIGN_OUT_LEFT_MID, -BOARD_SCALE_PX(2), 0);
 
     wifi_icon = lv_image_create(band);
-    lv_image_set_src(wifi_icon, asset_path("topbar/lucide_wifi_off.png"));
+    lv_image_set_src(wifi_icon, topbar_icon("wifi_off"));
     layout_radio_topbar_image(wifi_icon);
     lv_obj_align(wifi_icon, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(105), 0);
     lv_obj_add_flag(wifi_icon, LV_OBJ_FLAG_HIDDEN); /* shown by refresh_wifi_icon() once wifi_control_is_enabled() */
 
     bt_status_icon = lv_image_create(band);
-    lv_image_set_src(bt_status_icon, asset_path("topbar/lucide_bluetooth.png"));
+    lv_image_set_src(bt_status_icon, topbar_icon("bluetooth"));
     layout_bluetooth_topbar_image(bt_status_icon);
     lv_obj_align(bt_status_icon, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(145), 0);
     lv_obj_add_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN); /* shown by refresh_bt_icon() once bt_control_is_powered() */
+
+    shell_theme_styles_init();
+    topbar_add_glyph_style(band);
 }
 
 static bool image_file_source_matches(const void * current, const void * requested) {
@@ -1226,6 +1419,28 @@ static bool image_file_source_matches(const void * current, const void * request
     return strcmp((const char *) current, (const char *) requested) == 0;
 }
 
+/* LVGL's local style setters invalidate even when the value is unchanged,
+ * and the status tick reapplies these on every pass. Writing only on change
+ * keeps an unchanged tick from dirtying the top bar. A missing local value
+ * still gets written, so overrides behave as before. */
+static bool topbar_local_style_is(lv_obj_t * obj, lv_style_prop_t prop, int32_t value) {
+    lv_style_value_t current;
+    return lv_obj_get_local_style_prop(obj, prop, &current, 0) == LV_STYLE_RES_FOUND &&
+           current.num == value;
+}
+
+/* lv_image_set_src() invalidates and re-reads the header even for the same
+ * file, so status refreshes go through this. Returns whether it changed. */
+static bool topbar_set_image(lv_obj_t * image, const char * src) {
+    if (image_file_source_matches(lv_image_get_src(image), src)) return false;
+    lv_image_set_src(image, src);
+    return true;
+}
+
+static void topbar_set_label(lv_obj_t * label, const char * text) {
+    if (!ui_label_text_matches(label, text)) lv_label_set_text(label, text);
+}
+
 static void refresh_play_pause_topbar(void) {
     bool playing = audio_is_playing();
     bool paused = !playing && audio_is_paused();
@@ -1233,11 +1448,10 @@ static void refresh_play_pause_topbar(void) {
     bool should_hide = !playing && !paused;
 
     if (!should_hide) {
-        const char * source = asset_path(playing ? "topbar/lucide_play.png"
-                                                : "topbar/lucide_pause.png");
+        const char * source = topbar_icon(playing ? "play" : "pause");
         if (!image_file_source_matches(lv_image_get_src(play_pause_status_icon), source)) {
             lv_image_set_src(play_pause_status_icon, source);
-            layout_lucide_topbar_image(play_pause_status_icon, 2, 2, 20, 20);
+            layout_topbar_glyph(play_pause_status_icon, NATIVE(3, 22), BOUNDS(2, 2, 20, 20));
         }
         if (was_hidden) lv_obj_remove_flag(play_pause_status_icon, LV_OBJ_FLAG_HIDDEN);
     } else if (!was_hidden) {
@@ -1291,8 +1505,9 @@ void refresh_battery_topbar(void) {
 
     if (percent < 0) {
         if (percent_should_show != percent_was_shown) refresh_battery_topbar_anchor(true);
-        lv_image_set_src(battery_icon_frame, asset_path("topbar/lucide_battery.png"));
-        lv_obj_set_style_image_recolor_opa(battery_icon_frame, LV_OPA_TRANSP, 0);
+        topbar_set_image(battery_icon_frame, topbar_icon("battery"));
+        lv_obj_remove_local_style_prop(battery_icon_frame, LV_STYLE_IMAGE_RECOLOR, 0);
+        lv_obj_remove_local_style_prop(battery_icon_frame, LV_STYLE_IMAGE_RECOLOR_OPA, 0);
         return;
     }
     if (percent > 100) percent = 100;
@@ -1309,18 +1524,19 @@ void refresh_battery_topbar(void) {
     bool charging = !limiter_capped_now && battery_is_charging();
     bool low = !charging && percent < 5;
 
-    const char * battery_asset = charging ? "topbar/lucide_battery_charging.png" :
-                                 percent >= 85 ? "topbar/lucide_battery_full.png" :
-                                 percent >= 40 ? "topbar/lucide_battery_medium.png" :
-                                 percent >= 10 ? "topbar/lucide_battery_low.png" :
-                                                 "topbar/lucide_battery.png";
-    lv_image_set_src(battery_icon_frame, asset_path(battery_asset));
-    layout_battery_topbar_image(battery_icon_frame);
-    if (low) {
+    const char * battery_asset = charging ? "battery_charging" :
+                                 percent >= 85 ? "battery_full" :
+                                 percent >= 40 ? "battery_medium" :
+                                 percent >= 10 ? "battery_low" :
+                                                 "battery";
+    if (topbar_set_image(battery_icon_frame, topbar_icon(battery_asset)))
+        layout_battery_topbar_image(battery_icon_frame);
+    if (low && !topbar_local_style_is(battery_icon_frame, LV_STYLE_IMAGE_RECOLOR_OPA, LV_OPA_COVER)) {
         lv_obj_set_style_image_recolor(battery_icon_frame, lv_color_make(255, 64, 64), 0);
         lv_obj_set_style_image_recolor_opa(battery_icon_frame, LV_OPA_COVER, 0);
-    } else {
-        lv_obj_set_style_image_recolor_opa(battery_icon_frame, LV_OPA_TRANSP, 0);
+    } else if (!low) {
+        lv_obj_remove_local_style_prop(battery_icon_frame, LV_STYLE_IMAGE_RECOLOR, 0);
+        lv_obj_remove_local_style_prop(battery_icon_frame, LV_STYLE_IMAGE_RECOLOR_OPA, 0);
     }
 
     /* Same leading-slot-hiding scheme as refresh_volume_topbar(). */
@@ -1334,7 +1550,7 @@ void refresh_battery_topbar(void) {
             lv_obj_add_flag(battery_topbar_digit[i], LV_OBJ_FLAG_HIDDEN);
         } else {
             char digit[2] = { digits[digit_index], '\0' };
-            lv_label_set_text(battery_topbar_digit[i], digit);
+            topbar_set_label(battery_topbar_digit[i], digit);
             lv_obj_remove_flag(battery_topbar_digit[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
@@ -1382,8 +1598,8 @@ void refresh_volume_topbar(int32_t percent) {
             }
             lv_obj_remove_flag(volume_topbar_digit[i], LV_OBJ_FLAG_HIDDEN);
         }
-        lv_obj_set_style_text_color(volume_topbar_digit[i],
-                                    warn ? lv_color_make(255, 0, 0) : lv_color_white(), 0);
+        if (warn) lv_obj_set_style_text_color(volume_topbar_digit[i], lv_color_make(255, 0, 0), 0);
+        else lv_obj_remove_local_style_prop(volume_topbar_digit[i], LV_STYLE_TEXT_COLOR, 0);
     }
     if (digits_changed)
         snprintf(volume_topbar_last_digits, sizeof(volume_topbar_last_digits), "%s", digits);
@@ -1436,10 +1652,45 @@ static bool topbar_element_hidden(uint32_t bit) {
     return (current_settings.topbar_hidden_elements & bit) != 0;
 }
 
+static void topbar_set_opa(lv_obj_t * obj, lv_opa_t opa) {
+    if (!topbar_local_style_is(obj, LV_STYLE_OPA, opa)) lv_obj_set_style_opa(obj, opa, 0);
+}
+
+static void topbar_set_align(lv_obj_t * obj, lv_align_t align) {
+    if (!topbar_local_style_is(obj, LV_STYLE_ALIGN, align)) lv_obj_set_style_align(obj, align, 0);
+}
+
+/* lv_obj_align() with the guarded align write; lv_obj_set_pos() already
+ * skips unchanged coordinates. */
+static void topbar_align(lv_obj_t * obj, lv_align_t align, int32_t x_ofs, int32_t y_ofs) {
+    topbar_set_align(obj, align);
+    lv_obj_set_pos(obj, x_ofs, y_ofs);
+}
+
+/* lv_obj_align_to() for LV_ALIGN_OUT_LEFT_MID / LV_ALIGN_OUT_RIGHT_MID, with
+ * the same coordinate and RTL arithmetic but the guarded align write. */
+static void topbar_align_beside(lv_obj_t * obj, lv_obj_t * base, bool left_of, int32_t x_ofs) {
+    lv_obj_update_layout(obj);
+    lv_obj_t * parent = lv_obj_get_parent(obj);
+    int32_t pleft = lv_obj_get_style_space_left(parent, LV_PART_MAIN);
+    int32_t ptop = lv_obj_get_style_space_top(parent, LV_PART_MAIN);
+    int32_t x = left_of ? -lv_obj_get_width(obj) : lv_obj_get_width(base);
+    int32_t y = lv_obj_get_height(base) / 2 - lv_obj_get_height(obj) / 2;
+    int32_t scroll_x = lv_obj_get_style_base_dir(parent, LV_PART_MAIN) == LV_BASE_DIR_RTL
+                           ? lv_obj_get_scroll_right(parent) : lv_obj_get_scroll_left(parent);
+    lv_area_t base_area, parent_area;
+    lv_obj_get_coords(base, &base_area);
+    lv_obj_get_coords(parent, &parent_area);
+    x += x_ofs + base_area.x1 - parent_area.x1 + scroll_x - pleft;
+    y += base_area.y1 - parent_area.y1 + lv_obj_get_scroll_top(parent) - ptop;
+    topbar_set_align(obj, LV_ALIGN_TOP_LEFT);
+    lv_obj_set_pos(obj, x, y);
+}
+
 static void apply_topbar_element_visibility(lv_obj_t * obj, uint32_t bit, bool flex_child) {
     if (!obj) return;
     bool hidden = topbar_element_hidden(bit);
-    lv_obj_set_style_opa(obj, hidden ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    topbar_set_opa(obj, hidden ? LV_OPA_TRANSP : LV_OPA_COVER);
     if (flex_child) {
         if (hidden) lv_obj_add_flag(obj, LV_OBJ_FLAG_IGNORE_LAYOUT);
         else lv_obj_remove_flag(obj, LV_OBJ_FLAG_IGNORE_LAYOUT);
@@ -1470,7 +1721,7 @@ static bool topbar_object_naturally_visible(lv_obj_t * obj, uint32_t bit) {
 
 static void topbar_align_left_of(lv_obj_t * obj, lv_obj_t * anchor, int gap_px) {
     if (!obj || !anchor) return;
-    lv_obj_align_to(obj, anchor, LV_ALIGN_OUT_LEFT_MID, -BOARD_SCALE_PX(gap_px), 0);
+    topbar_align_beside(obj, anchor, true, -BOARD_SCALE_PX(gap_px));
 }
 
 static void reflow_topbar_layout(void) {
@@ -1488,7 +1739,7 @@ static void reflow_topbar_layout(void) {
     if (clock_position < TOPBAR_CLOCK_CENTER || clock_position > TOPBAR_CLOCK_RIGHT)
         clock_position = TOPBAR_CLOCK_CENTER;
     if (clock_visible) {
-        lv_obj_align(clock_topbar_group,
+        topbar_align(clock_topbar_group,
                      clock_position == TOPBAR_CLOCK_LEFT ? LV_ALIGN_LEFT_MID :
                      clock_position == TOPBAR_CLOCK_RIGHT ? LV_ALIGN_RIGHT_MID : LV_ALIGN_CENTER,
                      clock_position == TOPBAR_CLOCK_LEFT ? BOARD_SCALE_PX(4) :
@@ -1496,16 +1747,16 @@ static void reflow_topbar_layout(void) {
     }
 
     if (clock_visible && clock_position == TOPBAR_CLOCK_LEFT)
-        lv_obj_align_to(volume_topbar_group, clock_topbar_group, LV_ALIGN_OUT_RIGHT_MID, BOARD_SCALE_PX(2), 0);
+        topbar_align_beside(volume_topbar_group, clock_topbar_group, false, BOARD_SCALE_PX(2));
     else
-        lv_obj_align(volume_topbar_group, LV_ALIGN_LEFT_MID, BOARD_SCALE_PX(4), 0);
+        topbar_align(volume_topbar_group, LV_ALIGN_LEFT_MID, BOARD_SCALE_PX(4), 0);
 
     lv_obj_t * right_anchor = clock_visible && clock_position == TOPBAR_CLOCK_RIGHT
                                   ? clock_topbar_group : NULL;
     bool battery_visible = !topbar_element_hidden(TOPBAR_HIDE_BATTERY);
     if (battery_visible) {
         if (right_anchor) topbar_align_left_of(battery_icon_frame, right_anchor, 2);
-        else lv_obj_align(battery_icon_frame, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(4), 0);
+        else topbar_align(battery_icon_frame, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(4), 0);
         right_anchor = battery_icon_frame;
     }
 
@@ -1513,7 +1764,7 @@ static void reflow_topbar_layout(void) {
                            !lv_obj_has_flag(battery_topbar_group, LV_OBJ_FLAG_HIDDEN);
     if (percent_visible) {
         if (right_anchor) topbar_align_left_of(battery_topbar_group, right_anchor, 2);
-        else lv_obj_align(battery_topbar_group, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(4), 0);
+        else topbar_align(battery_topbar_group, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(4), 0);
         right_anchor = battery_topbar_group;
     }
 
@@ -1525,7 +1776,7 @@ static void reflow_topbar_layout(void) {
         bool visible = widget == wifi_icon ? wifi_visible : widget == bt_status_icon ? bt_visible : false;
         if (!widget || !visible) continue;
         if (right_anchor) topbar_align_left_of(widget, right_anchor, 2);
-        else lv_obj_align(widget, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(4), 0);
+        else topbar_align(widget, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(4), 0);
         right_anchor = widget;
     }
 }
@@ -1664,12 +1915,61 @@ static const char * const qd_toggle_off_asset[QD_TOGGLE_COUNT] = {
     "pull_down/car_mode.png",
 };
 static asset_decoded_image_t qd_toggle_on_img[QD_TOGGLE_COUNT];
+/* Decoded only when the off artwork is square (see toggle_corners_opaque()). */
+static asset_decoded_image_t qd_toggle_off_img[QD_TOGGLE_COUNT];
 static bool quick_drawer_toggle_force_src;
 
 /* Row 3's tiles come from plugin.register_quick_toggle() rather than the
  * fixed table above, so their "on" artwork is decoded per registered toggle
  * (same accent recolor, just a runtime icon path). */
 static asset_decoded_image_t qd_plugin_toggle_on_img[PLUGIN_MAX_QUICK_TOGGLES];
+static asset_decoded_image_t qd_plugin_toggle_off_img[PLUGIN_MAX_QUICK_TOGGLES];
+
+/* Every toggle tile is round, but some artwork is drawn on an opaque square:
+ * the stock theme1 AirPlay, DLNA, Gapless, HibyLink, MSEB and Gain pairs,
+ * which the light themes select. Round artwork has transparent corners. */
+static bool toggle_corners_opaque(const lv_draw_buf_t * buf) {
+    if (!buf || !buf->data || buf->header.cf != LV_COLOR_FORMAT_ARGB8888 ||
+        buf->header.w < 8 || buf->header.h < 8) return false;
+    uint32_t w = buf->header.w, h = buf->header.h, k = w / 12;
+    const uint32_t xs[2] = { k, w - 1 - k }, ys[2] = { k, h - 1 - k };
+    for (int i = 0; i < 4; i++) {
+        const lv_color32_t * row = (const lv_color32_t *) (buf->data + ys[i / 2] * buf->header.stride);
+        if (row[xs[i % 2]].alpha >= 16) return true;
+    }
+    return false;
+}
+
+/* Clip square artwork to a circle with a one-pixel antialiased edge, one
+ * pixel inside the inscribed circle: the stock disc's own edge pixels are
+ * blended with the square's corners and would show as a dark ring. */
+static void mask_toggle_circle(lv_draw_buf_t * buf) {
+    if (!toggle_corners_opaque(buf)) return;
+    uint32_t w = buf->header.w, h = buf->header.h;
+    float cx = w / 2.0f, cy = h / 2.0f, r = (w < h ? w : h) / 2.0f - 1.0f;
+    for (uint32_t y = 0; y < h; y++) {
+        lv_color32_t * row = (lv_color32_t *) (buf->data + y * buf->header.stride);
+        float dy = y + 0.5f - cy;
+        for (uint32_t x = 0; x < w; x++) {
+            float dx = x + 0.5f - cx;
+            float coverage = r - sqrtf(dx * dx + dy * dy) + 0.5f;
+            if (coverage >= 1.0f) continue;
+            row[x].alpha = coverage <= 0.0f ? 0 : (uint8_t) (row[x].alpha * coverage);
+        }
+    }
+}
+
+/* Off artwork stays a plain asset path unless it needs rounding. */
+static void load_toggle_off_image(asset_decoded_image_t * image, const char * relative_path) {
+    asset_decoded_image_close(image);
+    if (!relative_path || !asset_decoded_image_open(image, relative_path)) return;
+    lv_draw_buf_t * buf = (lv_draw_buf_t *) image->decoder.decoded;
+    if (!toggle_corners_opaque(buf)) {
+        asset_decoded_image_close(image);
+        return;
+    }
+    mask_toggle_circle(buf);
+}
 
 static void recolor_toggle_on_accent(lv_draw_buf_t * buf, lv_color_t accent) {
     if (!buf || !buf->data || !buf->header.w || !buf->header.h ||
@@ -1691,42 +1991,63 @@ static void recolor_toggle_on_accent(lv_draw_buf_t * buf, lv_color_t accent) {
     }
 }
 
-static void load_quick_drawer_toggle_on_images(void) {
+static void prepare_toggle_on_image(asset_decoded_image_t * image, const char * relative_path,
+                                    lv_color_t accent) {
+    if (!asset_decoded_image_prepare_retint(image, relative_path)) return;
+    lv_draw_buf_t * buf = (lv_draw_buf_t *) image->decoder.decoded;
+    /* Round first: the recolor below would paint opaque corners in the accent. */
+    mask_toggle_circle(buf);
+    recolor_toggle_on_accent(buf, accent);
+}
+
+static void close_quick_drawer_toggle_images(void) {
+    for (int i = 0; i < QD_TOGGLE_COUNT; i++) {
+        asset_decoded_image_close(&qd_toggle_on_img[i]);
+        asset_decoded_image_close(&qd_toggle_off_img[i]);
+    }
+    for (int i = 0; i < PLUGIN_MAX_QUICK_TOGGLES; i++) {
+        asset_decoded_image_close(&qd_plugin_toggle_on_img[i]);
+        asset_decoded_image_close(&qd_plugin_toggle_off_img[i]);
+    }
+}
+
+static void load_quick_drawer_toggle_images(void) {
     lv_color_t accent = accent_lv_color();
     for (int i = 0; i < QD_TOGGLE_COUNT; i++) {
-        if (asset_decoded_image_prepare_retint(&qd_toggle_on_img[i], qd_toggle_on_asset[i]))
-            recolor_toggle_on_accent((lv_draw_buf_t *) qd_toggle_on_img[i].decoder.decoded, accent);
+        prepare_toggle_on_image(&qd_toggle_on_img[i], qd_toggle_on_asset[i], accent);
+        load_toggle_off_image(&qd_toggle_off_img[i], qd_toggle_off_asset[i]);
     }
     int plugin_count = plugin_manager_get_quick_toggle_count();
     if (plugin_count > PLUGIN_MAX_QUICK_TOGGLES) plugin_count = PLUGIN_MAX_QUICK_TOGGLES;
     for (int i = 0; i < PLUGIN_MAX_QUICK_TOGGLES; i++) {
         if (i >= plugin_count) {
             asset_decoded_image_close(&qd_plugin_toggle_on_img[i]);
+            asset_decoded_image_close(&qd_plugin_toggle_off_img[i]);
             continue;
         }
-        if (asset_decoded_image_prepare_retint(&qd_plugin_toggle_on_img[i],
-                                               plugin_manager_get_quick_toggle_icon_selected(i)))
-            recolor_toggle_on_accent((lv_draw_buf_t *) qd_plugin_toggle_on_img[i].decoder.decoded, accent);
+        prepare_toggle_on_image(&qd_plugin_toggle_on_img[i],
+                                plugin_manager_get_quick_toggle_icon_selected(i), accent);
+        load_toggle_off_image(&qd_plugin_toggle_off_img[i], plugin_manager_get_quick_toggle_icon(i));
     }
 }
 
-/* Off state stays the stock grey circle (nothing accent-coloured about it),
- * so only the on state goes through the decoded copy -- with the plain asset
- * path as the fallback if that decode ever failed. */
+/* The on state is always a decoded, rounded, accent-coloured copy; the off
+ * state only when its artwork needed rounding. Either falls back to the plain
+ * asset path if no decoded copy exists. */
 static const void * quick_drawer_toggle_src(qd_toggle_t t, bool on) {
-    if (!on) return asset_path(qd_toggle_off_asset[t]);
-    const void * src = asset_decoded_image_source(&qd_toggle_on_img[t]);
-    return src ? src : (const void *) asset_path(qd_toggle_on_asset[t]);
+    const void * src = asset_decoded_image_source(on ? &qd_toggle_on_img[t] : &qd_toggle_off_img[t]);
+    return src ? src : (const void *) asset_path(on ? qd_toggle_on_asset[t] : qd_toggle_off_asset[t]);
 }
 
 /* quick_drawer_toggle_src()'s twin for a row-3 plugin tile, whose two icon
  * paths come from the registration rather than a compile-time table. */
 static const void * quick_drawer_plugin_toggle_src(int index, bool on) {
-    if (!on) return asset_path(plugin_manager_get_quick_toggle_icon(index));
-    const void * src = (index >= 0 && index < PLUGIN_MAX_QUICK_TOGGLES)
-                           ? asset_decoded_image_source(&qd_plugin_toggle_on_img[index])
-                           : NULL;
-    return src ? src : (const void *) asset_path(plugin_manager_get_quick_toggle_icon_selected(index));
+    const void * src = NULL;
+    if (index >= 0 && index < PLUGIN_MAX_QUICK_TOGGLES)
+        src = asset_decoded_image_source(on ? &qd_plugin_toggle_on_img[index] : &qd_plugin_toggle_off_img[index]);
+    if (src) return src;
+    return asset_path(on ? plugin_manager_get_quick_toggle_icon_selected(index)
+                         : plugin_manager_get_quick_toggle_icon(index));
 }
 
 /* Toggle sources include 84px stock artwork plus arbitrary plugin assets.
@@ -1925,15 +2246,14 @@ static void render_wifi_icon(void) {
     int level = wifi_status_level;
     if (wifi_status_connected) {
         static const char * const assets[] = {
-            "topbar/lucide_wifi_zero.png", "topbar/lucide_wifi_low.png",
-            "topbar/lucide_wifi_high.png", "topbar/lucide_wifi.png",
+            "wifi_zero", "wifi_low",
+            "wifi_high", "wifi",
         };
         if (level < 0) level = 0;
         if (level > 3) level = 3;
-        lv_image_set_src(wifi_icon, asset_path(assets[level]));
-        layout_wifi_connected_topbar_image(wifi_icon);
-    } else {
-        lv_image_set_src(wifi_icon, asset_path("topbar/lucide_wifi_off.png"));
+        if (topbar_set_image(wifi_icon, topbar_icon(assets[level])))
+            layout_wifi_connected_topbar_image(wifi_icon);
+    } else if (topbar_set_image(wifi_icon, topbar_icon("wifi_off"))) {
         layout_radio_topbar_image(wifi_icon);
     }
 }
@@ -2479,8 +2799,8 @@ static void poll_refresh_bt_icon(void) {
         return;
     }
     lv_obj_remove_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN);
-    lv_image_set_src(bt_status_icon, asset_path(refresh_bt_icon_result_connected ?
-                     "topbar/lucide_bluetooth.png" : "topbar/lucide_bluetooth_off.png"));
+    lv_image_set_src(bt_status_icon, topbar_icon(refresh_bt_icon_result_connected ?
+                     "bluetooth" : "bluetooth_off"));
     layout_bluetooth_topbar_image(bt_status_icon);
     sync_topbar_status_icon_positions();
     if (a2dp_connected) {
@@ -2762,7 +3082,12 @@ static void poll_sleep_timer(void) {
      * sub-minute stretch -- counts down 15,14,...,1 then disarms above
      * rather than ever displaying a misleading zero. */
     int remaining_min = (int) ((total_ms - elapsed_ms + 59999) / 60000);
-    lv_label_set_text_fmt(quick_drawer_sleep_label, TR("%dm"), remaining_min);
+    /* Polled every 500 ms, but the caption only changes once a minute; each
+     * rewrite would also re-snapshot the whole drawer. */
+    char caption[16];
+    snprintf(caption, sizeof(caption), TR("%dm"), remaining_min);
+    if (ui_label_text_matches(quick_drawer_sleep_label, caption)) return;
+    lv_label_set_text(quick_drawer_sleep_label, caption);
     quick_drawer_mark_snapshot_dirty();
 }
 
@@ -2799,6 +3124,7 @@ static void quick_drawer_rebuild_snapshot(void) {
             lv_obj_add_flag(quick_drawer_motion_image, LV_OBJ_FLAG_HIDDEN);
         }
         if (quick_drawer_motion_buf) {
+            ui_snapshot_prefetch_forget(quick_drawer_motion_buf);
             lv_draw_buf_destroy(quick_drawer_motion_buf);
             quick_drawer_motion_buf = NULL;
         }
@@ -2807,6 +3133,7 @@ static void quick_drawer_rebuild_snapshot(void) {
         if (quick_drawer_snapshot_retry_timer) lv_timer_pause(quick_drawer_snapshot_retry_timer);
         return;
     }
+    UI_TRACE_SPAN_BEGIN(perf_span);
     if (quick_drawer_open && quick_drawer_expansion_art_dirty && !gui_anims_off()) {
         quick_drawer_expansion_cache_warming = true;
         refresh_quick_drawer_expansion_toggles();
@@ -2814,25 +3141,55 @@ static void quick_drawer_rebuild_snapshot(void) {
         quick_drawer_release_motion_cache();
         quick_drawer_expansion_cache_warming = false;
     }
+    /* A warm-only pass keeps the existing drawer snapshot. */
+    if (!quick_drawer_snapshot_dirty && quick_drawer_motion_buf) {
+        UI_TRACE_SPAN_END(UI_TRACE_SPAN_DRAWER_SNAPSHOT, perf_span);
+        return;
+    }
     lv_draw_buf_t * fresh = lv_snapshot_take(quick_drawer, LV_COLOR_FORMAT_RGB565);
-    if (!fresh) return;
+    if (!fresh) {
+        UI_TRACE_SPAN_END(UI_TRACE_SPAN_DRAWER_SNAPSHOT, perf_span);
+        return;
+    }
     if (!quick_drawer_motion_image) {
         quick_drawer_motion_image = lv_image_create(lv_layer_top());
         lv_obj_add_flag(quick_drawer_motion_image, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_image_set_src(quick_drawer_motion_image, NULL);
     }
-    if (quick_drawer_motion_buf) lv_draw_buf_destroy(quick_drawer_motion_buf);
+    if (quick_drawer_motion_buf) {
+        ui_snapshot_prefetch_forget(quick_drawer_motion_buf);
+        lv_draw_buf_destroy(quick_drawer_motion_buf);
+    }
     quick_drawer_motion_buf = fresh;
     lv_image_set_src(quick_drawer_motion_image, quick_drawer_motion_buf);
+    UI_TRACE_SPAN_END(UI_TRACE_SPAN_DRAWER_SNAPSHOT, perf_span);
     quick_drawer_snapshot_dirty = false;
     if (quick_drawer_snapshot_retry_timer) lv_timer_pause(quick_drawer_snapshot_retry_timer);
 }
 
 static void quick_drawer_snapshot_retry_cb(lv_timer_t * timer);
 
+/* Closing discards the expansion art, so each open has to warm it again;
+ * otherwise the first expand tap takes both of its snapshots synchronously. */
+static bool quick_drawer_expansion_warm_pending(void) {
+    return quick_drawer_open && quick_drawer_expansion_art_dirty && !gui_anims_off();
+}
+
+static bool quick_drawer_snapshot_work_pending(void) {
+    return quick_drawer_snapshot_dirty || quick_drawer_expansion_warm_pending();
+}
+
+static bool quick_drawer_pointer_pressed(void) {
+    for (lv_indev_t * indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER &&
+            lv_indev_get_state(indev) == LV_INDEV_STATE_PRESSED) return true;
+    }
+    return false;
+}
+
 static void quick_drawer_schedule_snapshot_retry(void) {
-    if (!quick_drawer || !quick_drawer_snapshot_dirty || !backlight_screen_is_on()) return;
+    if (!quick_drawer || !quick_drawer_snapshot_work_pending() || !backlight_screen_is_on()) return;
     if (!quick_drawer_snapshot_retry_timer) {
         quick_drawer_snapshot_retry_timer = lv_timer_create(quick_drawer_snapshot_retry_cb, 16, NULL);
         if (!quick_drawer_snapshot_retry_timer) return;
@@ -2844,14 +3201,17 @@ static void quick_drawer_schedule_snapshot_retry(void) {
 
 static void quick_drawer_snapshot_async_cb(void * unused) {
     (void) unused;
-    if (!quick_drawer_snapshot_dirty || !quick_drawer) return;
+    if (!quick_drawer || !quick_drawer_snapshot_work_pending()) return;
     if (!backlight_screen_is_on()) {
         quick_drawer_snapshot_wait_for_wake = true;
         return;
     }
     quick_drawer_snapshot_wait_for_wake = false;
     if (quick_drawer_bitmap_motion || quick_drawer_expansion_motion) return;
-    if (gui_navigation_transition_in_progress() || gui_player_lyrics_animation_in_progress()) {
+    /* A finger on the glass may be starting a drag; a full snapshot now
+     * would land on its first frames. */
+    if (gui_navigation_transition_in_progress() || gui_player_lyrics_animation_in_progress() ||
+        quick_drawer_pointer_pressed()) {
         quick_drawer_schedule_snapshot_retry();
         return;
     }
@@ -2861,6 +3221,26 @@ static void quick_drawer_snapshot_async_cb(void * unused) {
 static void quick_drawer_snapshot_retry_cb(lv_timer_t * timer) {
     lv_timer_pause(timer);
     quick_drawer_snapshot_async_cb(NULL);
+}
+
+/* Delayed past the open animation's last frames, which would otherwise
+ * absorb the two expansion snapshots. */
+#define QUICK_DRAWER_EXPANSION_WARM_DELAY_MS 250
+static lv_timer_t * quick_drawer_expansion_warm_timer;
+
+static void quick_drawer_expansion_warm_cb(lv_timer_t * timer) {
+    lv_timer_delete(timer);
+    quick_drawer_expansion_warm_timer = NULL;
+    quick_drawer_snapshot_async_cb(NULL);
+}
+
+static void quick_drawer_schedule_expansion_warm(void) {
+    if (quick_drawer_expansion_warm_timer) {
+        lv_timer_reset(quick_drawer_expansion_warm_timer);
+        return;
+    }
+    quick_drawer_expansion_warm_timer = lv_timer_create(quick_drawer_expansion_warm_cb,
+                                                        QUICK_DRAWER_EXPANSION_WARM_DELAY_MS, NULL);
 }
 
 static void quick_drawer_mark_geometry_dirty(void) {
@@ -2887,6 +3267,7 @@ void gui_shell_release_memory_for_external_session(void) {
     }
     if (quick_drawer_motion_buf) {
         lv_image_cache_drop(quick_drawer_motion_buf);
+        ui_snapshot_prefetch_forget(quick_drawer_motion_buf);
         lv_draw_buf_destroy(quick_drawer_motion_buf);
         quick_drawer_motion_buf = NULL;
     }
@@ -2978,8 +3359,8 @@ static void quick_drawer_finish_bitmap_motion(void) {
             quick_drawer_reflow_customization();
         }
     }
-    if (quick_drawer_snapshot_dirty || quick_drawer_open)
-        lv_async_call(quick_drawer_snapshot_async_cb, NULL);
+    if (quick_drawer_snapshot_dirty) lv_async_call(quick_drawer_snapshot_async_cb, NULL);
+    else if (quick_drawer_expansion_warm_pending()) quick_drawer_schedule_expansion_warm();
 }
 
 static void quick_drawer_anim_done_cb(lv_anim_t * a) {
@@ -3081,6 +3462,7 @@ void close_quick_drawer(void) {
 static lv_timer_t * quick_drawer_drag_timer = NULL;
 static bool quick_drawer_drag_tracking = false;
 static bool quick_drawer_drag_claimed = false;
+static bool quick_drawer_expansion_dragging = false;
 static bool quick_drawer_was_pressed = false;
 static bool drag_adjust_press_owned = false;
 static int32_t quick_drawer_drag_touch_start_y = 0;
@@ -3112,7 +3494,6 @@ static int32_t home_swipe_touch_start_y = 0;
 static int32_t home_swipe_last_v = 0;
 static int32_t home_swipe_last_velocity = 0;
 static slide_transition_ctx_t * home_swipe_ctx = NULL;
-#define HOME_SWIPE_DEADZONE 20 /* same scale/reasoning as PLAYER_SWIPE_DEADZONE/BACK_SWIPE_DEADZONE */
 
 /* Swipe-left-to-player tracking -- same "raw indev polling, own dedicated
  * fast timer" reasoning as poll_quick_drawer_drag()'s own doc comment,
@@ -3139,10 +3520,9 @@ static int32_t player_swipe_touch_start_y = 0;
 static int32_t player_swipe_last_v = 0; /* last sampled x (not necessarily presented -- see player_swipe_just_confirmed's deferred tick), for per-tick velocity -- same idea as quick_drawer_last_velocity */
 static int32_t player_swipe_last_velocity = 0;
 static slide_transition_ctx_t * player_swipe_ctx = NULL;
-#define PLAYER_SWIPE_DEADZONE 20 /* px before judging direction -- comfortably under LVGL's own ~50px built-in gesture threshold (LV_INDEV_DEF_GESTURE_LIMIT) so this always claims a genuine left-swipe before LVGL's own dormant gesture recognition would have */
 
 /* Swipe-right-to-go-back -- same live per-tick overlay as player_swipe_*
- * above, mirrored in sign. Provisional until BACK_SWIPE_DEADZONE so a
+ * above, mirrored in sign. Provisional until NAV_SWIPE_DEADZONE_PX so a
  * leftward player-swipe or a vertical scroll can still claim the press.
  * screen_gesture_event_cb()'s LV_DIR_RIGHT -> nav_pop() path stays as
  * the fallback for presses this candidate rejects (excluded screens,
@@ -3151,7 +3531,7 @@ static slide_transition_ctx_t * player_swipe_ctx = NULL;
  * LV_DIR_RIGHT), this candidate genuinely races LVGL's own native gesture
  * recognition for the exact same direction: on real hardware, a fast swipe
  * can cross LVGL's own internal gesture threshold and dispatch
- * LV_EVENT_GESTURE before this poll-based BACK_SWIPE_DEADZONE confirms on
+ * LV_EVENT_GESTURE before this poll-based NAV_SWIPE_DEADZONE_PX confirms on
  * its own next tick, so wait_release() alone does not reliably win that
  * race (confirmed via on-device logging -- both fired for the same
  * continued drag, each independently acting on directory depth). back_swipe_
@@ -3171,7 +3551,6 @@ static int32_t back_swipe_last_v = 0;
 static int32_t back_swipe_last_velocity = 0;
 static slide_transition_ctx_t * back_swipe_ctx = NULL;
 static lv_obj_t * back_swipe_target_scr = NULL;
-#define BACK_SWIPE_DEADZONE 20 /* same scale/reasoning as PLAYER_SWIPE_DEADZONE */
 
 bool gui_shell_back_swipe_owns_press(void) {
     return back_swipe_owns_press;
@@ -3203,10 +3582,44 @@ lv_indev_t * find_pointer_indev(void) {
     return NULL;
 }
 
+static void prefetch_press_targets(lv_point_t point);
+
 static lv_indev_read_cb_t s_orig_pointer_read_cb = NULL;
 static lv_indev_t * s_hooked_indev = NULL;
 static lv_indev_state_t s_last_raw_pointer_state = LV_INDEV_STATE_RELEASED;
 static bool s_require_release_after_wake = true;
+
+static lv_point_t s_last_raw_pointer_point;
+static bool s_last_raw_pointer_point_valid;
+
+/* The read callback precedes LVGL's state publication. Only mark the existing
+ * timer ready here: its callback cannot run until this read has returned to
+ * the handler. Never recognize gestures or refresh a display from this path.
+ * Once tracking owns the press, leave presentation on its normal 16 ms tick. */
+static void gesture_note_pointer_sample(const lv_indev_data_t * data) {
+    bool pressed = data->state == LV_INDEV_STATE_PRESSED;
+    bool was_pressed = s_last_raw_pointer_state == LV_INDEV_STATE_PRESSED;
+    bool changed = pressed != was_pressed || !s_last_raw_pointer_point_valid ||
+                   data->point.x != s_last_raw_pointer_point.x ||
+                   data->point.y != s_last_raw_pointer_point.y;
+    s_last_raw_pointer_point = data->point;
+    s_last_raw_pointer_point_valid = true;
+    if (!changed || (!pressed && !was_pressed)) return;
+#ifdef UI_PERF_TRACE
+    ui_frame_trace_event(UI_FRAME_TRACE_EVENT_POINTER_SAMPLE,
+                         ((uint32_t)(uint16_t)data->point.x << 16) |
+                         (uint16_t)data->point.y, pressed ? 1u : 0u);
+#endif
+#ifndef UI_SWIPE_SAMPLE_READY_DISABLE
+    bool tracking = home_swipe_tracking || player_swipe_tracking || back_swipe_tracking ||
+                    quick_drawer_drag_claimed || quick_drawer_expansion_dragging;
+    bool candidate = home_swipe_candidate || player_swipe_candidate || back_swipe_candidate ||
+                     quick_drawer_drag_tracking;
+    if (quick_drawer_drag_timer && !lv_timer_get_paused(quick_drawer_drag_timer) &&
+        (!pressed || (!tracking && candidate)))
+        lv_timer_ready(quick_drawer_drag_timer);
+#endif
+}
 
 static void wrapped_pointer_read_cb(lv_indev_t * indev, lv_indev_data_t * data) {
     if (s_orig_pointer_read_cb) {
@@ -3217,6 +3630,7 @@ static void wrapped_pointer_read_cb(lv_indev_t * indev, lv_indev_data_t * data) 
         data->state = LV_INDEV_STATE_RELEASED;
         s_last_raw_pointer_state = LV_INDEV_STATE_RELEASED;
         s_require_release_after_wake = true;
+        s_last_raw_pointer_point_valid = false;
         return;
     }
 
@@ -3241,12 +3655,15 @@ static void wrapped_pointer_read_cb(lv_indev_t * indev, lv_indev_data_t * data) 
         }
     }
 
+    gesture_note_pointer_sample(data);
+
     if (data->state == LV_INDEV_STATE_PRESSED &&
         s_last_raw_pointer_state != LV_INDEV_STATE_PRESSED) {
 #ifdef UI_GESTURE_TRACE
         printf("[GESTURE_TRACE] raw pointer press edge detected at (%d, %d)\n",
                (int)data->point.x, (int)data->point.y);
 #endif
+        prefetch_press_targets(data->point);
         gui_shell_resume_fast_timers();
         gui_library_resume_fast_timers();
     }
@@ -3317,8 +3734,9 @@ bool active_press_is_over_drag_adjust_widget(void) {
 /* 13 native slider cards, up to 20 plugin settings sliders
  * (PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE x PLUGIN_SETTINGS_LIST_MAX_SLIDERS),
  * the accent color picker, ten Quick Drawer reorder handles and up to 24
- * plugin item editor handles: 68 entries total, with four slots of headroom. */
-#define SWIPE_DEAD_ZONE_MAX 72
+ * plugin item editor handles, plus one bounded 200-row playlist edit page.
+ * Reserve 320 slots for these 268 controls and future native controls. */
+#define SWIPE_DEAD_ZONE_MAX 320
 static lv_obj_t * swipe_dead_zones[SWIPE_DEAD_ZONE_MAX];
 static int swipe_dead_zone_count = 0;
 
@@ -3391,6 +3809,37 @@ static bool player_swipe_press_excluded(lv_point_t p) {
     return active_press_is_over_drag_adjust_widget() || point_in_swipe_dead_zone(p);
 }
 
+/* Only hints for gestures eligible at this touch origin. No cache creation,
+ * layout, locks that wait for the worker, or image copies on this path. */
+static void prefetch_press_targets(lv_point_t point) {
+    lv_obj_t *screen = lv_screen_active();
+    if (gui_navigation_transition_in_progress() || gui_library_navigation_blocked() ||
+        screen == gui_lock_screen_get_screen() || screen == gui_text_input_get_screen() ||
+        screen == gui_text_view_get_screen() || screen == gui_busy_get_screen() ||
+        screen == gui_network_get_usb_dac_overlay() ||
+        screen == gui_network_get_bt_dac_overlay()) return;
+    bool drawer_origin = quick_drawer_open ||
+                         (point.y <= QUICK_DRAWER_TRIGGER_ZONE &&
+                          quick_drawer_customization_enabled());
+    lv_draw_buf_t *drawer = drawer_origin && !quick_drawer_snapshot_dirty
+                               ? quick_drawer_motion_buf : NULL;
+    if (quick_drawer_open) {
+        gui_navigation_prefetch_targets(false, false, false, drawer);
+        return;
+    }
+    /* Raw read precedes LVGL hit-testing; use this press's coordinates,
+     * not the active object retained from the previous press. */
+    if (point_in_swipe_dead_zone(point)) return;
+    int32_t height = lv_display_get_vertical_resolution(lv_display_get_default());
+    bool home = current_settings.swipe_up_home_enabled &&
+                screen != gui_shell_get_home_screen() && screen != gui_lyrics_get_screen() &&
+                point.y >= height - HOME_INDICATOR_BAND_HEIGHT - HOME_SWIPE_HIT_EXTRA_PX;
+    gui_navigation_prefetch_targets(screen != gui_player_get_screen() &&
+                                   screen != gui_lyrics_get_screen() &&
+                                   screen != gui_track_info_get_screen(),
+                                   gui_navigation_get_depth() > 1, home, drawer);
+}
+
 static bool quick_drawer_brightness_hit_test(lv_point_t point) {
     if (!quick_drawer_open || !quick_drawer_brightness_track) return false;
     lv_area_t area;
@@ -3439,7 +3888,6 @@ static bool quick_drawer_expansion_region_hit_test(lv_point_t point) {
 }
 
 
-static bool quick_drawer_expansion_dragging = false;
 static bool quick_drawer_expansion_moved = false;
 static int32_t quick_drawer_expansion_drag_start_y = 0;
 static int32_t quick_drawer_expansion_drag_start_value = 0;
@@ -3503,8 +3951,9 @@ static void poll_quick_drawer_drag(lv_timer_t * timer) {
             quick_drawer_drag_tracking = true;
             quick_drawer_drag_panel_start_y = quick_drawer_motion_y();
             quick_drawer_last_velocity = 0; /* fresh drag -- see the other branch's own comment */
-            lv_obj_move_foreground(quick_drawer); /* above regular screens/volume popup while dragging into view */
-            lv_obj_move_foreground(status_bar_band); /* but the status bar stays above THAT -- see open_quick_drawer()'s comment */
+            /* This is only a candidate: a header Back tap also starts here.
+             * Reordering siblings invalidates the full top layer twice;
+             * defer z-order changes until a real drawer drag is claimed. */
         } else {
             quick_drawer_drag_tracking = false;
         }
@@ -3527,10 +3976,9 @@ static void poll_quick_drawer_drag(lv_timer_t * timer) {
         /* gesture_home_config_t's fields are shared with gui_lock_screen.c's
          * own independent use of gesture_home_state_is_eligible(), which
          * doesn't need these -- same reasoning as back-swipe's own
-         * exclusions just above: text-entry, Import via Wi-Fi, and the busy
-         * overlay all skip finalize_screen_navigation() because leaving
-         * them needs teardown (in-progress input, import_web_stop(),
-         * modal ownership) that a stack-only reset to Home would bypass.
+         * exclusions just above: text-entry and the busy overlay
+         * skip finalize_screen_navigation() because leaving
+         * them needs teardown (in-progress input, modal ownership) that a stack-only reset to Home would bypass.
          *
          * Deliberately NOT gated on drag_adjust_press_owned (unlike player-
          * swipe/back-swipe below): home_indicator_band already sits on
@@ -3546,7 +3994,6 @@ static void poll_quick_drawer_drag(lv_timer_t * timer) {
         home_swipe_candidate = gesture_home_state_is_eligible(&home_cfg, p.y) &&
                                 lv_screen_active() != gui_shell_get_home_screen() &&
                                 lv_screen_active() != gui_text_input_get_screen() &&
-                                lv_screen_active() != gui_network_get_import_wifi_screen() &&
                                 lv_screen_active() != gui_busy_get_screen();
         home_swipe_touch_start_x = p.x;
         home_swipe_touch_start_y = p.y;
@@ -3581,7 +4028,7 @@ static void poll_quick_drawer_drag(lv_timer_t * timer) {
 
         /* Depth > 1 is the stack-pop precondition. Lyrics owns its own
          * right-swipe (lyrics_gesture_event_cb -> close_lyrics_screen).
-         * Lock, text-entry, both DAC overlays, Import via Wi-Fi, and the
+         * Lock, text-entry, both DAC overlays, and the
          * busy overlay skip finalize_screen_navigation() -- a live pop
          * here would bypass their leave-confirmation, teardown, or
          * modal-ownership. Same drawer/dead-zone/drag-adjust exclusions
@@ -3599,7 +4046,6 @@ static void poll_quick_drawer_drag(lv_timer_t * timer) {
                                 lv_screen_active() != gui_text_view_get_screen() &&
                                 lv_screen_active() != gui_network_get_usb_dac_overlay() &&
                                 lv_screen_active() != gui_network_get_bt_dac_overlay() &&
-                                lv_screen_active() != gui_network_get_import_wifi_screen() &&
                                 lv_screen_active() != gui_busy_get_screen() &&
                                 !gui_library_navigation_blocked() &&
                                 !player_swipe_press_excluded(p);
@@ -3611,6 +4057,14 @@ static void poll_quick_drawer_drag(lv_timer_t * timer) {
                back_swipe_candidate,
                lv_screen_active() == gui_library_get_files_screen() ? "files" : "other",
                gui_navigation_get_depth());
+#ifdef UI_PERF_TRACE
+        ui_frame_trace_event(UI_FRAME_TRACE_EVENT_GESTURE_ORIGIN,
+                             ((uint32_t)(uint16_t)p.x << 16) | (uint16_t)p.y,
+                             (player_swipe_candidate ? 1u : 0u) |
+                             (back_swipe_candidate ? 2u : 0u) |
+                             (home_swipe_candidate ? 4u : 0u) |
+                             (quick_drawer_drag_tracking ? 8u : 0u));
+#endif
     }
 
     if (pressed && home_swipe_candidate && !home_swipe_tracking && !player_swipe_tracking && !back_swipe_tracking &&
@@ -3619,7 +4073,7 @@ static void poll_quick_drawer_drag(lv_timer_t * timer) {
         int32_t dy = p.y - home_swipe_touch_start_y;
         int32_t adx = dx < 0 ? -dx : dx;
         int32_t ady = dy < 0 ? -dy : dy;
-        if (adx >= HOME_SWIPE_DEADZONE || ady >= HOME_SWIPE_DEADZONE) {
+        if (adx >= NAV_SWIPE_DEADZONE_PX || ady >= NAV_SWIPE_DEADZONE_PX) {
             if (dy < 0 && ady > adx) {
                 /* EXPERIMENTAL reveal=true (see gui_navigation.h's own
                  * comment on slide_transition_ctx_t's reveal field): Home
@@ -3658,7 +4112,7 @@ static void poll_quick_drawer_drag(lv_timer_t * timer) {
         int32_t dy = p.y - player_swipe_touch_start_y;
         int32_t adx = dx < 0 ? -dx : dx;
         int32_t ady = dy < 0 ? -dy : dy;
-        if (adx >= PLAYER_SWIPE_DEADZONE || ady >= PLAYER_SWIPE_DEADZONE) {
+        if (adx >= NAV_SWIPE_DEADZONE_PX || ady >= NAV_SWIPE_DEADZONE_PX) {
             /* Enough movement to judge direction. Horizontal-left-dominant
              * confirms it; anything else (vertical, or rightward) rules it
              * out for good -- either way, stop re-checking every tick. */
@@ -3697,7 +4151,7 @@ static void poll_quick_drawer_drag(lv_timer_t * timer) {
         int32_t dy = p.y - back_swipe_touch_start_y;
         int32_t adx = dx < 0 ? -dx : dx;
         int32_t ady = dy < 0 ? -dy : dy;
-        if (adx >= BACK_SWIPE_DEADZONE || ady >= BACK_SWIPE_DEADZONE) {
+        if (adx >= NAV_SWIPE_DEADZONE_PX || ady >= NAV_SWIPE_DEADZONE_PX) {
             if (dx > 0 && adx > ady) {
                 lv_obj_t * active = lv_screen_active();
                 /* Search-open and Files-not-at-root consume a right-swipe
@@ -3886,7 +4340,12 @@ static void poll_quick_drawer_drag(lv_timer_t * timer) {
              * finger onto whatever row is now underneath and fires CLICKED
              * on release. Same tool as the player-swipe path above. */
             if (!quick_drawer_drag_claimed) {
+#ifdef UI_PERF_TRACE
+                ui_frame_trace_event(UI_FRAME_TRACE_EVENT_DRAWER_CLAIM, 0, 0);
+#endif
                 quick_drawer_drag_claimed = true;
+                lv_obj_move_foreground(quick_drawer);
+                lv_obj_move_foreground(status_bar_band);
                 lv_indev_wait_release(indev);
             }
             /* Per-tick velocity, in case the finger lifts mid-flick (see the
@@ -4148,7 +4607,7 @@ static void wifi_toggle_apply_optimistic_ui(bool will_be_enabled) {
 
     if (will_be_enabled) {
         lv_obj_remove_flag(wifi_icon, LV_OBJ_FLAG_HIDDEN);
-        lv_image_set_src(wifi_icon, asset_path("topbar/lucide_wifi_off.png"));
+        lv_image_set_src(wifi_icon, topbar_icon("wifi_off"));
         layout_radio_topbar_image(wifi_icon);
     } else {
         lv_obj_add_flag(wifi_icon, LV_OBJ_FLAG_HIDDEN);
@@ -4406,7 +4865,7 @@ static void show_optimistic_bt_state(bool powered) {
     bt_connected_codec_cached[0] = '\0';
     if (powered) {
         lv_obj_remove_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN);
-        lv_image_set_src(bt_status_icon, asset_path("topbar/lucide_bluetooth_off.png"));
+        lv_image_set_src(bt_status_icon, topbar_icon("bluetooth_off"));
         layout_bluetooth_topbar_image(bt_status_icon);
     } else {
         lv_obj_add_flag(bt_status_icon, LV_OBJ_FLAG_HIDDEN);
@@ -4759,8 +5218,8 @@ static void build_quick_drawer(void) {
     lv_obj_remove_style_all(quick_drawer);
     lv_obj_set_size(quick_drawer, w, h);
     lv_obj_set_pos(quick_drawer, 0, -h); /* fully off-screen above until opened */
-    lv_obj_set_style_bg_color(quick_drawer, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(quick_drawer, LV_OPA_COVER, 0);
+    shell_theme_styles_init();
+    lv_obj_add_style(quick_drawer, &shell_drawer_bg_style, 0);
     lv_obj_remove_flag(quick_drawer, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(quick_drawer, LV_OBJ_FLAG_CLICKABLE); /* swallow touches to whatever's behind while open */
 
@@ -4774,8 +5233,7 @@ static void build_quick_drawer(void) {
      * leave 58px of dead space below it. Ends at 785 now, keeping the same
      * ~15px bottom margin the sides already use. */
     lv_obj_set_size(drawer_panel, BOARD_SCALE_PX(442), BOARD_SCALE_PY(726));
-    lv_obj_set_style_bg_color(drawer_panel, lv_color_hex(0x0d130f), 0);
-    lv_obj_set_style_bg_opa(drawer_panel, LV_OPA_COVER, 0);
+    lv_obj_add_style(drawer_panel, &shell_drawer_panel_style, 0);
     lv_obj_set_style_radius(drawer_panel, BOARD_SCALE_PX(30), 0);
     lv_obj_remove_flag(drawer_panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_move_background(drawer_panel);
@@ -4785,8 +5243,7 @@ static void build_quick_drawer(void) {
     lv_obj_remove_style_all(expansion_handle);
     lv_obj_set_pos(expansion_handle, BOARD_SCALE_PX(210), BOARD_SCALE_PY(219));
     lv_obj_set_size(expansion_handle, BOARD_SCALE_PX(59), BOARD_SCALE_PY(8));
-    lv_obj_set_style_bg_color(expansion_handle, lv_color_hex(0x4a4d4b), 0);
-    lv_obj_set_style_bg_opa(expansion_handle, LV_OPA_COVER, 0);
+    lv_obj_add_style(expansion_handle, &shell_drawer_handle_style, 0);
     lv_obj_set_style_radius(expansion_handle, BOARD_SCALE_PX(4), 0);
     /* A bar this thin is far too small a touch target on its own; the drag
      * itself is claimed by coordinate hit-test in poll_quick_drawer_drag()
@@ -4803,7 +5260,7 @@ static void build_quick_drawer(void) {
     lv_obj_remove_style_all(brightness_container);
     lv_obj_set_pos(brightness_container, BOARD_SCALE_PX(34), BOARD_SCALE_PY(238));
     lv_obj_set_size(brightness_container, BOARD_SCALE_PX(413), BOARD_SCALE_PY(72));
-    lv_obj_set_style_bg_color(brightness_container, lv_color_hex(0x151b17), 0);
+    lv_obj_add_style(brightness_container, &shell_drawer_row_style, 0);
     lv_obj_set_style_bg_opa(brightness_container, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(brightness_container, BOARD_SCALE_PX(23), 0);
 
@@ -4811,14 +5268,14 @@ static void build_quick_drawer(void) {
     lv_obj_remove_style_all(quick_drawer_volume_container);
     lv_obj_set_pos(quick_drawer_volume_container, BOARD_SCALE_PX(34), BOARD_SCALE_PY(325));
     lv_obj_set_size(quick_drawer_volume_container, BOARD_SCALE_PX(413), BOARD_SCALE_PY(73));
-    lv_obj_set_style_bg_color(quick_drawer_volume_container, lv_color_hex(0x151b17), 0);
+    lv_obj_add_style(quick_drawer_volume_container, &shell_drawer_row_style, 0);
     lv_obj_set_style_bg_opa(quick_drawer_volume_container, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(quick_drawer_volume_container, BOARD_SCALE_PX(23), 0);
 
     /* Decode the four "on" icons with the current accent before anything
      * asks for one below -- quick_drawer_toggle_src() falls back to the
      * plain (stock-blue) asset while these are unloaded. */
-    load_quick_drawer_toggle_on_images();
+    load_quick_drawer_toggle_images();
 
     /* Row 1: every toggle icon (Bluetooth / Wifi / sleep timer / output
      * gain) together in one row -- 4 icons x 84px + 5 gaps of 21px exactly
@@ -4894,7 +5351,7 @@ static void build_quick_drawer(void) {
         lv_obj_set_style_text_font(quick_drawer_toggle_state[i], &lv_font_montserrat_12, 0);
         lv_obj_align(quick_drawer_toggle_state[i], LV_ALIGN_TOP_LEFT, BOARD_SCALE_PX(label_x[i]), QUICK_DRAWER_ROW1_TOP + QUICK_DRAWER_TOGGLE_ICON_PX + BOARD_SCALE_PY(24));
         lv_label_set_text(quick_drawer_toggle_state[i], TR("Off"));
-        lv_obj_set_style_text_color(quick_drawer_toggle_state[i], lv_color_hex(0x8d918f), 0);
+        lv_obj_set_style_text_color(quick_drawer_toggle_state[i], shell_drawer_off_color, 0);
     }
     quick_drawer_set_toggle_state(0, gui_shell_wifi_effective_enabled());
     quick_drawer_set_toggle_state(1, bt_control_is_powered());
@@ -4945,7 +5402,7 @@ static void build_quick_drawer(void) {
         lv_obj_set_style_text_font(quick_drawer_toggle_state[slot], &lv_font_montserrat_12, 0);
         lv_obj_set_pos(quick_drawer_toggle_state[slot], x, QUICK_DRAWER_TOGGLE_ICON_PX + BOARD_SCALE_PY(24));
         lv_label_set_text(quick_drawer_toggle_state[slot], TR("Off"));
-        lv_obj_set_style_text_color(quick_drawer_toggle_state[slot], lv_color_hex(0x8d918f), 0);
+        lv_obj_set_style_text_color(quick_drawer_toggle_state[slot], shell_drawer_off_color, 0);
 
         switch (slot) {
             case QD_TOGGLE_AIRPLAY:
@@ -5073,7 +5530,6 @@ static void build_quick_drawer(void) {
      * called on every open_quick_drawer(), see its own comment) --
      * defined here just so it runs once at build time too, same as
      * every other quick-drawer widget's own initial state. */
-    lv_obj_set_style_bg_color(quick_drawer_brightness_track, lv_color_black(), LV_PART_MAIN);
     lv_obj_add_style(quick_drawer_brightness_track, gui_theme_accent_style(), LV_PART_INDICATOR);
     lv_obj_add_style(quick_drawer_brightness_track, gui_theme_accent_knob_style(), LV_PART_KNOB);
     /* Configures rail styling to prevent visual artifacts on the track edge. */
@@ -5106,7 +5562,6 @@ static void build_quick_drawer(void) {
     lv_obj_set_size(quick_drawer_volume_track, brightness_track_w, SLIDER_TRACK_HEIGHT);
     lv_obj_align(quick_drawer_volume_track, LV_ALIGN_TOP_LEFT, BOARD_SCALE_PX(103), BOARD_SCALE_PY(354));
     lv_slider_set_range(quick_drawer_volume_track, 0, 100);
-    lv_obj_set_style_bg_color(quick_drawer_volume_track, lv_color_black(), LV_PART_MAIN);
     lv_obj_add_style(quick_drawer_volume_track, gui_theme_accent_style(), LV_PART_INDICATOR);
     lv_obj_add_style(quick_drawer_volume_track, gui_theme_accent_knob_style(), LV_PART_KNOB);
     configure_native_slider_rail(quick_drawer_volume_track);
@@ -5163,8 +5618,7 @@ static void build_quick_drawer(void) {
      * 20px above the panel's new bottom edge). The cover/title/artist block
      * at the top is untouched; the extra height goes to the transport row. */
     lv_obj_set_size(card, QUICK_DRAWER_CARD_W, QUICK_DRAWER_CARD_H);
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x111712), 0);
-    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_add_style(card, &shell_drawer_card_style, 0);
     lv_obj_set_style_radius(card, BOARD_SCALE_PX(24), 0);
     lv_obj_set_style_clip_corner(card, true, 0);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
@@ -5205,7 +5659,7 @@ static void build_quick_drawer(void) {
 
     quick_drawer_title_label = lv_label_create(band);
     lv_label_set_text(quick_drawer_title_label, TR("No track loaded"));
-    lv_obj_add_style(quick_drawer_title_label, &style_theme_text_primary, 0);
+    lv_obj_add_style(quick_drawer_title_label, gui_player_backdrop_text_style(false), 0);
     lv_obj_set_style_text_font(quick_drawer_title_label, &app_font_player_title, 0);
     lv_obj_set_width(quick_drawer_title_label, text_width);
     lv_obj_set_style_text_align(quick_drawer_title_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -5215,7 +5669,7 @@ static void build_quick_drawer(void) {
 
     quick_drawer_artist_label = lv_label_create(band);
     lv_label_set_text(quick_drawer_artist_label, "");
-    lv_obj_add_style(quick_drawer_artist_label, &style_theme_text_muted, 0);
+    lv_obj_add_style(quick_drawer_artist_label, gui_player_backdrop_text_style(true), 0);
     lv_obj_set_style_text_font(quick_drawer_artist_label, &app_font_player_meta, 0);
     lv_obj_set_width(quick_drawer_artist_label, text_width);
     lv_obj_set_style_text_align(quick_drawer_artist_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -5225,7 +5679,7 @@ static void build_quick_drawer(void) {
 
     quick_drawer_album_label = lv_label_create(band);
     lv_label_set_text(quick_drawer_album_label, "");
-    lv_obj_add_style(quick_drawer_album_label, &style_theme_text_muted, 0);
+    lv_obj_add_style(quick_drawer_album_label, gui_player_backdrop_text_style(true), 0);
     lv_obj_set_style_text_font(quick_drawer_album_label, &app_font_player_meta, 0);
     lv_obj_set_width(quick_drawer_album_label, text_width);
     lv_obj_set_style_text_align(quick_drawer_album_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -5236,7 +5690,7 @@ static void build_quick_drawer(void) {
 
     quick_drawer_format_label = lv_label_create(band);
     lv_label_set_text(quick_drawer_format_label, "");
-    lv_obj_add_style(quick_drawer_format_label, &style_theme_text_muted, 0);
+    lv_obj_add_style(quick_drawer_format_label, gui_player_backdrop_text_style(true), 0);
     lv_obj_set_style_text_font(quick_drawer_format_label, &app_font_player_meta, 0);
     lv_obj_set_style_text_align(quick_drawer_format_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_radius(quick_drawer_format_label, LV_RADIUS_CIRCLE, 0);
@@ -5266,6 +5720,7 @@ static void build_quick_drawer(void) {
     lv_obj_remove_flag(controls_row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t * prev_btn = lv_image_create(controls_row);
     lv_image_set_src(prev_btn, asset_path("playing_plane/btn_prev.png"));
+    lv_obj_add_style(prev_btn, gui_player_backdrop_icon_style(), 0);
     quick_drawer_layout_transport_icon(prev_btn, 84);
     lv_obj_set_ext_click_area(prev_btn, BOARD_SCALE_PX(4));
     lv_obj_add_flag(prev_btn, LV_OBJ_FLAG_CLICKABLE);
@@ -5290,6 +5745,7 @@ static void build_quick_drawer(void) {
 
     lv_obj_t * next_btn = lv_image_create(controls_row);
     lv_image_set_src(next_btn, asset_path("playing_plane/btn_next.png"));
+    lv_obj_add_style(next_btn, gui_player_backdrop_icon_style(), 0);
     quick_drawer_layout_transport_icon(next_btn, 290);
     lv_obj_set_ext_click_area(next_btn, BOARD_SCALE_PX(4));
     lv_obj_add_flag(next_btn, LV_OBJ_FLAG_CLICKABLE);
@@ -5472,13 +5928,13 @@ void refresh_clock_label(void) {
 
     for (int i = 0; i < 5; i++) {
         char glyph[2] = { buf[i], '\0' };
-        lv_label_set_text(clock_topbar_digit[i], glyph);
+        topbar_set_label(clock_topbar_digit[i], glyph);
     }
 
     if (current_settings.clock_24h) {
         lv_obj_add_flag(clock_topbar_ampm, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_label_set_text(clock_topbar_ampm, tm_info.tm_hour < 12 ? TR("AM") : TR("PM"));
+        topbar_set_label(clock_topbar_ampm, tm_info.tm_hour < 12 ? TR("AM") : TR("PM"));
         lv_obj_remove_flag(clock_topbar_ampm, LV_OBJ_FLAG_HIDDEN);
     }
     /* Widths can change with AM/PM and localized glyph metrics. */
@@ -5574,6 +6030,7 @@ void gui_shell_teardown(void) {
         quick_drawer_motion_image = NULL;
     }
     if (quick_drawer_motion_buf) {
+        ui_snapshot_prefetch_forget(quick_drawer_motion_buf);
         lv_draw_buf_destroy(quick_drawer_motion_buf);
         quick_drawer_motion_buf = NULL;
     }
@@ -5590,6 +6047,16 @@ void gui_shell_teardown(void) {
         quick_drawer = NULL;
     }
     quick_drawer_brightness_icon = NULL;
+    /* Every widget the gui_shell_update_quick_drawer_*() entry points can
+     * reach: callers during a reload must find NULL, not freed objects. */
+    quick_drawer_play_btn = NULL;
+    quick_drawer_favorite_icon = NULL;
+    quick_drawer_brightness_track = NULL;
+    quick_drawer_brightness_label = NULL;
+    quick_drawer_wifi_icon = NULL;
+    quick_drawer_bt_icon = NULL;
+    quick_drawer_sleep_icon = NULL;
+    quick_drawer_crossfade_icon = NULL;
     quick_drawer_title_label = NULL;
     quick_drawer_artist_label = NULL;
     quick_drawer_album_label = NULL;
@@ -5630,8 +6097,7 @@ void gui_shell_teardown(void) {
     quick_drawer_expansion_moved = false;
     asset_decoded_image_close(&quick_drawer_bg_image);
     asset_decoded_image_close(&quick_drawer_brightness_image);
-    for (int i = 0; i < QD_TOGGLE_COUNT; i++) asset_decoded_image_close(&qd_toggle_on_img[i]);
-    for (int i = 0; i < PLUGIN_MAX_QUICK_TOGGLES; i++) asset_decoded_image_close(&qd_plugin_toggle_on_img[i]);
+    close_quick_drawer_toggle_images();
     if (status_bar_band) {
         lv_obj_delete(status_bar_band);
         status_bar_band = NULL;
@@ -5677,15 +6143,14 @@ void gui_shell_refresh_static_assets(void) {
     if (!quick_drawer) return;
     /* Theme/plugin asset files may have changed in place, so discard source
      * snapshots before rebuilding the accent variants. */
-    for (int i = 0; i < QD_TOGGLE_COUNT; i++) asset_decoded_image_close(&qd_toggle_on_img[i]);
-    for (int i = 0; i < PLUGIN_MAX_QUICK_TOGGLES; i++) asset_decoded_image_close(&qd_plugin_toggle_on_img[i]);
+    close_quick_drawer_toggle_images();
     asset_decoded_image_close(&quick_drawer_brightness_image);
     const void * brightness = asset_decoded_image_open(&quick_drawer_brightness_image, "pull_down/blk.png")
                             ? asset_decoded_image_source(&quick_drawer_brightness_image) : NULL;
     if (quick_drawer_brightness_icon)
         lv_image_set_src(quick_drawer_brightness_icon,
                          brightness ? brightness : asset_path("pull_down/blk.png"));
-    /* The four "on" toggle icons are decoded copies too, so a changed asset
+    /* The toggle icons are decoded copies too, so a changed asset
      * on disk only reaches them through a re-decode -- and that re-decode
      * frees the buffers the widgets currently point at, so this must also
      * re-point them, which is exactly what this does. */
@@ -5897,6 +6362,7 @@ void gui_shell_reset_drag_state(void) {
     }
     s_last_raw_pointer_state = LV_INDEV_STATE_RELEASED;
     s_require_release_after_wake = true;
+    s_last_raw_pointer_point_valid = false;
     if (quick_drawer_drag_timer) {
         lv_timer_pause(quick_drawer_drag_timer);
     }
@@ -6013,26 +6479,22 @@ void gui_shell_update_quick_drawer_track(const char * title, const char * artist
     if (quick_drawer_title_label) {
         const char * want_title = title ? title : TR("No track loaded");
         const char * want_artist = artist ? artist : "";
-        const char * cur_title = lv_label_get_text(quick_drawer_title_label);
         const char * want_album = album ? album : "";
-        const char * cur_artist = lv_label_get_text(quick_drawer_artist_label);
-        const char * cur_album = quick_drawer_album_label
-                               ? lv_label_get_text(quick_drawer_album_label) : NULL;
         /* Only touch a label whose text actually changed: lv_label_set_text()
          * restarts LV_LABEL_LONG_SCROLL_CIRCULAR from the beginning, so
          * re-setting identical text would keep resetting the marquee (and
          * its 2s wait) instead of letting it scroll. Same guard gui_player.c
          * already applies to its own now-playing labels. */
         bool changed = false;
-        if (!cur_title || strcmp(cur_title, want_title) != 0) {
+        if (!ui_label_text_matches(quick_drawer_title_label, want_title)) {
             lv_label_set_text(quick_drawer_title_label, want_title);
             changed = true;
         }
-        if (!cur_artist || strcmp(cur_artist, want_artist) != 0) {
+        if (!ui_label_text_matches(quick_drawer_artist_label, want_artist)) {
             lv_label_set_text(quick_drawer_artist_label, want_artist);
             changed = true;
         }
-        if (quick_drawer_album_label && (!cur_album || strcmp(cur_album, want_album) != 0)) {
+        if (quick_drawer_album_label && !ui_label_text_matches(quick_drawer_album_label, want_album)) {
             lv_label_set_text(quick_drawer_album_label, want_album);
             changed = true;
         }
@@ -6044,8 +6506,7 @@ void gui_shell_update_quick_drawer_track(const char * title, const char * artist
 void gui_shell_update_quick_drawer_format(const char * text) {
     if (!quick_drawer_format_label) return;
     const char * want = text ? text : "";
-    const char * cur = lv_label_get_text(quick_drawer_format_label);
-    if (cur && strcmp(cur, want) == 0) return;
+    if (ui_label_text_matches(quick_drawer_format_label, want)) return;
     lv_label_set_text(quick_drawer_format_label, want);
     quick_drawer_mark_snapshot_dirty();
 }
@@ -6094,7 +6555,7 @@ void gui_shell_refresh_quick_drawer_toggle_accent(void) {
     /* Reloaded descriptors can reuse an old allocation's address. Rebind
      * every live tile after reload, even when its pointer compares equal. */
     quick_drawer_toggle_force_src = true;
-    load_quick_drawer_toggle_on_images();
+    load_quick_drawer_toggle_images();
     /* Re-point every widget at the buffers just decoded -- load_...() freed
      * the previous ones, so anything still holding those would be reading
      * released memory on its next draw. Same reason refresh_play_btn_icon()
@@ -6118,9 +6579,8 @@ void gui_shell_refresh_quick_drawer_toggle_accent(void) {
     /* The expanded rows are subject to the exact same hazard -- load_...()
      * re-decoded their "on" buffers too (including every plugin tile's), so
      * any of them currently showing an on-state would otherwise still point
-     * at freed memory. Their off-state icons are plain asset paths and were
-     * never at risk, which is also why the inert Gapless tile needs nothing
-     * here. */
+     * at freed memory. Off-state icons that needed rounding are decoded
+     * copies too, so every tile is re-pointed, whatever its state. */
     refresh_quick_drawer_expansion_toggles();
     quick_drawer_toggle_force_src = false;
     quick_drawer_mark_snapshot_dirty();

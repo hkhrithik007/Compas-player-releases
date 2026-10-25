@@ -77,8 +77,9 @@ typedef struct {
 
 static void refresh_text_reader_favorite_icon(void) {
     bool is_favorite = text_reader_current_path[0] != '\0' && metadata_db_book_favorite_is_set(text_reader_current_path);
-    lv_image_set_src(text_reader_favorite_icon,
-                     asset_path(is_favorite ? "playing_plane/collect_in.png" : "playing_plane/collect_out.png"));
+    const char * asset = asset_path(is_favorite ? "playing_plane/collect_in.png" : "playing_plane/collect_out.png");
+    const char * breeze = titlebar_breeze_icon(asset);
+    lv_image_set_src(text_reader_favorite_icon, breeze ? breeze : asset);
 }
 
 static void text_reader_favorite_icon_event_cb(lv_event_t * e) {
@@ -226,7 +227,7 @@ static void free_user_data_event_cb(lv_event_t * e) {
 
 static void populate_books_files_screen(void) {
     lv_obj_clean(books_files_list);
-    lv_label_set_text(books_files_title_label, books_showing_favorites ? TR("Favorites") : TR("Books"));
+    lv_label_set_text(books_files_title_label, books_showing_favorites ? TR("Favorites") : TR("TXT Reader"));
 
     char ** paths;
     int count;
@@ -254,9 +255,7 @@ static void populate_books_files_screen(void) {
         lv_obj_set_size(row, LIST_ROW_WIDTH, ui_list_row_height());
         lv_obj_add_style(row, &native_row_min_style, 0);
         lv_obj_set_style_radius(row, LIST_ROW_RADIUS, 0);
-        lv_obj_set_style_bg_color(row, LIST_ROW_BG_COLOR, 0);
-        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_add_style(row, &pill_row_bg_style, 0);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
         lv_obj_t * label = lv_label_create(row);
@@ -294,7 +293,7 @@ static void books_favorites_row_cb(lv_event_t * e) {
 }
 
 static lv_obj_t * build_books_files_screen(void) {
-    lv_obj_t * scr = build_subsonic_list_screen(TR("Books"), &books_files_title_label, &books_files_list);
+    lv_obj_t * scr = build_subsonic_list_screen(TR("TXT Reader"), &books_files_title_label, &books_files_list);
     books_refresh_icon = build_header_refresh_action(scr, books_refresh_cb);
     return scr;
 }
@@ -348,7 +347,7 @@ static void plugin_books_list_item_click_cb(lv_event_t * e) {
 static lv_obj_t * build_books_screen(void) {
     static pill_list_item_t items[2 + PLUGIN_MAX_BOOKS_LIST_ITEMS];
     lv_obj_t * native_rows[2 + PLUGIN_MAX_BOOKS_LIST_ITEMS] = { NULL };
-    items[0] = (pill_list_item_t){ TR("Books"), PILL_ACCESSORY_CHEVRON, false, books_files_row_cb, NULL, NULL };
+    items[0] = (pill_list_item_t){ TR("TXT Reader"), PILL_ACCESSORY_CHEVRON, false, books_files_row_cb, NULL, NULL };
     items[1] = (pill_list_item_t){ TR("Favorites"), PILL_ACCESSORY_CHEVRON, false, books_favorites_row_cb, NULL, NULL };
 
     int count = 2;
