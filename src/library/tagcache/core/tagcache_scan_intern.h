@@ -3,7 +3,9 @@
 
 /* Disk-backed canonical tag table used while a scan appends to staging tag
  * files.  The table stores one reference for each case-insensitive spelling
- * and therefore has no song-sized RAM component. */
+ * and therefore has no song-sized RAM component.  Song titles are never
+ * interned: they must read back exactly as tagged, so they neither enter the
+ * table nor borrow another field's spelling. */
 #define TC_SCAN_INTERN_INITIAL 1024u
 #define TC_SCAN_INTERN_MAX (8u * 1024u * 1024u)
 
@@ -16,7 +18,6 @@ static int tc_scan_intern_fd = -1;
 static bool tc_scan_intern_ready;
 static uint32_t tc_scan_intern_capacity;
 static uint32_t tc_scan_intern_used;
-static void scan_intern_close(void);
 
 static uint32_t tc_scan_intern_hash(const char *s) {
     uint32_t h = 2166136261u;
@@ -40,26 +41,16 @@ static bool tc_scan_intern_read(int tag, int32_t seek, char *out, size_t cap) {
     return memchr(out, '\0', (size_t)te.tag_length - 1) == NULL && out[te.tag_length - 1] == '\0';
 }
 
-static bool tc_scan_intern_equal_ci(const char *a, const char *b) {
-    while (*a && *b) {
-        unsigned char ca = (unsigned char)*a++, cb = (unsigned char)*b++;
-        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca + ('a' - 'A'));
-        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb + ('a' - 'A'));
-        if (ca != cb) return false;
-    }
-    return *a == *b;
-}
-
 static int tc_scan_intern_probe(const char *value, uint32_t *slot_out, char *canonical, size_t cap) {
     uint32_t hash = tc_scan_intern_hash(value);
     for (uint32_t n = 0; n < tc_scan_intern_capacity; n++) {
         uint32_t slot = (hash + n) & (tc_scan_intern_capacity - 1u);
         struct tc_scan_intern_cell cell;
-        if (!reader_read_at(tc_scan_intern_fd, &cell, sizeof(cell), (off_t)slot * sizeof(cell))) return -1;
+        if (!tc_read_full(tc_scan_intern_fd, &cell, sizeof(cell), (off_t)slot * sizeof(cell))) return -1;
         if (!cell.hash) { if (slot_out) *slot_out = slot; return 0; }
         if (cell.hash != hash) continue;
         if (!tc_scan_intern_read(cell.tag, cell.seek, canonical, cap)) return -1;
-        if (tc_scan_intern_equal_ci(canonical, value)) {
+        if (ascii_casecmp(canonical, value) == 0) {
             if (slot_out) *slot_out = slot;
             return 1;
         }
@@ -72,7 +63,7 @@ static bool tc_scan_intern_place(int fd, uint32_t capacity, const struct tc_scan
     for (uint32_t n = 0; n < capacity; n++) {
         uint32_t slot = (start + n) & (capacity - 1u);
         struct tc_scan_intern_cell current;
-        if (!reader_read_at(fd, &current, sizeof(current), (off_t)slot * sizeof(current))) return false;
+        if (!tc_read_full(fd, &current, sizeof(current), (off_t)slot * sizeof(current))) return false;
         if (!current.hash)
             return write_at(fd, cell, sizeof(*cell), (off_t)slot * sizeof(*cell));
     }
@@ -90,7 +81,7 @@ static bool tc_scan_intern_grow(void) {
     }
     for (uint32_t slot = 0; slot < tc_scan_intern_capacity; slot++) {
         struct tc_scan_intern_cell cell;
-        if (!reader_read_at(tc_scan_intern_fd, &cell, sizeof(cell), (off_t)slot * sizeof(cell))) {
+        if (!tc_read_full(tc_scan_intern_fd, &cell, sizeof(cell), (off_t)slot * sizeof(cell))) {
             close(fd);
             return false;
         }
@@ -112,7 +103,7 @@ static bool tc_scan_intern_add_cell(const struct tc_scan_intern_cell *cell) {
     return true;
 }
 
-static bool scan_intern_init(bool include_titles) {
+bool scan_intern_init(void) {
     scan_intern_close();
     tc_scan_intern_fd = reader_create_temp();
     tc_scan_intern_capacity = TC_SCAN_INTERN_INITIAL;
@@ -121,10 +112,9 @@ static bool scan_intern_init(bool include_titles) {
         scan_intern_close(); return false;
     }
     tc_scan_intern_ready = true;
-    const int tags[] = {tag_title, tag_artist, tag_album, tag_albumartist, tag_genre};
+    const int tags[] = {tag_artist, tag_album, tag_albumartist, tag_genre};
     for (size_t ti = 0; ti < sizeof(tags) / sizeof(tags[0]); ti++) {
         int tag = tags[ti];
-        if (tag == tag_title && !include_titles) continue;
         for (off_t pos = sizeof(struct tagcache_header); pos + (off_t)sizeof(struct tagfile_entry) <= (off_t)reader_tag_size[tag];) {
             struct tagfile_entry te;
             if (pread(reader_tag_fd[tag], &te, sizeof(te), pos) != (ssize_t)sizeof(te) || te.tag_length <= 0 ||
@@ -145,7 +135,7 @@ static bool scan_intern_init(bool include_titles) {
     return true;
 }
 
-static bool scan_intern_find(const char *value, char *out, size_t out_size) {
+bool scan_intern_find(const char *value, char *out, size_t out_size) {
     if (!tc_scan_intern_ready || !value || !out || out_size == 0) return false;
     uint32_t slot; char canonical[TAGCACHE_PATH_MAX];
     int found = tc_scan_intern_probe(value, &slot, canonical, sizeof(canonical));
@@ -168,7 +158,7 @@ static bool scan_intern_insert(int tag, int32_t seek) {
     return tc_scan_intern_add_cell(&cell);
 }
 
-static void scan_intern_close(void) {
+void scan_intern_close(void) {
     if (tc_scan_intern_fd >= 0) close(tc_scan_intern_fd);
     tc_scan_intern_fd = -1;
     tc_scan_intern_ready = false;

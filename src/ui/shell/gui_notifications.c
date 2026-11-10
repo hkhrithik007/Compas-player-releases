@@ -1,5 +1,7 @@
 #include "gui_notifications.h"
+#include "../text/i18n/i18n.h"
 #include "../text/rendering/ui_label_text.h"
+#include "../text/rendering/fallback_font.h"
 #include "gui_navigation.h"
 #include "../appearance/gui_theme.h"
 #include "../application/gui.h"
@@ -19,15 +21,28 @@ static toast_t info_toast = { 0 };
 /* Busy overlay */
 static uint32_t gui_busy_current_token = 0;
 static lv_obj_t * gui_busy_screen = NULL;
+#if defined(BOARD_TEMPOTEC_V1)
+static lv_obj_t * gui_busy_content = NULL;
+#define GUI_BUSY_PARENT gui_busy_content
+#else
+#define GUI_BUSY_PARENT gui_busy_screen
+#endif
 static lv_obj_t * gui_busy_label = NULL;
 static lv_obj_t * gui_busy_progress_bar = NULL;
 static lv_obj_t * gui_busy_detail_label = NULL;
+/* Opt-in cancel: set by gui_busy_set_cancel(), fired at most once. */
+static lv_obj_t * gui_busy_cancel_btn = NULL;
+static void (*gui_busy_cancel_cb)(void *) = NULL;
+static void * gui_busy_cancel_user = NULL;
+
+static void toast_hide(toast_t * toast) {
+    if (toast->obj) lv_obj_add_flag(toast->obj, LV_OBJ_FLAG_HIDDEN);
+    if (toast->timer) lv_timer_pause(toast->timer);
+}
 
 static void toast_hide_timer_cb(lv_timer_t * timer) {
     toast_t * toast = lv_timer_get_user_data(timer);
-    if (!toast) return;
-    if (toast->obj) lv_obj_add_flag(toast->obj, LV_OBJ_FLAG_HIDDEN);
-    if (toast->timer) lv_timer_pause(toast->timer);
+    if (toast) toast_hide(toast);
 }
 
 /* Shared by both toasts, which differ only in colours, width, placement and
@@ -72,6 +87,7 @@ static void build_error_toast(void) {
 
 static void show_toast(toast_t * toast, const char * msg, uint32_t duration_ms) {
     if (!toast->label) return;
+    toast_hide(toast == &error_toast ? &info_toast : &error_toast); /* the newest toast wins */
     lv_label_set_text(toast->label, msg);
     lv_obj_remove_flag(toast->obj, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(toast->obj);
@@ -80,6 +96,9 @@ static void show_toast(toast_t * toast, const char * msg, uint32_t duration_ms) 
     lv_timer_resume(toast->timer);
 }
 
+/* Generic transient error/status toast, top layer, auto-hides after 2.5s.
+ * Reusable anywhere a background op can fail with something worth telling
+ * the user about; first real use is Wi-Fi/Bluetooth connect failures. */
 void show_error_toast(const char * msg) {
     show_toast(&error_toast, msg, 0);
 }
@@ -109,35 +128,105 @@ bool gui_notifications_toast_visible(void) {
            (info_toast.obj && !lv_obj_has_flag(info_toast.obj, LV_OBJ_FLAG_HIDDEN));
 }
 
+static void gui_busy_cancel_fire(void) {
+    void (*cb)(void *) = gui_busy_cancel_cb;
+    void * user = gui_busy_cancel_user;
+    gui_busy_cancel_cb = NULL;
+    gui_busy_cancel_user = NULL;
+    if (cb) cb(user);
+}
+
+static void gui_busy_cancel_event_cb(lv_event_t * e) {
+    (void)e;
+    gui_busy_cancel_fire();
+}
+
+/* Cancel button, hidden until gui_busy_set_cancel() turns it on. Leaving the
+ * screen any other way (Back gesture, another screen) counts as a cancel. */
+static void gui_busy_build_cancel(void) {
+    gui_busy_cancel_btn = lv_obj_create(GUI_BUSY_PARENT);
+    style_popup_action_row(gui_busy_cancel_btn);
+    lv_obj_set_width(gui_busy_cancel_btn, BOARD_SCALE_PX(200));
+    lv_obj_add_flag(gui_busy_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(gui_busy_cancel_btn, gui_busy_cancel_event_cb, LV_EVENT_CLICKED, NULL);
+#if !defined(BOARD_TEMPOTEC_V1)
+    lv_obj_align(gui_busy_cancel_btn, LV_ALIGN_CENTER, 0, BOARD_SCALE_PX(110));
+#endif
+    lv_obj_t * label = lv_label_create(gui_busy_cancel_btn);
+    lv_label_set_text(label, TR("Cancel"));
+    lv_obj_add_style(label, &style_theme_text_primary, 0);
+    lv_obj_set_style_text_font(label, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
+    lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(gui_busy_screen, gui_busy_cancel_event_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
+}
+
 gui_busy_handle_t gui_busy_show(const char * title, const char * msg) {
     gui_busy_current_token++;
     if (!gui_busy_screen) {
         gui_busy_screen = lv_obj_create(NULL);
         lv_obj_add_style(gui_busy_screen, &style_theme_screen_bg, 0);
 
-        gui_busy_label = lv_label_create(gui_busy_screen);
+#if defined(BOARD_TEMPOTEC_V1)
+        /* V1's 320px height cannot safely use fixed center offsets when the
+         * wrapped title, message, and optional progress lines grow. Keep the
+         * content within the status/home safe area and let flex reflow hidden
+         * or newly shown rows; long operations remain vertically scrollable. */
+        gui_busy_content = lv_obj_create(gui_busy_screen);
+        lv_obj_set_width(gui_busy_content, LV_PCT(100));
+        lv_obj_set_height(gui_busy_content, LV_SIZE_CONTENT);
+        lv_obj_set_style_max_height(gui_busy_content,
+                                    BOARD_SCREEN_HEIGHT - STATUS_BAR_CLEARANCE - HOME_INDICATOR_CONTENT_INSET, 0);
+        lv_obj_align(gui_busy_content, LV_ALIGN_CENTER, 0,
+                     (STATUS_BAR_CLEARANCE - HOME_INDICATOR_CONTENT_INSET) / 2);
+        lv_obj_set_style_bg_opa(gui_busy_content, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(gui_busy_content, 0, 0);
+        lv_obj_set_style_pad_all(gui_busy_content, BOARD_SCALE_PX(8), 0);
+        lv_obj_set_style_pad_row(gui_busy_content, BOARD_SCALE_PY(10), 0);
+        lv_obj_set_flex_flow(gui_busy_content, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(gui_busy_content, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_scrollbar_mode(gui_busy_content, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_scroll_dir(gui_busy_content, LV_DIR_VER);
+        lv_obj_add_flag(gui_busy_content, LV_OBJ_FLAG_SCROLLABLE);
+
+#endif
+
+        gui_busy_label = lv_label_create(GUI_BUSY_PARENT);
         lv_obj_add_style(gui_busy_label, &style_theme_text_primary, 0);
+        /* The color-only theme style leaves the default bitmap font in place.
+         * Add multilingual fallback while preserving its 16 px primary face. */
+        lv_obj_set_style_text_font(gui_busy_label, fallback_font_fixed(16), 0);
         lv_obj_set_width(gui_busy_label, LV_PCT(90));
         lv_label_set_long_mode(gui_busy_label, LV_LABEL_LONG_WRAP);
         lv_obj_set_style_text_align(gui_busy_label, LV_TEXT_ALIGN_CENTER, 0);
+#if !defined(BOARD_TEMPOTEC_V1)
         lv_obj_align(gui_busy_label, LV_ALIGN_CENTER, 0, -BOARD_SCALE_PX(20));
+#endif
 
-        gui_busy_progress_bar = lv_bar_create(gui_busy_screen);
+        gui_busy_progress_bar = lv_bar_create(GUI_BUSY_PARENT);
         lv_obj_set_size(gui_busy_progress_bar, BOARD_SCALE_PX(280), BOARD_SCALE_PX(14));
+#if !defined(BOARD_TEMPOTEC_V1)
         lv_obj_align(gui_busy_progress_bar, LV_ALIGN_CENTER, 0, BOARD_SCALE_PX(30));
+#endif
         lv_bar_set_range(gui_busy_progress_bar, 0, 100);
         lv_obj_add_style(gui_busy_progress_bar, gui_theme_accent_style(), LV_PART_INDICATOR);
 
         /* Optional status line under the bar (e.g. scan phase and counts). */
-        gui_busy_detail_label = lv_label_create(gui_busy_screen);
+        gui_busy_detail_label = lv_label_create(GUI_BUSY_PARENT);
         lv_obj_add_style(gui_busy_detail_label, &style_theme_text_muted, 0);
         lv_obj_set_style_text_font(gui_busy_detail_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
         lv_obj_set_style_text_align(gui_busy_detail_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_width(gui_busy_detail_label, BOARD_SCALE_PX(280));
         lv_label_set_long_mode(gui_busy_detail_label, LV_LABEL_LONG_WRAP);
+#if !defined(BOARD_TEMPOTEC_V1)
         lv_obj_align_to(gui_busy_detail_label, gui_busy_progress_bar, LV_ALIGN_OUT_BOTTOM_MID, 0, BOARD_SCALE_PX(16));
+#endif
+        gui_busy_build_cancel();
     }
-    
+
+    gui_busy_cancel_cb = NULL;
+    gui_busy_cancel_user = NULL;
+    lv_obj_add_flag(gui_busy_cancel_btn, LV_OBJ_FLAG_HIDDEN);
     if (msg && msg[0] != '\0') {
         lv_label_set_text_fmt(gui_busy_label, "%s\n%s", title, msg);
     } else {
@@ -146,6 +235,9 @@ gui_busy_handle_t gui_busy_show(const char * title, const char * msg) {
     lv_obj_add_flag(gui_busy_progress_bar, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(gui_busy_detail_label, "");
     lv_obj_add_flag(gui_busy_detail_label, LV_OBJ_FLAG_HIDDEN);
+#if defined(BOARD_TEMPOTEC_V1)
+    lv_obj_scroll_to_y(gui_busy_content, 0, LV_ANIM_OFF);
+#endif
     
     if (lv_screen_active() != gui_busy_screen) {
         nav_push(gui_busy_screen);
@@ -169,8 +261,21 @@ void gui_busy_set_detail(gui_busy_handle_t handle, const char * text) {
     lv_obj_remove_flag(gui_busy_detail_label, LV_OBJ_FLAG_HIDDEN);
 }
 
+void gui_busy_set_cancel(gui_busy_handle_t handle, void (*on_cancel)(void *), void * user) {
+    if (handle != gui_busy_current_token || !gui_busy_screen) return;
+    gui_busy_cancel_cb = on_cancel;
+    gui_busy_cancel_user = user;
+    if (on_cancel) lv_obj_remove_flag(gui_busy_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(gui_busy_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+}
+
+bool gui_busy_is_cancellable(void) {
+    return gui_busy_cancel_cb != NULL;
+}
+
 static void gui_busy_hide_internal(gui_busy_handle_t handle, bool immediate) {
     if (handle != gui_busy_current_token || !gui_busy_screen) return;
+    gui_busy_cancel_cb = NULL; /* dismissed by the owner, not cancelled */
     if (lv_screen_active() == gui_busy_screen) {
         if (immediate) nav_pop_immediate();
         else nav_pop();

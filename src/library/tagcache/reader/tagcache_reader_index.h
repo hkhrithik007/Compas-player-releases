@@ -1,23 +1,16 @@
 /* Seekable derived orders and memberships use generation-local files. */
-static void reader_close_indexes(void);
 static int32_t legacy_find_path(const char *path);
-static bool legacy_order_song(bool recency, int32_t rank, tagcache_song_t *out);
 static int32_t legacy_rank_of(int32_t slot, bool recency);
-static int legacy_group_count(int kind);
 static bool legacy_group_at(int kind, int index, tagcache_group_t *out);
 static int legacy_group_index(int kind, const char *name, const char *aa);
 static int legacy_group_ids(int kind, int gi, int offset, int32_t *ids, int max);
 
 #define TC_INDEX_MAGIC 0x54434931u
-#define TC_INDEX_VERSION TAGCACHE_DATABASE_FORMAT
 #define TC_ALBUM_ORDER_MAGIC 0x5443414fu
 #define TC_ALBUM_ORDER_VERSION 4u
-static bool reader_build_indexes(void);
-static bool reader_migrate_indexes(int32_t gen);
+static bool reader_join_restore(void);
 static void tc_index_name(char *out, size_t out_size, int32_t gen, const char *suffix);
 static bool tc_index_copy_fd(int from, int to, uint64_t *size_out);
-static int reader_group_index(int kind, const char *name, const char *aa);
-static bool reader_group_at(int kind, int index, tagcache_group_t *out);
 
 typedef struct { int32_t canonical_rank, value, album_artist_rank; } reader_album_order_key_t;
 
@@ -54,6 +47,7 @@ static void reader_album_order_name(char *out, size_t size, int32_t gen, int sor
 }
 
 static void reader_close_album_orders(void) {
+    READER->album_year_known_count = -1;
     for (int i = 0; i < 3; i++) {
         if (reader_album_order_fd[i] >= 0) close(reader_album_order_fd[i]);
         if (reader_album_inverse_fd[i] >= 0) close(reader_album_inverse_fd[i]);
@@ -72,7 +66,7 @@ static void reader_open_album_orders(int32_t gen, uint32_t index_version) {
     if (fd < 0) return; /* Older valid generations retain alphabetical browsing. */
     struct stat st;
     bool valid = fstat(fd, &st) == 0 && st.st_size == (off_t)sizeof(meta) &&
-                 reader_read_at(fd, &meta, sizeof(meta), 0) && meta.magic == TC_ALBUM_ORDER_MAGIC &&
+                 tc_read_full(fd, &meta, sizeof(meta), 0) && meta.magic == TC_ALBUM_ORDER_MAGIC &&
                  (index_version >= 6u ?
                   meta.version == (index_version >= 7u ? TC_ALBUM_ORDER_VERSION : 3u) :
                   meta.version == 1u || meta.version == 2u) &&
@@ -97,11 +91,11 @@ static void reader_open_album_orders(int32_t gen, uint32_t index_version) {
         }
         for (int32_t rank = 0; rank < meta.count; rank++) {
             int32_t canonical, inverse_rank;
-            bool row_ok = reader_read_at(reader_album_order_fd[i], &canonical, sizeof(canonical),
+            bool row_ok = tc_read_full(reader_album_order_fd[i], &canonical, sizeof(canonical),
                                          (off_t)rank * sizeof(canonical)) && canonical >= 0 &&
                           canonical < meta.count;
             if (row_ok) {
-                row_ok = reader_read_at(reader_album_inverse_fd[i], &inverse_rank, sizeof(inverse_rank),
+                row_ok = tc_read_full(reader_album_inverse_fd[i], &inverse_rank, sizeof(inverse_rank),
                                         (off_t)canonical * sizeof(inverse_rank)) && inverse_rank == rank;
             }
             if (!row_ok) {
@@ -171,7 +165,7 @@ static size_t mem_available_bytes(void) {
     return 256ull * 1024ull * 1024ull;
 }
 
-static bool choose_intern_strings(int32_t n) {
+bool choose_intern_strings(int32_t n) {
     const char * env = getenv("TAGCACHE_FORCE_COMPACT");
     if (env && env[0] && env[0] != '0') return false;
     env = getenv("TAGCACHE_FORCE_INTERN");
@@ -182,55 +176,44 @@ static bool choose_intern_strings(int32_t n) {
     return full + (16ull * 1024ull * 1024ull) <= avail;
 }
 
-struct tc_index_meta {
-    uint32_t magic;
-    uint32_t version;
-    int32_t generation, serial, commitid;
-    int32_t entry_count;
-    int32_t live_entries;
-    int32_t group_count[3];
-    uint64_t size[18];
+enum tc_index_component {
+    TC_IX_TITLE, TC_IX_RECENCY, TC_IX_PATH, TC_IX_RANK0, TC_IX_RANK1,
+    TC_IX_GROUP0, TC_IX_GROUP1, TC_IX_GROUP2,
+    TC_IX_MEMBER0, TC_IX_MEMBER1, TC_IX_MEMBER2,
+    TC_IX_COMPACT_RECENCY, TC_IX_COMPACT_RANK,
+    TC_IX_COMPACT_MEMBER0, TC_IX_COMPACT_MEMBER1, TC_IX_COMPACT_MEMBER2,
+    TC_IX_ARTIST_NAMES, TC_IX_COMPACT_ARTIST_NAMES, TC_IX_COUNT
 };
 
-static const char *tc_index_suffixes[18] = {
+static const uint8_t tc_ix_compact_of[11] = {
+    TC_IX_TITLE, TC_IX_COMPACT_RECENCY, TC_IX_PATH, TC_IX_RANK0, TC_IX_COMPACT_RANK,
+    TC_IX_GROUP0, TC_IX_GROUP1, TC_IX_GROUP2,
+    TC_IX_COMPACT_MEMBER0, TC_IX_COMPACT_MEMBER1, TC_IX_COMPACT_MEMBER2
+};
+
+static const char *tc_index_suffixes[TC_IX_COUNT] = {
     ".title", ".recency", ".path", ".rank0", ".rank1",
     ".group0", ".group1", ".group2", ".member0", ".member1", ".member2",
     ".compact_recency", ".compact_rank", ".compact_member0", ".compact_member1", ".compact_member2", ".artist_names", ".compact_artist_names"
 };
 
-static const char *reader_index_component_suffix(int component, uint32_t version) {
-    if (version >= 7u) {
-        static const char *v7_suffixes[18] = {
-            ".title.v7", ".recency.v7", ".path.v7", ".rank0.v7", ".rank1.v7",
-            ".group0.v7", ".group1.v7", ".group2.v7", ".member0.v7", ".member1.v7",
-            ".member2.v7", ".compact_recency.v7", ".compact_rank.v7", ".compact_member0.v7",
-            ".compact_member1.v7", ".compact_member2.v7", ".artist_names.v7", ".compact_artist_names.v7"
-        };
-        return component >= 0 && component < 18 ? v7_suffixes[component] : ".invalid.v7";
-    }
-    if (version >= 6u) {
-        static const char *v6_suffixes[18] = {
-            ".title.v6", ".recency.v6", ".path.v6", ".rank0.v6", ".rank1.v6",
-            ".group0.v6", ".group1.v6", ".group2.v6", ".member0.v6", ".member1.v6",
-            ".member2.v6", ".compact_recency.v6", ".compact_rank.v6", ".compact_member0.v6",
-            ".compact_member1.v6", ".compact_member2.v6", ".artist_names.v6", ".compact_artist_names.v6"
-        };
-        return component >= 0 && component < 18 ? v6_suffixes[component] : ".invalid.v6";
-    }
-    if (version >= 5u && component == 0) return ".title.v5";
-    if (version >= 5u && component == 3) return ".rank0.v5";
-    return tc_index_suffixes[component];
+static const char *tc_index_version_ending(uint32_t version, bool v5) {
+    return version >= 7u ? ".v7" : version >= 6u ? ".v6" :
+           version >= 5u && v5 ? ".v5" : "";
+}
+
+static void tc_index_component_name(char *out, size_t n, int32_t gen, int component,
+                                    uint32_t version) {
+    char suffix[64];
+    snprintf(suffix, sizeof(suffix), "%s%s", tc_index_suffixes[component],
+             tc_index_version_ending(version, component == TC_IX_TITLE || component == TC_IX_RANK0));
+    tc_index_name(out, n, gen, suffix);
 }
 
 static void reader_query_index_name(char *out, size_t size, int32_t gen, uint32_t version) {
-    tc_index_name(out, size, gen, version >= 7u ? ".query.v7" : version >= 6u ? ".query.v6" :
-                                  version >= 5u ? ".query.v5" : ".query");
-}
-
-static const char *reader_artist_names_suffix(bool compact, uint32_t version) {
-    if (version >= 7u) return compact ? ".compact_artist_names.v7" : ".artist_names.v7";
-    if (version >= 6u) return compact ? ".compact_artist_names.v6" : ".artist_names.v6";
-    return compact ? tc_index_suffixes[17] : tc_index_suffixes[16];
+    char suffix[64];
+    snprintf(suffix, sizeof(suffix), ".query%s", tc_index_version_ending(version, true));
+    tc_index_name(out, size, gen, suffix);
 }
 
 static void tc_index_name(char *out, size_t out_size, int32_t gen, const char *suffix) {
@@ -260,10 +243,40 @@ static bool tc_index_copy_fd(int from, int to, uint64_t *size_out) {
     return true;
 }
 
+static void tc_unlink_with_tmp(int32_t gen, const char *suffix) {
+    char path[640], tmp[680];
+    tc_index_name(path, sizeof(path), gen, suffix);
+    unlink(path);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    unlink(tmp);
+}
+
+static void reader_unlink_version_set(int32_t gen, uint32_t version) {
+    char suffix[64];
+    for (int i = 0; i < TC_IX_COUNT; i++) {
+        bool v5 = i == TC_IX_TITLE || i == TC_IX_RANK0;
+        if (version == 5u && !v5) continue;
+        snprintf(suffix, sizeof(suffix), "%s%s", tc_index_suffixes[i],
+                 tc_index_version_ending(version, v5));
+        tc_unlink_with_tmp(gen, suffix);
+    }
+    snprintf(suffix, sizeof(suffix), ".query%s", tc_index_version_ending(version, true));
+    tc_unlink_with_tmp(gen, suffix);
+    if (version == 5u) return;
+    const char *extra[] = {".album_recent", ".album_recent_inverse", ".album_year",
+                           ".album_year_inverse", ".album_artist_year",
+                           ".album_artist_year_inverse", ".album_meta"};
+    for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
+        snprintf(suffix, sizeof(suffix), "%s%s", extra[i],
+                 version >= 7u ? ".v4" : version >= 6u ? ".v3" : "");
+        tc_unlink_with_tmp(gen, suffix);
+    }
+}
+
 /* Writes the derived reader files for a generation.  The caller must invoke
  * this before publishing the generation pointer. */
-static bool reader_write_indexes(int32_t gen) {
-    int src[11] = { reader_title_fd, reader_recency_fd, reader_path_fd,
+bool reader_write_indexes(int32_t gen) {
+    int src[TC_IX_COMPACT_RECENCY] = { reader_title_fd, reader_recency_fd, reader_path_fd,
                     reader_rank_fd[0], reader_rank_fd[1],
                     reader_group_fd[0], reader_group_fd[1], reader_group_fd[2],
                     reader_members_fd[0], reader_members_fd[1], reader_members_fd[2] };
@@ -283,10 +296,10 @@ static bool reader_write_indexes(int32_t gen) {
     int mfd = open(tmp, O_CREAT | O_TRUNC | O_WRONLY, 0644);
     if (mfd < 0) return false;
     bool ok = true;
-    for (int i = 0; i < 11 && ok; i++) {
+    for (int i = 0; i < TC_IX_COMPACT_RECENCY && ok; i++) {
         if (src[i] < 0) { ok = false; break; }
         char name[640], name_tmp[680];
-        tc_index_name(name, sizeof(name), gen, reader_index_component_suffix(i, TC_INDEX_VERSION));
+        tc_index_component_name(name, sizeof(name), gen, i, TC_INDEX_VERSION);
         snprintf(name_tmp, sizeof(name_tmp), "%s.tmp", name);
         int out = open(name_tmp, O_CREAT | O_TRUNC | O_WRONLY, 0644);
         if (out < 0) { ok = false; break; }
@@ -298,9 +311,9 @@ static bool reader_write_indexes(int32_t gen) {
     }
     if (ok) {
         char name[640];
-        tc_index_name(name, sizeof(name), gen, reader_artist_names_suffix(false, TC_INDEX_VERSION));
+        tc_index_component_name(name, sizeof(name), gen, TC_IX_ARTIST_NAMES, TC_INDEX_VERSION);
         int out = open(name, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-        ok = out >= 0 && tc_index_copy_fd(reader_artist_names_fd, out, &meta.size[16]);
+        ok = out >= 0 && tc_index_copy_fd(reader_artist_names_fd, out, &meta.size[TC_IX_ARTIST_NAMES]);
         if (out >= 0 && !close_synced(out)) ok = false;
     }
     if (ok) {
@@ -315,21 +328,25 @@ static bool reader_write_indexes(int32_t gen) {
         ok = reader_build_indexes();
         reader_compact_sort = false;
     }
-    int compact_src[5] = { reader_recency_fd, reader_rank_fd[1],
-        reader_members_fd[0], reader_members_fd[1], reader_members_fd[2] };
-    for (int i = 0; ok && i < 5; i++) {
+    const struct { enum tc_index_component component; int fd; } compact_src[] = {
+        { TC_IX_COMPACT_RECENCY, reader_recency_fd }, { TC_IX_COMPACT_RANK, reader_rank_fd[1] },
+        { TC_IX_COMPACT_MEMBER0, reader_members_fd[0] }, { TC_IX_COMPACT_MEMBER1, reader_members_fd[1] },
+        { TC_IX_COMPACT_MEMBER2, reader_members_fd[2] }
+    };
+    for (size_t i = 0; ok && i < sizeof(compact_src) / sizeof(compact_src[0]); i++) {
+        int component = compact_src[i].component;
         char name[640];
-        tc_index_name(name, sizeof(name), gen, reader_index_component_suffix(11 + i, TC_INDEX_VERSION));
+        tc_index_component_name(name, sizeof(name), gen, component, TC_INDEX_VERSION);
         int out = open(name, O_CREAT | O_TRUNC | O_WRONLY, 0644);
         if (out < 0) { ok = false; break; }
-        ok = tc_index_copy_fd(compact_src[i], out, &meta.size[11 + i]);
+        ok = tc_index_copy_fd(compact_src[i].fd, out, &meta.size[component]);
         if (!close_synced(out)) ok = false;
     }
     if (ok) {
         char name[640];
-        tc_index_name(name, sizeof(name), gen, reader_artist_names_suffix(true, TC_INDEX_VERSION));
+        tc_index_component_name(name, sizeof(name), gen, TC_IX_COMPACT_ARTIST_NAMES, TC_INDEX_VERSION);
         int out = open(name, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-        ok = out >= 0 && tc_index_copy_fd(reader_artist_names_fd, out, &meta.size[17]);
+        ok = out >= 0 && tc_index_copy_fd(reader_artist_names_fd, out, &meta.size[TC_IX_COMPACT_ARTIST_NAMES]);
         if (out >= 0 && !close_synced(out)) ok = false;
     }
     if (ok) ok = reader_write_album_orders(gen);
@@ -344,30 +361,39 @@ static bool reader_write_indexes(int32_t gen) {
     if (ok) (void)library_fsync_dir(db_dir);
     if (!ok) {
         unlink(tmp);
-        char query_path[640];
-        reader_query_index_name(query_path, sizeof(query_path), gen, TC_INDEX_VERSION);
-        unlink(query_path);
-        for (int i = 0; i < 18; i++) {
-            char name[640];
-            tc_index_name(name, sizeof(name), gen, reader_index_component_suffix(i, TC_INDEX_VERSION));
-            unlink(name);
-        }
-        const char *extra[] = {".album_recent.v4", ".album_recent_inverse.v4", ".album_year.v4",
-                               ".album_year_inverse.v4", ".album_artist_year.v4",
-                               ".album_artist_year_inverse.v4", ".album_meta.v4"};
-        for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
-            tc_index_name(path, sizeof(path), gen, extra[i]);
-            unlink(path);
-            snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-            unlink(tmp);
-        }
+        reader_unlink_version_set(gen, TC_INDEX_VERSION);
     }
     return ok;
 }
 
+static bool reader_index_meta_valid(const struct tc_index_meta *m, int32_t gen) {
+    if (m->magic != TC_INDEX_MAGIC ||
+        (m->version != 3u && m->version != 4u && m->version != 5u && m->version != 6u &&
+         m->version != 7u && m->version != TC_INDEX_VERSION) ||
+        m->generation != gen || m->serial != master_serial || m->commitid != master_commitid ||
+        m->entry_count != ent_count || m->live_entries < 0 || m->live_entries > ent_count)
+        return false;
+    if (m->size[TC_IX_TITLE] != (uint64_t)m->live_entries * 4 || m->size[TC_IX_RECENCY] != m->size[TC_IX_TITLE] ||
+        m->size[TC_IX_PATH] != (uint64_t)m->live_entries * 8 ||
+        m->size[TC_IX_RANK0] != (uint64_t)ent_count * 4 || m->size[TC_IX_RANK1] != m->size[TC_IX_RANK0]) return false;
+    for (int k = 0; k < 3; k++) {
+        uint64_t member_max = (uint64_t)m->live_entries * (k == TAGCACHE_GROUP_ARTIST ? TAGCACHE_ARTIST_SPLIT_MAX : 1);
+        if (m->group_count[k] < 0 || (uint64_t)m->group_count[k] > member_max ||
+            m->size[TC_IX_GROUP0 + k] != (uint64_t)m->group_count[k] * 20 ||
+            m->size[TC_IX_MEMBER0 + k] % 4 || m->size[TC_IX_MEMBER0 + k] < (uint64_t)m->live_entries * 4 ||
+            m->size[TC_IX_MEMBER0 + k] > member_max * 4) return false;
+    }
+    for (int i = 0; i < TC_IX_COMPACT_RECENCY; i++)
+        if (m->size[tc_ix_compact_of[i]] != m->size[i]) return false;
+    for (int i = TC_IX_ARTIST_NAMES; i < TC_IX_COUNT; i++)
+        if (m->size[i] < (uint64_t)m->group_count[0] * 5 ||
+            m->size[i] > (uint64_t)m->group_count[0] * (TAGCACHE_PATH_MAX + 4)) return false;
+    return true;
+}
+
 /* Returns 1 for a valid persisted index, 0 when it is absent (legacy
  * generation), and -1 when the index is present but malformed. */
-static int reader_open_indexes(int32_t gen) {
+int reader_open_indexes(int32_t gen) {
     struct tc_index_meta meta;
     char path[640];
     snprintf(path, sizeof(path), "%s/database_idx.tcd.g%d.imeta", db_dir, gen);
@@ -375,50 +401,25 @@ static int reader_open_indexes(int32_t gen) {
     if (mfd < 0) return errno == ENOENT ? 0 : -1;
     struct stat metadata_stat;
     if (fstat(mfd, &metadata_stat) != 0 || metadata_stat.st_size != (off_t)sizeof(meta) ||
-        !reader_read_at(mfd, &meta, sizeof(meta), 0)) {
+        !tc_read_full(mfd, &meta, sizeof(meta), 0)) {
         close(mfd);
         return -1;
     }
     close(mfd);
-    if (meta.magic != TC_INDEX_MAGIC ||
-        (meta.version != 3u && meta.version != 4u && meta.version != 5u && meta.version != 6u &&
-         meta.version != TC_INDEX_VERSION) ||
-        meta.generation != gen || meta.serial != master_serial || meta.commitid != master_commitid ||
-        meta.entry_count != ent_count || meta.live_entries < 0 || meta.live_entries > ent_count)
-        return -1;
-    if (meta.size[0] != (uint64_t)meta.live_entries * 4 || meta.size[1] != meta.size[0] ||
-        meta.size[2] != (uint64_t)meta.live_entries * 8 ||
-        meta.size[3] != (uint64_t)ent_count * 4 || meta.size[4] != meta.size[3]) return -1;
-    for (int k = 0; k < 3; k++) {
-        uint64_t member_max = (uint64_t)meta.live_entries * (k == TAGCACHE_GROUP_ARTIST ? TAGCACHE_ARTIST_SPLIT_MAX : 1);
-        if (meta.group_count[k] < 0 || (uint64_t)meta.group_count[k] > member_max ||
-            meta.size[5 + k] != (uint64_t)meta.group_count[k] * 20 ||
-            meta.size[8 + k] % 4 || meta.size[8 + k] < (uint64_t)meta.live_entries * 4 ||
-            meta.size[8 + k] > member_max * 4) return -1;
-    }
-    if (meta.size[11] != meta.size[1] || meta.size[12] != meta.size[4] ||
-        meta.size[13] != meta.size[8] || meta.size[14] != meta.size[9] || meta.size[15] != meta.size[10]) return -1;
-    for (int i = 16; i < 18; i++)
-        if (meta.size[i] < (uint64_t)meta.group_count[0] * 5 ||
-            meta.size[i] > (uint64_t)meta.group_count[0] * (TAGCACHE_PATH_MAX + 4)) return -1;
+    if (!reader_index_meta_valid(&meta, gen)) return -1;
     reader_compact_order = !choose_intern_strings(ent_count);
-    for (int i = 0; i < 18; i++) {
+    for (int i = 0; i < TC_IX_COUNT; i++) {
         struct stat component_stat;
-        tc_index_name(path, sizeof(path), gen, reader_index_component_suffix(i, meta.version));
+        tc_index_component_name(path, sizeof(path), gen, i, meta.version);
         if (stat(path, &component_stat) != 0 || (uint64_t)component_stat.st_size != meta.size[i]) return -1;
     }
-    int *dst[11] = { &reader_title_fd, &reader_recency_fd, &reader_path_fd,
+    int *dst[TC_IX_COMPACT_RECENCY] = { &reader_title_fd, &reader_recency_fd, &reader_path_fd,
                      &reader_rank_fd[0], &reader_rank_fd[1],
                      &reader_group_fd[0], &reader_group_fd[1], &reader_group_fd[2],
                      &reader_members_fd[0], &reader_members_fd[1], &reader_members_fd[2] };
-    for (int i = 0; i < 11; i++) {
-        int component = i;
-        if (reader_compact_order) {
-            if (i == 1) component = 11;
-            else if (i == 4) component = 12;
-            else if (i >= 8) component = i + 5;
-        }
-        tc_index_name(path, sizeof(path), gen, reader_index_component_suffix(component, meta.version));
+    for (int i = 0; i < TC_IX_COMPACT_RECENCY; i++) {
+        int component = reader_compact_order ? tc_ix_compact_of[i] : i;
+        tc_index_component_name(path, sizeof(path), gen, component, meta.version);
         int fd = open(path, O_RDONLY);
         struct stat st;
         if (fd < 0 || fstat(fd, &st) != 0 || (uint64_t)st.st_size != meta.size[i]) {
@@ -428,12 +429,13 @@ static int reader_open_indexes(int32_t gen) {
         }
         *dst[i] = fd;
     }
-    tc_index_name(path, sizeof(path), gen,
-                  reader_artist_names_suffix(reader_compact_order, meta.version));
+    tc_index_component_name(path, sizeof(path), gen,
+                            reader_compact_order ? TC_IX_COMPACT_ARTIST_NAMES : TC_IX_ARTIST_NAMES, meta.version);
     reader_artist_names_fd = open(path, O_RDONLY);
     if (reader_artist_names_fd < 0) { reader_close_indexes(); return -1; }
     live_count = meta.live_entries;
     for (int k = 0; k < 3; k++) reader_group_n[k] = meta.group_count[k];
+    if (meta.version >= 8u && !reader_join_restore()) { reader_close_indexes(); return -1; }
     if (meta.version >= 4u) {
         struct stat st;
         reader_query_index_name(path, sizeof(path), gen, meta.version);
@@ -451,64 +453,15 @@ static int reader_open_indexes(int32_t gen) {
     return 1;
 }
 
-static void reader_unlink_indexes(int32_t gen) {
-    char path[640], tmp[680];
-    for (int i = 0; i < 20; i++) {
-        tc_index_name(path, sizeof(path), gen, i == 19 ? ".query" : i == 18 ? ".meta" : tc_index_suffixes[i]);
-        unlink(path);
-        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-        unlink(tmp);
-    }
-    const char *extra[] = {".album_recent", ".album_recent_inverse", ".album_year",
-                           ".album_year_inverse", ".album_artist_year",
-                           ".album_artist_year_inverse", ".album_meta"};
-    for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++) {
-        tc_index_name(path, sizeof(path), gen, extra[i]);
-        unlink(path);
-        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-        unlink(tmp);
-    }
-    const char *versioned[] = {".title.v5", ".rank0.v5", ".query.v5"};
-    for (size_t i = 0; i < sizeof(versioned) / sizeof(versioned[0]); i++) {
-        tc_index_name(path, sizeof(path), gen, versioned[i]);
-        unlink(path);
-        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-        unlink(tmp);
-    }
-    for (int i = 0; i < 18; i++) {
-        tc_index_name(path, sizeof(path), gen, reader_index_component_suffix(i, 6u));
-        unlink(path);
-        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-        unlink(tmp);
-    }
-    const char *v6_extra[] = {".query.v6", ".artist_names.v6", ".compact_artist_names.v6",
-        ".album_recent.v3", ".album_recent_inverse.v3", ".album_year.v3",
-        ".album_year_inverse.v3", ".album_artist_year.v3", ".album_artist_year_inverse.v3",
-        ".album_meta.v3"};
-    for (size_t i = 0; i < sizeof(v6_extra) / sizeof(v6_extra[0]); i++) {
-        tc_index_name(path, sizeof(path), gen, v6_extra[i]);
-        unlink(path);
-        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-        unlink(tmp);
-    }
-    for (int i = 0; i < 18; i++) {
-        tc_index_name(path, sizeof(path), gen, reader_index_component_suffix(i, 7u));
-        unlink(path);
-        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-        unlink(tmp);
-    }
-    const char *v7_extra[] = {".query.v7", ".album_recent.v4", ".album_recent_inverse.v4",
-        ".album_year.v4", ".album_year_inverse.v4", ".album_artist_year.v4",
-        ".album_artist_year_inverse.v4", ".album_meta.v4"};
-    for (size_t i = 0; i < sizeof(v7_extra) / sizeof(v7_extra[0]); i++) {
-        tc_index_name(path, sizeof(path), gen, v7_extra[i]);
-        unlink(path);
-        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-        unlink(tmp);
-    }
+void reader_unlink_indexes(int32_t gen) {
+    tc_unlink_with_tmp(gen, ".meta");
+    reader_unlink_version_set(gen, 3u);
+    reader_unlink_version_set(gen, 5u);
+    reader_unlink_version_set(gen, 6u);
+    reader_unlink_version_set(gen, 7u);
 }
 
-static int reader_create_temp(void) {
+int reader_create_temp(void) {
     char path[640];
     int n = snprintf(path, sizeof(path), "%s/.tagcache-work-XXXXXX", db_dir);
     if (n < 0 || (size_t) n >= sizeof(path)) return -1;
@@ -517,7 +470,7 @@ static int reader_create_temp(void) {
     return fd;
 }
 
-static void reader_close_indexes(void) {
+void reader_close_indexes(void) {
     reader_close_album_orders();
     int *single[] = {&reader_query_fd, &reader_title_fd, &reader_recency_fd, &reader_path_fd, &reader_artist_names_fd};
     for (size_t i = 0; i < sizeof(single) / sizeof(single[0]); i++) {
@@ -562,7 +515,7 @@ static int split_artist(const char *raw, char names[TAGCACHE_ARTIST_SPLIT_MAX][T
     return n;
 }
 
-bool tagcache_artist_matches(const char *raw, const char *name) {
+static bool tagcache_artist_matches(const char *raw, const char *name) {
     char names[TAGCACHE_ARTIST_SPLIT_MAX][TAGCACHE_PATH_MAX];
     int n = split_artist(raw, names);
     for (int i = 0; i < n; i++) if (ascii_casecmp(names[i], name ? name : "") == 0) return true;
@@ -589,7 +542,7 @@ void tagcache_artist_primary(const char *raw, char *out, size_t size) {
     snprintf(out, size, "%s", names[0]);
 }
 
-static void reader_reset_cache(void) {
+void reader_reset_cache(void) {
     for (int i = 0; i < READER_SORT_CACHE_ROWS; i++) {
         reader_sort_cache[i].valid = false;
         reader_sort_cache[i].loaded = 0;
@@ -741,7 +694,10 @@ static void reader_member_names(int kind, const reader_member_t *member, const t
     if (kind == TAGCACHE_GROUP_ARTIST) {
         char names[TAGCACHE_ARTIST_SPLIT_MAX][TAGCACHE_PATH_MAX];
         int n = split_artist(song->artist, names);
-        snprintf(name, TAGCACHE_PATH_MAX, "%s", member->ordinal >= 0 && member->ordinal < n ? names[member->ordinal] : "");
+        const char *picked = "";
+        if (member->ordinal >= 0 && member->ordinal < n && member->ordinal < TAGCACHE_ARTIST_SPLIT_MAX)
+            picked = names[member->ordinal];
+        snprintf(name, TAGCACHE_PATH_MAX, "%.*s", TAGCACHE_PATH_MAX - 1, picked); /* rows are PATH_MAX-sized */
     } else if (kind == TAGCACHE_GROUP_ALBUM_ARTIST) {
         snprintf(name, TAGCACHE_PATH_MAX, "%s", song->album_artist);
     } else {
@@ -900,8 +856,9 @@ static int reader_compare_member(const void *a, const void *b, void *context) {
     return c ? c : (ma->slot > mb->slot) - (ma->slot < mb->slot);
 }
 
-static bool reader_write_group(int kind, const reader_group_record_t *record) {
+static bool reader_write_group(int kind, const reader_group_record_t *record, bool joined) {
     reader_group_record_t group = *record;
+    if (kind == TAGCACHE_GROUP_ALBUM_ARTIST) group.representative.ordinal = joined; /* join mark, see tagcache_reader_join.h */
     if (kind == TAGCACHE_GROUP_ARTIST) {
         tagcache_song_t song;
         char name[TAGCACHE_PATH_MAX], aa[TAGCACHE_PATH_MAX], canonical[TAGCACHE_PATH_MAX];
@@ -918,7 +875,7 @@ static bool reader_write_group(int kind, const reader_group_record_t *record) {
             !write_fully(reader_artist_names_fd, value, (size_t)length)) return false;
         group.representative = (reader_member_t){ (int32_t)position, -1 };
     }
-    if (!tc_sort_io_write(reader_group_fd[kind], &group, sizeof(group),
+    if (!write_at(reader_group_fd[kind], &group, sizeof(group),
                           (off_t)reader_group_n[kind] * sizeof(group))) return false;
     reader_group_n[kind]++;
     return true;
@@ -967,7 +924,7 @@ static bool reader_build_groups(int kind, int scratch) {
                 batch_used++;
                 count++;
                 if (batch_used == sort_batch_capacity) {
-                    ok = tc_sort_io_write(sort_keys, batch, batch_used * sort_record_size,
+                    ok = write_at(sort_keys, batch, batch_used * sort_record_size,
                                           (off_t)(count - (int64_t)batch_used) * (off_t)sort_record_size);
                     if (ok) batch_used = 0;
                 }
@@ -975,7 +932,7 @@ static bool reader_build_groups(int kind, int scratch) {
         }
     }
     if (ok && batch_used != 0)
-        ok = tc_sort_io_write(sort_keys, batch, batch_used * sort_record_size,
+        ok = write_at(sort_keys, batch, batch_used * sort_record_size,
                               (off_t)(count - (int64_t)batch_used) * (off_t)sort_record_size);
     free(batch);
     batch = NULL;
@@ -989,19 +946,20 @@ static bool reader_build_groups(int kind, int scratch) {
         size_t n = (size_t)(count - at);
         size_t capacity = READER_TEMP_BATCH_BYTES / sort_record_size;
         if (n > capacity) n = capacity;
-        ok = stats_read_at(sort_keys, batch, n * sort_record_size, (off_t)at * (off_t)sort_record_size) == STATS_READ_OK;
+        ok = tc_read_full(sort_keys, batch, n * sort_record_size, (off_t)at * (off_t)sort_record_size);
         if (ok) {
             for (size_t j = 0; j < n; j++) {
                 reader_member_t member;
                 memcpy(&member, batch + j * sort_record_size, sizeof(member));
                 memcpy(batch + j * sizeof(member), &member, sizeof(member));
             }
-            ok = tc_sort_io_write(keys, batch, n * sizeof(reader_member_t),
+            ok = write_at(keys, batch, n * sizeof(reader_member_t),
                                   (off_t)at * (off_t)sizeof(reader_member_t));
         }
         at += (int64_t)n;
     }
     reader_group_record_t group = {0};
+    bool joined = false;
     char previous[TAGCACHE_PATH_MAX] = "", previous_aa[TAGCACHE_PATH_MAX] = "";
     unsigned name_fields = kind == TAGCACHE_GROUP_ARTIST ? TAGCACHE_FIELD_ARTIST :
         kind == TAGCACHE_GROUP_ALBUM_ARTIST ? TAGCACHE_FIELD_ALBUM_ARTIST :
@@ -1010,8 +968,8 @@ static bool reader_build_groups(int kind, int scratch) {
     for (int64_t at = 0; ok && at < count;) {
         size_t n = (size_t)(count - at);
         if (n > member_batch_capacity) n = member_batch_capacity;
-        ok = stats_read_at(keys, batch, n * sizeof(reader_member_t),
-                           (off_t)at * (off_t)sizeof(reader_member_t)) == STATS_READ_OK;
+        ok = tc_read_full(keys, batch, n * sizeof(reader_member_t),
+                           (off_t)at * (off_t)sizeof(reader_member_t));
         for (size_t j = 0; ok && j < n; j++) {
             reader_member_t member;
             tagcache_song_t song;
@@ -1021,12 +979,14 @@ static bool reader_build_groups(int kind, int scratch) {
             if (!ok) break;
             reader_member_names(kind, &member, &song, name, aa);
             if (!group.count || ascii_casecmp(previous, name) || ascii_casecmp(previous_aa, aa)) {
-                if (group.count) ok = reader_write_group(kind, &group);
+                if (group.count) ok = reader_write_group(kind, &group, joined);
                 group = (reader_group_record_t) {member, member.slot + 1, 0, (int32_t)(at + (int64_t)j)};
+                joined = false;
                 snprintf(previous, sizeof(previous), "%s", name);
                 snprintf(previous_aa, sizeof(previous_aa), "%s", aa);
             }
             group.count++;
+            joined |= reader_join_marked(member.slot);
             if (member.slot + 1 < group.first_id) {
                 group.first_id = member.slot + 1;
                 group.representative = member;
@@ -1034,11 +994,11 @@ static bool reader_build_groups(int kind, int scratch) {
             int32_t id = member.slot + 1;
             memcpy(batch + j * sizeof(id), &id, sizeof(id));
         }
-        if (ok) ok = tc_sort_io_write(reader_members_fd[kind], batch, n * sizeof(int32_t),
+        if (ok) ok = write_at(reader_members_fd[kind], batch, n * sizeof(int32_t),
                                       (off_t)at * (off_t)sizeof(int32_t));
         at += (int64_t)n;
     }
-    if (ok && group.count) ok = reader_write_group(kind, &group);
+    if (ok && group.count) ok = reader_write_group(kind, &group, joined);
     free(batch);
     if (keys >= 0) close(keys);
     if (sort_keys >= 0) close(sort_keys);
@@ -1046,6 +1006,7 @@ static bool reader_build_groups(int kind, int scratch) {
 }
 
 static bool reader_build_album_order(int sort, int scratch) {
+    READER->album_year_known_count = -1;
     int count = reader_group_n[TAGCACHE_GROUP_ALBUM];
     int keys = reader_create_temp();
     reader_album_order_fd[sort] = reader_create_temp();
@@ -1059,8 +1020,8 @@ static bool reader_build_album_order(int sort, int scratch) {
     size_t used = 0;
     for (int rank = 0; ok && rank < count; rank++) {
         reader_group_record_t group;
-        if (stats_read_at(reader_group_fd[TAGCACHE_GROUP_ALBUM], &group, sizeof(group),
-                          (off_t)rank * sizeof(group)) != STATS_READ_OK) { ok = false; break; }
+        if (!tc_read_full(reader_group_fd[TAGCACHE_GROUP_ALBUM], &group, sizeof(group),
+                          (off_t)rank * sizeof(group))) { ok = false; break; }
         int32_t value = sort == 0 ? INT32_MIN : INT32_MAX;
         int32_t album_artist_rank = 0;
         if (sort == 2) {
@@ -1073,7 +1034,7 @@ static bool reader_build_album_order(int sort, int scratch) {
             int32_t id;
             struct index_entry idx;
             off_t member_off = (off_t)(group.start + member) * sizeof(id);
-            if (stats_read_at(reader_members_fd[TAGCACHE_GROUP_ALBUM], &id, sizeof(id), member_off) != STATS_READ_OK ||
+            if (!tc_read_full(reader_members_fd[TAGCACHE_GROUP_ALBUM], &id, sizeof(id), member_off) ||
                 id <= 0 || !reader_index(id - 1, &idx)) { ok = false; break; }
             if (sort == 0) {
                 if (idx.tag_seek[tag_commitid] > value) value = idx.tag_seek[tag_commitid];
@@ -1086,7 +1047,7 @@ static bool reader_build_album_order(int sort, int scratch) {
         batch[used++] = (reader_album_order_key_t){rank, value, album_artist_rank};
         if (used == capacity || rank + 1 == count) {
             off_t off = (off_t)(rank + 1 - (int)used) * sizeof(*batch);
-            ok = tc_sort_io_write(keys, batch, used * sizeof(*batch), off);
+            ok = write_at(keys, batch, used * sizeof(*batch), off);
             used = 0;
         }
     }
@@ -1102,13 +1063,13 @@ static bool reader_build_album_order(int sort, int scratch) {
     for (int rank = 0; ok && rank < count;) {
         size_t n = (size_t)(count - rank);
         if (n > read_capacity) n = read_capacity;
-        ok = stats_read_at(keys, batch, n * sizeof(*batch), (off_t)rank * sizeof(*batch)) == STATS_READ_OK;
+        ok = tc_read_full(keys, batch, n * sizeof(*batch), (off_t)rank * sizeof(*batch));
         for (size_t i = 0; ok && i < n; i++) {
             reader_album_order_key_t *key = &batch[i];
             int32_t sorted_rank = rank + (int32_t)i;
-            ok = tc_sort_io_write(reader_album_order_fd[sort], &key->canonical_rank,
+            ok = write_at(reader_album_order_fd[sort], &key->canonical_rank,
                                   sizeof(key->canonical_rank), (off_t)sorted_rank * sizeof(int32_t)) &&
-                 tc_sort_io_write(reader_album_inverse_fd[sort], &sorted_rank, sizeof(sorted_rank),
+                 write_at(reader_album_inverse_fd[sort], &sorted_rank, sizeof(sorted_rank),
                                   (off_t)key->canonical_rank * sizeof(int32_t));
         }
         rank += (int)n;
@@ -1118,12 +1079,12 @@ static bool reader_build_album_order(int sort, int scratch) {
     return ok;
 }
 
-static bool reader_build_indexes(void) {
+bool reader_build_indexes(void) {
     reader_close_indexes();
     /* Album-order construction already looks up the newly sorted groups. */
     reader_loaded_index_version = TC_INDEX_VERSION;
     reader_reset_cache();
-    if (!scan_intern_init(!reader_compact_sort)) return false;
+    if (!scan_intern_init()) return false;
     reader_artist_names_fd = reader_create_temp();
     reader_title_fd = reader_create_temp();
     reader_recency_fd = reader_create_temp();
@@ -1175,11 +1136,11 @@ static bool reader_build_indexes(void) {
         live_count++;
         if (batch_used == decorate_capacity) {
             off_t first = (off_t)(live_count - (int32_t)batch_used);
-            ok = tc_sort_io_write(title_keys, batch, batch_used * title_record_size,
+            ok = write_at(title_keys, batch, batch_used * title_record_size,
                                   first * (off_t)title_record_size) &&
-                 tc_sort_io_write(recency_keys, recency_batch, batch_used * recency_record_size,
+                 write_at(recency_keys, recency_batch, batch_used * recency_record_size,
                                   first * (off_t)recency_record_size) &&
-                 tc_sort_io_write(reader_path_fd, path_batch, batch_used * path_record_size,
+                 write_at(reader_path_fd, path_batch, batch_used * path_record_size,
                                   first * (off_t)path_record_size);
             if (ok) batch_used = 0;
         }
@@ -1188,11 +1149,11 @@ static bool reader_build_indexes(void) {
         unsigned char *recency_batch = batch + decorate_capacity * title_record_size;
         unsigned char *path_batch = recency_batch + decorate_capacity * recency_record_size;
         off_t first = (off_t)(live_count - (int32_t)batch_used);
-        ok = tc_sort_io_write(title_keys, batch, batch_used * title_record_size,
+        ok = write_at(title_keys, batch, batch_used * title_record_size,
                               first * (off_t)title_record_size) &&
-             tc_sort_io_write(recency_keys, recency_batch, batch_used * recency_record_size,
+             write_at(recency_keys, recency_batch, batch_used * recency_record_size,
                               first * (off_t)recency_record_size) &&
-             tc_sort_io_write(reader_path_fd, path_batch, batch_used * path_record_size,
+             write_at(reader_path_fd, path_batch, batch_used * path_record_size,
                               first * (off_t)path_record_size);
     }
     free(batch);
@@ -1212,10 +1173,10 @@ static bool reader_build_indexes(void) {
     for (int32_t rank = 0; ok && rank < live_count;) {
         size_t n = (size_t)(live_count - rank);
         if (n > writeback_capacity) n = writeback_capacity;
-        ok = stats_read_at(title_keys, title_batch, n * title_record_size,
-                           (off_t)rank * (off_t)title_record_size) == STATS_READ_OK &&
-             stats_read_at(recency_keys, recency_batch, n * recency_record_size,
-                           (off_t)rank * (off_t)recency_record_size) == STATS_READ_OK;
+        ok = tc_read_full(title_keys, title_batch, n * title_record_size,
+                           (off_t)rank * (off_t)title_record_size) &&
+             tc_read_full(recency_keys, recency_batch, n * recency_record_size,
+                           (off_t)rank * (off_t)recency_record_size);
         if (ok) {
             for (size_t j = 0; j < n; j++) {
                 int32_t slot;
@@ -1224,9 +1185,9 @@ static bool reader_build_indexes(void) {
                 memcpy(&slot, recency_batch + j * recency_record_size, sizeof(slot));
                 memcpy(recency_batch + j * sizeof(slot), &slot, sizeof(slot));
             }
-            ok = tc_sort_io_write(reader_title_fd, title_batch, n * sizeof(int32_t),
+            ok = write_at(reader_title_fd, title_batch, n * sizeof(int32_t),
                                   (off_t)rank * (off_t)sizeof(int32_t)) &&
-                 tc_sort_io_write(reader_recency_fd, recency_batch, n * sizeof(int32_t),
+                 write_at(reader_recency_fd, recency_batch, n * sizeof(int32_t),
                                   (off_t)rank * (off_t)sizeof(int32_t));
         }
         rank += (int32_t)n;
@@ -1236,9 +1197,9 @@ static bool reader_build_indexes(void) {
         ok = reader_rank_fd[kind] >= 0 && ftruncate(reader_rank_fd[kind], (off_t) ent_count * sizeof(int32_t)) == 0;
         for (int32_t rank = 0; ok && rank < live_count; rank++) {
             int32_t slot, stored = rank + 1;
-            ok = stats_read_at(kind ? reader_recency_fd : reader_title_fd, &slot, sizeof(slot),
-                               (off_t) rank * sizeof(slot)) == STATS_READ_OK &&
-                 tc_sort_io_write(reader_rank_fd[kind], &stored, sizeof(stored), (off_t) slot * sizeof(stored));
+            ok = tc_read_full(kind ? reader_recency_fd : reader_title_fd, &slot, sizeof(slot),
+                               (off_t) rank * sizeof(slot)) &&
+                 write_at(reader_rank_fd[kind], &stored, sizeof(stored), (off_t) slot * sizeof(stored));
         }
     }
     for (int kind = 0; ok && kind < 3; kind++) ok = reader_build_groups(kind, scratch);
@@ -1256,19 +1217,19 @@ static bool reader_build_indexes(void) {
     return ok;
 }
 
-/* Rebuild every derived component into the isolated v7 filename set. The
- * writer publishes the v7 metadata only after syncing the complete set, so
+/* Rebuild every derived component into the isolated v7+ filename set. The
+ * writer publishes the new metadata only after syncing the complete set, so
  * any failure leaves the prior v3-v6 metadata and files usable. */
-static bool reader_migrate_indexes(int32_t gen) {
-    if (reader_loaded_index_version >= TC_INDEX_VERSION) return true;
+bool reader_migrate_indexes(int32_t gen) {
+    if (reader_loaded_index_version >= TC_INDEX_MIGRATE_BELOW) return true;
     struct tc_index_meta old_meta;
     char meta_path[640], meta_tmp[680];
     int n = snprintf(meta_path, sizeof(meta_path), "%s/database_idx.tcd.g%d.imeta", db_dir, gen);
     if (n < 0 || (size_t)n >= sizeof(meta_path)) return false;
     int old_fd = open(meta_path, O_RDONLY);
-    bool have_old_meta = old_fd >= 0 && reader_read_at(old_fd, &old_meta, sizeof(old_meta), 0);
+    bool have_old_meta = old_fd >= 0 && tc_read_full(old_fd, &old_meta, sizeof(old_meta), 0);
     if (old_fd >= 0) close(old_fd);
-    if (!have_old_meta || old_meta.version >= TC_INDEX_VERSION) return false;
+    if (!have_old_meta || old_meta.version >= TC_INDEX_MIGRATE_BELOW) return false;
     reader_compact_sort = false;
     if (!reader_build_indexes()) {
         reader_close_indexes();
@@ -1297,18 +1258,18 @@ static bool reader_migrate_indexes(int32_t gen) {
     return false;
 }
 
-static int32_t reader_find_path(const char *path) {
+int32_t reader_find_path(const char *path) {
     if (reader_legacy_active) return legacy_find_path(path);
     uint32_t hash = fnv1a(path, strlen(path));
     int32_t lo = 0, hi = live_count;
     reader_path_key_t key;
     while (lo < hi) {
         int32_t mid = lo + (hi - lo) / 2;
-        if (stats_read_at(reader_path_fd, &key, sizeof(key), (off_t) mid * sizeof(key)) != STATS_READ_OK) return -1;
+        if (!tc_read_full(reader_path_fd, &key, sizeof(key), (off_t) mid * sizeof(key))) return -1;
         if (key.hash < hash) lo = mid + 1; else hi = mid;
     }
     for (; lo < live_count; lo++) {
-        if (stats_read_at(reader_path_fd, &key, sizeof(key), (off_t) lo * sizeof(key)) != STATS_READ_OK || key.hash != hash)
+        if (!tc_read_full(reader_path_fd, &key, sizeof(key), (off_t) lo * sizeof(key)) || key.hash != hash)
             break;
         struct index_entry idx;
         char value[TAGCACHE_PATH_MAX];
@@ -1319,27 +1280,27 @@ static int32_t reader_find_path(const char *path) {
     return -1;
 }
 
-static bool reader_order_song(int fd, bool recency, int32_t rank, tagcache_song_t *out) {
+bool reader_order_song(int fd, bool recency, int32_t rank, tagcache_song_t *out) {
     if (reader_legacy_active) return legacy_order_song(recency, rank, out);
     int32_t slot;
     return rank >= 0 && rank < live_count &&
-           stats_read_at(fd, &slot, sizeof(slot), (off_t) rank * sizeof(slot)) == STATS_READ_OK &&
+           tc_read_full(fd, &slot, sizeof(slot), (off_t) rank * sizeof(slot)) &&
            (out ? reader_song(slot, out) : true);
 }
 
-static bool reader_group_at(int kind, int index, tagcache_group_t *out) {
+bool reader_group_at(int kind, int index, tagcache_group_t *out) {
     if (reader_legacy_active) return legacy_group_at(kind, index, out);
     if (kind < 0 || kind > 2 || index < 0 || index >= reader_group_n[kind]) return false;
     reader_group_record_t group;
-    if (stats_read_at(reader_group_fd[kind], &group, sizeof(group), (off_t) index * sizeof(group)) != STATS_READ_OK)
+    if (!tc_read_full(reader_group_fd[kind], &group, sizeof(group), (off_t) index * sizeof(group)))
         return false;
     if (!out) return true;
     if (kind == TAGCACHE_GROUP_ARTIST) {
         int32_t length;
         if (group.representative.ordinal != -1 || group.representative.slot < 0 ||
-            !reader_read_at(reader_artist_names_fd, &length, sizeof(length), group.representative.slot) ||
+            !tc_read_full(reader_artist_names_fd, &length, sizeof(length), group.representative.slot) ||
             length <= 0 || (size_t)length > sizeof(out->name_storage) ||
-            !reader_read_at(reader_artist_names_fd, out->name_storage, (size_t)length,
+            !tc_read_full(reader_artist_names_fd, out->name_storage, (size_t)length,
                             (off_t)group.representative.slot + sizeof(length)) ||
             out->name_storage[length - 1] != '\0' || memchr(out->name_storage, '\0', (size_t)length - 1)) return false;
         out->album_artist_storage[0] = '\0';
@@ -1357,7 +1318,7 @@ static bool reader_group_at(int kind, int index, tagcache_group_t *out) {
     return true;
 }
 
-static int reader_group_index(int kind, const char *name, const char *aa) {
+int reader_group_index(int kind, const char *name, const char *aa) {
     if (reader_legacy_active) return legacy_group_index(kind, name, aa);
     if (kind < 0 || kind > 2) return -1;
     int lo = 0, hi = reader_group_n[kind];
@@ -1373,25 +1334,25 @@ static int reader_group_index(int kind, const char *name, const char *aa) {
     return -1;
 }
 
-static int reader_group_ids(int kind, int group_index, int offset, int32_t *ids, int max) {
+int reader_group_ids(int kind, int group_index, int offset, int32_t *ids, int max) {
     if (reader_legacy_active) return legacy_group_ids(kind, group_index, offset, ids, max);
     if (kind < 0 || kind > 2 || group_index < 0 || group_index >= reader_group_n[kind] || !ids || max <= 0) return 0;
     if (offset < 0) offset = 0;
     reader_group_record_t group;
-    if (stats_read_at(reader_group_fd[kind], &group, sizeof(group), (off_t) group_index * sizeof(group)) != STATS_READ_OK)
+    if (!tc_read_full(reader_group_fd[kind], &group, sizeof(group), (off_t) group_index * sizeof(group)))
         return 0;
     if (offset >= group.count) return 0;
     int n = group.count - offset;
     if (n > max) n = max;
-    if (stats_read_at(reader_members_fd[kind], ids, (size_t) n * sizeof(*ids),
-                      ((off_t) group.start + offset) * sizeof(*ids)) != STATS_READ_OK) return 0;
+    if (!tc_read_full(reader_members_fd[kind], ids, (size_t) n * sizeof(*ids),
+                      ((off_t) group.start + offset) * sizeof(*ids))) return 0;
     return n;
 }
 
-static int32_t reader_rank_of(int32_t slot, bool recency) {
+int32_t reader_rank_of(int32_t slot, bool recency) {
     if (reader_legacy_active) return legacy_rank_of(slot, recency);
     int32_t rank;
-    if (slot < 0 || slot >= ent_count || stats_read_at(reader_rank_fd[recency ? 1 : 0], &rank, sizeof(rank),
-                                                    (off_t) slot * sizeof(rank)) != STATS_READ_OK) return -1;
+    if (slot < 0 || slot >= ent_count || !tc_read_full(reader_rank_fd[recency ? 1 : 0], &rank, sizeof(rank),
+                                                    (off_t) slot * sizeof(rank))) return -1;
     return rank - 1;
 }

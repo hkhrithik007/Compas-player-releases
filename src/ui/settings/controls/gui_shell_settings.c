@@ -2,6 +2,7 @@
 
 #include "../../library/browse/gui_list_reorder.h"
 #include "../../shell/gui_navigation.h"
+#include "../../shell/gui_notifications.h"
 #include "../../shell/gui_reload.h"
 #include "../../shell/gui_shell.h"
 #include "../../appearance/gui_theme.h"
@@ -38,14 +39,32 @@ static lv_obj_t * settings_topbar_screen;
 static lv_obj_t * settings_topbar_list;
 static lv_obj_t * settings_topbar_clock_position_screen;
 static lv_obj_t * settings_topbar_clock_position_list;
+/* Both orders are saved as keys, so edit a resolved copy and write it back. */
+static ui_item_order_t order_edit;
+static char * ui_order_text(void) {
+    ui_customization_t * c = &current_settings.ui_customization;
+    return ui_order_kind == UI_ORDER_MUSIC ? c->music_order_text : c->drawer_order_text;
+}
 static ui_item_order_t * ui_saved_order(void) {
-    switch (ui_order_kind) {
-        case UI_ORDER_MUSIC: return &current_settings.ui_customization.music;
-        default: return &current_settings.ui_customization.drawer;
-    }
+    ui_order_resolve(ui_order_kind, ui_order_text(), &order_edit);
+    return &order_edit;
+}
+static void ui_order_store(void) {
+    char * text = ui_order_text();
+    char merged[UI_ORDER_TEXT_MAX];
+    if (ui_order_to_text(ui_order_kind, &order_edit, text, merged, sizeof(merged)))
+        memcpy(text, merged, sizeof(merged));
+    settings_save_async(&current_settings);
 }
 static void populate_ui_order_screen(void);
 static void ui_order_open_kind(ui_order_kind_t kind, const char * title);
+/* The drawer shows at most three rows of four; "plugins" only marks a place. */
+static bool drawer_full(const ui_item_order_t * order, int id) {
+    int anchor = ui_order_find_key(UI_ORDER_DRAWER, "plugins"), tiles = 0;
+    if (ui_order_kind != UI_ORDER_DRAWER || id == anchor) return false;
+    for (unsigned i = 0; i < order->count; ++i) tiles += order->ids[i] != anchor;
+    return tiles >= UI_DRAWER_MAX_TILES;
+}
 static void ui_order_control_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
     if (ui_order_drag_state.active) gui_list_reorder_finish(&ui_order_drag_state, false);
@@ -57,12 +76,17 @@ static void ui_order_control_cb(lv_event_t * e) {
     int at = -1;
     for (unsigned i = 0; i < saved_count; ++i)
         if (order->ids[i] == id) { at = (int)i; break; }
+    if (at < 0 && drawer_full(order, id)) {
+        show_error_toast(TR("Turn another item off first"));
+        populate_ui_order_screen();
+        return;
+    }
     if (at < 0 && order->count < UI_ORDER_MAX) order->ids[order->count++] = (uint8_t)id;
     else if (at >= 0) {
         for (unsigned i = (unsigned)at + 1; i < order->count; ++i) order->ids[i - 1] = order->ids[i];
         --order->count;
     } else return;
-    settings_save_async(&current_settings);
+    ui_order_store();
     populate_ui_order_screen();
     if (ui_order_kind == UI_ORDER_DRAWER) gui_shell_apply_customization();
     else gui_theme_refresh_request();
@@ -87,7 +111,7 @@ static void ui_order_drag_commit_drawer(gui_list_reorder_state_t * state) {
     if (!changed) return;
     saved->count = (uint8_t)drag_count;
     for (int i = 0; i < drag_count; ++i) saved->ids[i] = (uint8_t)state->ids[i];
-    settings_save_async(&current_settings);
+    ui_order_store();
     if (ui_order_kind == UI_ORDER_DRAWER) gui_shell_apply_customization();
     else gui_theme_refresh_request();
 }
@@ -111,17 +135,8 @@ static void add_customization_help(lv_obj_t *list) {
     lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_LEFT, 0);
 }
 
-static void populate_ui_order_screen(void) {
-    if (!ui_order_list) return;
-    int item_count = ui_order_size(ui_order_kind);
-    for (int id = 0; id < UI_ORDER_MAX; ++id)
-        gui_list_reorder_row_stop_translate(ui_order_rows[id]);
-    for (int id = 0; id < UI_ORDER_MAX; ++id) {
-        if (!ui_order_rows[id]) continue;
-        if (id < item_count) lv_obj_remove_flag(ui_order_rows[id], LV_OBJ_FLAG_HIDDEN);
-        else lv_obj_add_flag(ui_order_rows[id], LV_OBJ_FLAG_HIDDEN);
-    }
-    ui_item_order_t * order = ui_saved_order();
+/* Rows of the offered entries in saved order, then the rest; unoffered rows stay hidden at the end. */
+static void place_ui_order_rows(const ui_item_order_t * order, int item_count) {
     bool listed[UI_ORDER_MAX] = { false };
     int visual_index = 0;
     for (unsigned pos = 0; pos < order->count; ++pos) {
@@ -130,11 +145,26 @@ static void populate_ui_order_screen(void) {
         listed[id] = true;
         lv_obj_move_to_index(ui_order_rows[id], visual_index++);
     }
-    for (int id = 0; id < item_count; ++id) {
-        if (listed[id] || !ui_order_rows[id]) continue;
-        listed[id] = true;
-        lv_obj_move_to_index(ui_order_rows[id], visual_index++);
+    for (int pass = 0; pass < 2; ++pass)
+        for (int id = 0; id < item_count; ++id) {
+            if (listed[id] || !ui_order_rows[id] || ui_order_available(ui_order_kind, id) != (pass == 0)) continue;
+            listed[id] = true;
+            lv_obj_move_to_index(ui_order_rows[id], visual_index++);
+        }
+}
+
+static void populate_ui_order_screen(void) {
+    if (!ui_order_list) return;
+    int item_count = ui_order_size(ui_order_kind);
+    for (int id = 0; id < UI_ORDER_MAX; ++id)
+        gui_list_reorder_row_stop_translate(ui_order_rows[id]);
+    for (int id = 0; id < UI_ORDER_MAX; ++id) {
+        if (!ui_order_rows[id]) continue;
+        if (id < item_count && ui_order_available(ui_order_kind, id)) lv_obj_remove_flag(ui_order_rows[id], LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(ui_order_rows[id], LV_OBJ_FLAG_HIDDEN);
     }
+    ui_item_order_t * order = ui_saved_order();
+    place_ui_order_rows(order, item_count);
     lv_obj_update_layout(ui_order_list);
     for (int id = 0; id < item_count; ++id) {
         lv_obj_t * row = ui_order_rows[id];
@@ -166,9 +196,8 @@ static lv_obj_t * build_ui_order_screen(void) {
     memset(ui_order_drag_handles, 0, sizeof(ui_order_drag_handles));
     memset(ui_order_visible_buttons, 0, sizeof(ui_order_visible_buttons));
     for (int id = 0; id < UI_ORDER_MAX; ++id) {
-        const char * label = ui_order_label(UI_ORDER_DRAWER, id);
-        if (!label) continue;
-        lv_obj_t * row = add_pill_row_base(ui_order_list, TR(label));
+        /* Labels are set in populate; spare rows stay hidden. */
+        lv_obj_t * row = add_pill_row_base(ui_order_list, "");
         ui_order_rows[id] = row;
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_style(row, &list_row_pressed_style, LV_STATE_USER_1);

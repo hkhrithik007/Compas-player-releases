@@ -6,7 +6,7 @@
 lv_obj_t * gui_network_get_wifi_screen(void);
 lv_obj_t * gui_network_get_bt_screen(void);
 lv_obj_t * gui_network_get_wireless_screen(void);
-lv_obj_t * gui_network_get_bt_dac_overlay(void);
+lv_obj_t * gui_network_get_bt_dac_screen(void);
 lv_obj_t * gui_network_get_usb_dac_overlay(void);
 
 /* True while USB DAC mode owns the UI -- i.e. the device is presenting
@@ -21,11 +21,6 @@ bool gui_network_firmware_update_usb_blocked(void);
 bool gui_network_boot_prompt_blocked(void);
 
 void gui_network_init(void);
-#ifdef TEST_BOOT_RC
-/* Test build only: power Bluetooth and start the remote-control transports
- * asynchronously after the UI has completed its normal session-mode reset. */
-void gui_network_start_test_boot_services(void);
-#endif
 /* Deletes every screen/popup this module owns so gui_reload.c's in-process
  * UI reload can call gui_network_init() again from a clean slate. */
 void gui_network_teardown(void);
@@ -34,10 +29,15 @@ void gui_network_poll_airplay_overlay(void);
 void poll_wifi_connect(void);
 void poll_wifi_disconnect(void);
 void poll_wifi_scan(void);
-void poll_bt_action(void);
-void poll_bt_dac(void);
-void poll_usb_dac_overlay(void);
-void get_device_name(char * out, size_t out_size);
+void poll_wifi_connect_saved(void);
+void poll_wifi_forget(void);
+void poll_bt_scan(void);
+void poll_bt_rate_query(void);
+void poll_bt_rate_apply(void);
+void poll_bt_connect(void);
+void poll_bt_forget(void);
+/* Shows the Bluetooth pairing prompts the agent is waiting on; polled every UI tick. */
+void poll_bt_pairing(void);
 
 void populate_bt_dac_screen(void);
 void poll_remote_import(void);
@@ -49,19 +49,21 @@ void gui_network_set_usb_dac_charging_disabled(bool disabled);
 void poll_usb_storage_hotplug(void);
 /* UI-thread snapshot: a real Storage host was observed on this cable session. */
 bool gui_network_usb_storage_session_active(void);
-void build_bt_action_popup(void);
-void build_wifi_action_popup(void);
-void build_usb_dac_leave_popup(void);
-void build_bt_dac_leave_popup(void);
 
 void open_wifi_screen(void);
 void open_bluetooth_screen(void);
 
 /* The Sample Rate screen shows one accessory's rates and edits that
  * accessory's stored entry, so it must redraw when the connected device
- * changes underneath it. No-op unless that screen is on top. */
+ * changes underneath it; its query restarts once it is on top again. */
 void gui_network_notify_bt_device_changed(void);
 void populate_bt_screen(void);
+void gui_network_bt_powered_on(void);
+void gui_network_extend_bt_pairing_window(void);
+/* Open the AirPlay / DLNA / Remote Control pages (the Wireless menu rows' action). */
+void gui_network_open_airplay(void);
+void gui_network_open_dlna(void);
+void gui_network_open_remote_control(void);
 void gui_network_show_wifi_toggle_pending(bool enabled);
 void gui_network_wifi_toggle_completed(bool enabled);
 
@@ -78,9 +80,16 @@ bool gui_network_adb_active(void);
 
 bool gui_network_has_background_work(void);
 bool gui_network_bt_user_operation_active(void);
+/* Shutdown only: also drops queued service starts without touching settings. */
 void gui_network_cancel_background_work(void);
 
-/* Called once Wi-Fi disable is authoritatively confirmed (gui_shell.c's
+/* Prepare Remote Control services for radio sleep without changing the saved
+ * preference. Returns true only after the listener, RFCOMM worker, and any
+ * active file import have stopped. Call resume on each awake GUI tick. */
+bool gui_network_prepare_radio_sleep(void);
+void gui_network_resume_radio_services(void);
+
+/* Called once Wi-Fi disable is authoritatively confirmed (gui_shell_wifi.c's
  * poll_wifi_toggle()) -- stops AirPlay/DLNA/Remote Control/remote file import
  * and clears their persisted enabled flags, since all four require Wi-Fi.
  * Cheap no-op for whichever of them wasn't running. */
@@ -96,5 +105,12 @@ void gui_network_handle_wifi_disabled(void);
  * the caller should draw. Safe to call before the corresponding settings
  * screen has ever been built. */
 bool gui_network_toggle_airplay(void);
+bool gui_network_toggle_bt_dac(void);
+void gui_network_open_bt_dac(void);
 bool gui_network_toggle_dlna(void);
 bool gui_network_toggle_remote_control(void);
+
+bool gui_network_airplay_enable_pending(void);
+bool gui_network_usb_dac_pending(void);
+
+void disable_bt_dac_mode(void);

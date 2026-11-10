@@ -89,6 +89,7 @@
 #include <unistd.h>
 
 #include "../application/gui.h"
+#include "../assets/assets.h"
 #include "../appearance/gui_theme.h"
 #include "gui_navigation.h"
 #include "gui_shell.h"
@@ -97,6 +98,7 @@
 #include "../text/rendering/gui_text_input.h"
 #include "../text/rendering/gui_text_view.h"
 #include "../network/subsonic/gui_subsonic.h"
+#include "../network/subsonic/gui_subsonic_menu.h"
 #include "../library/browse/gui_library.h"
 #include "../network/gui_network.h"
 #include "../settings/gui_settings.h"
@@ -104,14 +106,20 @@
 #include "../library/browse/gui_file_manager.h"
 #include "../plugins/emulators/gui_emulator_store.h"
 #include "../plugins/emulators/gui_emulators.h"
+#include "../plugins/apps/gui_apps.h"
 #include "../player/screen/gui_queue.h"
 #include "../plugins/gui_plugins.h"
 #include "../../plugins/manager/plugin_manager.h"
 #include "../plugins/manage/gui_plugin_manage.h"
 #include "../plugins/manage/gui_plugin_store.h"
+#include "../settings/setup/gui_setup_plugins.h"
 #include "../settings/lock/gui_lock_screen.h"
 #include "../appearance/gui_themes.h"
+#include "../../network/store/plugins/plugin_store.h"
 #include "../../core/system/logging/db_log.h"
+
+/* The optional cover flow module: absent when src/ui/widgets/cover_flow is removed. */
+extern void cover_flow_shutdown(void) __attribute__((weak));
 
 /* Diagnostic logging for UI reload steps. Append-only with fsync per line
  * to ensure entries are flushed to storage immediately to identify the
@@ -152,6 +160,7 @@ static int32_t reload_display_height(void) {
 static void gui_soft_reload_with_artwork(bool preserve_artwork,
                                          const gui_nav_reload_state_t * restore_state) {
     reload_diag("gui_soft_reload: begin");
+    assets_invalidate_path_cache(); /* the rebuilt screens resolve their assets afresh */
     int32_t screen_width = reload_display_width();
     int32_t screen_height = reload_display_height();
 
@@ -196,8 +205,11 @@ static void gui_soft_reload_with_artwork(bool preserve_artwork,
     gui_emulators_teardown();
     reload_diag("gui_emulator_store_teardown: before");
     gui_emulator_store_teardown();
+    reload_diag("gui_apps_teardown: before");
+    gui_apps_teardown();
     reload_diag("gui_queue_teardown: before");
     gui_queue_teardown();
+    if (cover_flow_shutdown) cover_flow_shutdown();
     reload_diag("gui_plugins_teardown: before");
     gui_plugins_teardown();
     reload_diag("gui_stream_media_teardown: before");
@@ -314,6 +326,13 @@ static uint32_t last_reload_tick = 0;
 
 static void reload_trigger_cb(lv_timer_t * timer) {
     if (gui_navigation_transition_in_progress()) return;
+    /* Native store/setup workers can update plugin files while the UI is
+     * being rebuilt. Defer both layout-only and full reloads until their
+     * ownership ends; keep this timer and the coalesced request intact. */
+    if (plugin_store_busy() || gui_setup_plugins_busy()) {
+        lv_timer_set_period(timer, RELOAD_BUSY_RETRY_MS);
+        return;
+    }
     if (reload_preserve_artwork) {
         /* Layout changes replace only the Player tree. Leave navigation,
          * plugin Lua states, audio/DSP and every other screen alive. Keep
@@ -389,6 +408,10 @@ bool gui_reload_in_progress(void) {
     return reload_in_progress;
 }
 
+bool gui_reload_pending(void) {
+    return reload_scheduled || reload_in_progress;
+}
+
 void gui_reload_request(void) {
     (void)gui_reload_schedule(false);
 }
@@ -426,6 +449,7 @@ static void theme_refresh_cb(lv_timer_t * timer) {
     gui_navigation_invalidate_theme_snapshots();
     gui_shell_refresh_home();
     gui_library_refresh_music_screen();
+    gui_subsonic_menu_refresh();
     gui_stream_media_refresh();
     gui_network_refresh_wireless_screen();
     quick_drawer_mark_snapshot_dirty();

@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 typedef bool (*bt_control_cancel_callback_t)(void * ctx);
 
@@ -19,6 +20,10 @@ typedef struct {
 typedef struct {
     bool available;
     bool running;
+    char mac[18];
+    char pcm_path[256];
+    uint32_t generation;
+    char device_name[64];
     char codec[32];
     char pcm_format[32];
     unsigned int sample_rate;
@@ -28,13 +33,30 @@ typedef struct {
 
 /* Non-blocking, thread-safe cached snapshot. */
 void bt_control_get_dac_stream_info(bt_dac_stream_info_t * out);
+bool bt_control_dac_route_start(const bt_dac_stream_info_t * stream, bt_control_cancel_callback_t cancelled, void * ctx);
+bool bt_control_dac_route_alive(void);
+void bt_control_dac_set_reserved(bool reserved);
+bool bt_control_dac_route_stop(void);
 
-/* bluetoothd, BlueALSA 5, and a NoInputNoOutput pairing agent are already
- * running on this device; everything here just drives bluetoothctl's
+/* bluetoothd and BlueALSA 5 are already running on this device (plus an
+ * in-process pairing agent); everything here just drives bluetoothctl's
  * non-interactive CLI mode (`bluetoothctl <command> [args]`), which
  * produces clean output with no ANSI/prompt junk to strip. */
 
 bool bt_control_is_powered(void);
+
+/* Developer Options "Enable debug logging": records an HCI capture with btmon
+ * to .logs/bluetooth.snoop on the SD card (opens in Wireshark). No-op on the
+ * simulator or when btmon is missing. */
+void bt_control_set_debug_log_enabled(bool enabled);
+/* Stops the capture now without waiting (it holds a file on the SD card) and
+ * keeps it stopped until resume: before the card is unmounted, repaired or
+ * swapped. for_good (power-off, reboot) is never resumed. Resume once a
+ * healthy card is mounted again. */
+void bt_control_debug_capture_release(bool for_good);
+/* after_failed_shutdown also lifts a for_good hold, when a power-off or
+ * reboot did not happen and the UI carries on. */
+void bt_control_debug_capture_resume(bool after_failed_shutdown);
 
 /* Brings up the Bluetooth chip if it isn't already active (no hci0) by
  * running /usr/bin/bt_resume. No-op if hci0 already exists.
@@ -49,41 +71,32 @@ bool bt_control_reconcile_source_settings(void);
 void bt_control_enable(void);
 void bt_control_disable(void);
 
-/* True if any paired device currently has an active connection. Cheap
- * relative to bt_control_scan() (no discovery window): just `info` on each
- * already-paired device, same query bt_control_scan() already does per
- * device, without the scan step. Still forks one process per paired device,
- * so callers should poll this at a throttled cadence, not every frame. */
-bool bt_control_is_connected(void);
-
-/* Like bt_control_is_connected(), but avoids the per-paired-device fork
- * loop when the bluetoothctl on this system supports filtering `devices` by
- * property (the same capability bt_control_list_paired_states() already
- * detects and caches for the `Paired` filter) -- a single
- * `bluetoothctl devices Connected` call replaces querying every paired
- * device individually on that path. Falls back to bt_control_is_connected()
- * only when that capability is not (yet) known to be available; a failed
- * `devices Connected` call on a system already known to support it does
- * NOT fall back, to avoid reintroducing the O(N) fork cost on exactly the
- * transient failures most likely during Bluetooth power-on -- see the .c
- * file's own comment. Returns 1/0/-1 (connected / not connected / could not
- * determine this cycle), not a bool -- callers should keep their last known
- * state on -1 rather than treat it as "nothing connected".
+/* Whether any paired device currently has an active connection, for the
+ * topbar/quick-drawer "is Bluetooth connected to something" icon. When the
+ * bluetoothctl on this system supports filtering `devices` by property (the
+ * same capability bt_control_list_paired_states() already detects and caches
+ * for the `Paired` filter), a single `bluetoothctl devices Connected` call
+ * answers it. Otherwise it falls back to `info` on each paired device, one
+ * fork per device, so callers should poll at a throttled cadence, not every
+ * frame. A failed `devices Connected` call on a system already known to
+ * support it does NOT fall back, to avoid reintroducing the O(N) fork cost on
+ * exactly the transient failures most likely during Bluetooth power-on -- see
+ * the .c file's own comment. Returns 1/0/-1 (connected / not connected /
+ * could not determine this cycle), not a bool -- callers should keep their
+ * last known state on -1 rather than treat it as "nothing connected".
  *
  * Note the fast path answers a very slightly different question than the
  * per-device path: `devices Connected` reports any currently-connected
- * device, not only paired ones, so it can briefly disagree with
- * bt_control_is_connected() during an in-progress pairing handshake. Given
- * this is only used for the topbar/quick-drawer "is Bluetooth connected to
- * something" icon (not anything pairing-sensitive), that's an accepted
- * tradeoff, not a bug. This is what that icon refresh should poll instead of
- * bt_control_is_connected() -- see the .c file's own comment on why the
- * naive per-device version noticeably competes with the UI thread for CPU
- * on systems with several paired devices. */
+ * device, not only paired ones, so it can briefly disagree with the
+ * per-device path during an in-progress pairing handshake. Given this is only
+ * used for the icon (not anything pairing-sensitive), that's an accepted
+ * tradeoff, not a bug. See the .c file's own comment on why the naive
+ * per-device version noticeably competes with the UI thread for CPU on
+ * systems with several paired devices. */
 int bt_control_any_paired_connected(void);
 
-/* Like bt_control_is_connected(), but returns the full per-device
- * paired/connected breakdown instead of collapsing it into a single bool --
+/* Returns the full per-device paired/connected breakdown instead of
+ * collapsing it into a single bool --
  * see the .c file for why (avoids paying for the same per-device query loop
  * twice per poll cycle). Returns how many entries were written into out[]
  * (capped at max_count, same convention as bt_control_scan()), or -1 if the
@@ -94,7 +107,7 @@ int bt_control_list_paired_states(bt_device_t * out, int max_count);
 
 /* True if a real A2DP-source PCM (this device -> a connected headphone/
  * speaker) is currently registered with bluealsa -- a stronger, audio-
- * specific signal than bt_control_is_connected()/bt_control_list_paired_states()
+ * specific signal than bt_control_any_paired_connected()/bt_control_list_paired_states()
  * (those report ANY paired device with an active connection, not
  * necessarily one that actually supports/negotiated A2DP audio). Forks a
  * process (`bluealsactl list-pcms`); call off the UI thread. */
@@ -111,39 +124,35 @@ bool bt_control_get_connected_device_mac(char * out, size_t out_size);
 
 /* Writes the ACTUAL negotiated A2DP codec the connected accessory is
  * currently streaming with (e.g. "AAC", "LDAC", "SBC" -- whatever
- * `bluealsactl info` reports as "Selected codec") into out. This is the
- * real, live-negotiated codec, NOT current_settings.bt_codec (this app's
- * own PREFERRED codec setting, Settings > Bluetooth > Codec) -- those can
- * differ if the accessory doesn't support the preferred one and bluealsa
- * fell back to something else. Same subprocess cost as the other
- * bt_control_* calls here; call off the UI thread. Returns false (out left
- * untouched) if nothing's connected. */
-bool bt_control_get_connected_device_codec(char * out, size_t out_size);
-
-/* As above, and also the negotiated sampling frequency in Hz -- the codec is
- * only half of what tells you which link you actually got. Pass NULL for
- * out_sample_rate to skip it. Same subprocess cost; call off the UI thread. */
+ * `bluealsactl info` reports as "Selected codec") into out, and also the
+ * negotiated sampling frequency in Hz -- the codec is only half of what tells
+ * you which link you actually got. This is the real, live-negotiated codec,
+ * NOT current_settings.bt_codec (this app's own PREFERRED codec setting,
+ * Settings > Bluetooth > Codec) -- those can differ if the accessory doesn't
+ * support the preferred one and bluealsa fell back to something else. Pass
+ * NULL for out_sample_rate to skip the rate. Same subprocess cost as the
+ * other bt_control_* calls here; call off the UI thread. Returns false (out
+ * left untouched) if nothing's connected. */
 bool bt_control_get_connected_device_stream(char * out, size_t out_size, unsigned int * out_sample_rate);
 
-/* Blocking: scans for `seconds` (bluetoothctl's own --timeout), then reads
- * back the combined paired+discovered device list via `info` on each one
- * for Paired/Connected state. Call off the UI thread. Returns how many
- * devices were written into out[] (capped at max_count). */
 /* Known devices only, no inquiry: safe to call while audio is streaming. */
 int bt_control_list_devices(bt_device_t * out, int max_count);
 
+/* Blocking: scans for `seconds` through a persistent bluetoothctl client on
+ * stdin, then reads back the combined paired+discovered device list via
+ * `info` on each one for Paired/Connected state. Call off the UI thread.
+ * Returns how many devices were written into out[] (capped at max_count). */
 int bt_control_scan(int seconds, bt_device_t * out, int max_count);
 
 /* Pair (if not already) + trust + connect, in that order -- trusting first
  * means a future reconnect (e.g. after the device is turned off and back
  * on) won't need to go through this flow again, matching normal phone/OS
- * Bluetooth UX. The already-running NoInputNoOutput agent auto-accepts
- * "Just Works" pairing with no PIN prompt needed from this app. Blocking;
+ * Bluetooth UX. Both audio modes use the in-process DisplayYesNo agent
+ * (bt_pairing_agent.c): the user confirms numeric comparison on the player,
+ * and legacy PIN requests are answered with 0000. Authenticated pairing also
+ * supports Remote Control and car head units that require MITM protection. Blocking;
  * call off the UI thread. */
-bool bt_control_connect(const char * mac);
 bool bt_control_connect_with_rate(const char * mac, unsigned int rate);
-
-bool bt_control_disconnect(const char * mac);
 
 /* Unpairs and removes the saved device entry (bluetoothctl remove) --
  * disconnects it first if currently connected, as part of the same
@@ -153,9 +162,6 @@ bool bt_control_forget(const char * mac);
 /* Bounded, cancellation-aware reconnect of an already-paired trusted A2DP
  * headset. Never pairs or trusts. Call only from the reconnect worker; all
  * Bluetooth chip/control operations are serialized with manual actions. */
-bool bt_control_reconnect_paired(const char * preferred_mac,
-                                bt_control_cancel_callback_t cancel_cb,
-                                void * cancel_ctx);
 bool bt_control_reconnect_paired_with_rate(const char * preferred_mac, unsigned int rate,
                                            bt_control_cancel_callback_t cancel_cb,
                                            void * cancel_ctx);
@@ -169,6 +175,16 @@ void bt_control_ssc_rate_correction_cancel(void);
 bool bt_control_reconnect_for_ssc_rate_correction(const char * mac, unsigned int rate,
                                                   bt_control_cancel_callback_t cancel_cb,
                                                   void * cancel_ctx);
+
+/* One recovery per accessory/session when explicit SSC on Galaxy Buds is
+ * still missing after endpoint discovery. Owned by the reconnect worker. */
+bool bt_control_ssc_discovery_recovery_peek(char * mac, size_t mac_size);
+bool bt_control_ssc_discovery_recovery_take(const char * mac);
+void bt_control_ssc_discovery_recovery_finish(const char * mac);
+void bt_control_ssc_discovery_recovery_cancel(void);
+bool bt_control_reconnect_for_ssc_discovery(const char * mac, unsigned int rate,
+                                            bt_control_cancel_callback_t cancel_cb,
+                                            void * cancel_ctx);
 
 /* Output settings use the firmware's BlueALSA 5 service, with an
  * a2dp-source profile for this device sending audio OUT to
@@ -263,5 +279,8 @@ void bt_control_output_disconnect_watch_start(void);
 void bt_control_output_disconnect_watch_stop(void);
 bool bt_control_output_disconnect_watch_is_running(void);
 bool bt_control_output_disconnect_consume(void);
+/* Milliseconds a missing output should still be waited for because a codec
+ * switch of ours is recreating the transport (at most 3 s), 0 when none is. */
+uint32_t bt_control_reconfigure_hold_ms(void);
 
 #endif /* BLUETOOTH_CONTROL_H */

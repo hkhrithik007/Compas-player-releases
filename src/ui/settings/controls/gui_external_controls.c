@@ -1,4 +1,6 @@
 #include "gui_external_controls.h"
+#include "gui_remote_settings.h"
+#include "../../plugins/manage/gui_remote_plugins.h"
 #include <stdio.h>
 #include <stdint.h>
 #include "../../player/screen/gui_player.h"
@@ -73,15 +75,10 @@ static void poll_screenshot_completion(bool screenshot_request_pending) {
 }
 
 static void poll_remote_playback_commands(void) {
-    if (remote_control_consume_play_pause()) {
-        toggle_play_pause();
-    }
-    if (remote_control_consume_next()) {
-        gui_player_step_manual(1);
-    }
-    if (remote_control_consume_prev()) {
-        gui_player_step_manual(-1);
-    }
+    /* In Bluetooth DAC mode these control the phone, like the R1's buttons. */
+    if (remote_control_consume_play_pause() && !gui_player_transport_button(0)) toggle_play_pause();
+    if (remote_control_consume_next() && !gui_player_transport_button(1)) gui_player_step_manual(1);
+    if (remote_control_consume_prev() && !gui_player_transport_button(-1)) gui_player_step_manual(-1);
     if (remote_control_consume_mode_cycle()) {
         cycle_play_mode();
     }
@@ -96,10 +93,14 @@ static void poll_remote_library_commands(void) {
     if (remote_control_consume_library_sorting(&remote_sort_scope, &remote_sort_mode)) {
         int *modes[] = { &current_settings.album_sort_mode, &current_settings.artist_albums_sort_mode,
                         &current_settings.album_artist_albums_sort_mode };
+        bool *reverses[] = { &current_settings.album_sort_reverse, &current_settings.artist_albums_sort_reverse,
+                            &current_settings.album_artist_albums_sort_reverse };
         const gui_library_sort_scope_t scopes[] = { GUI_LIBRARY_SORT_ALBUMS, GUI_LIBRARY_SORT_ARTIST_ALBUMS,
                                                     GUI_LIBRARY_SORT_ALBUM_ARTIST_ALBUMS };
-        if (remote_sort_scope >= 0 && remote_sort_scope < 3 && remote_sort_mode >= 0 && remote_sort_mode <= 2) {
-            *modes[remote_sort_scope] = remote_sort_mode;
+        if (remote_sort_scope >= 0 && remote_sort_scope < 3 && remote_sort_mode >= 0 && remote_sort_mode <= 7 &&
+            (remote_sort_mode & ~METADATA_DB_ALBUM_SORT_REVERSE) <= (remote_sort_scope == 0 ? 3 : 2)) {
+            *modes[remote_sort_scope] = remote_sort_mode & ~METADATA_DB_ALBUM_SORT_REVERSE;
+            *reverses[remote_sort_scope] = (remote_sort_mode & METADATA_DB_ALBUM_SORT_REVERSE) != 0;
             gui_library_apply_sorting(scopes[remote_sort_scope]);
             settings_save_async(&current_settings);
         }
@@ -200,6 +201,8 @@ void gui_external_controls_poll(void) {
     poll_remote_position_volume();
     poll_remote_queue_commands();
     poll_remote_track();
+    gui_remote_settings_poll();
+    gui_remote_plugins_poll();
 }
 
 void gui_external_controls_publish_status(bool favorite) {
@@ -216,8 +219,12 @@ void gui_external_controls_publish_status(bool favorite) {
                                   gui_player_get_now_playing_folder(), gui_player_get_now_playing_album(), now_playing_path,
                                   (int) audio_get_position_seconds(), (int) audio_get_duration_seconds(),
                                   audio_get_volume(), current_settings.play_mode,
-                                  now_playing_path && favorite, gui_theme_accent_rgb());
-    remote_control_notify_library_sorting(current_settings.album_sort_mode,
-                                          current_settings.artist_albums_sort_mode,
-                                          current_settings.album_artist_albums_sort_mode);
+                                  now_playing_path && favorite, gui_theme_accent_rgb(),
+                                  gui_shell_bt_dac_owns_output());
+    remote_control_notify_library_sorting(current_settings.album_sort_mode |
+                                          (current_settings.album_sort_reverse ? METADATA_DB_ALBUM_SORT_REVERSE : 0),
+                                          current_settings.artist_albums_sort_mode |
+                                          (current_settings.artist_albums_sort_reverse ? METADATA_DB_ALBUM_SORT_REVERSE : 0),
+                                          current_settings.album_artist_albums_sort_mode |
+                                          (current_settings.album_artist_albums_sort_reverse ? METADATA_DB_ALBUM_SORT_REVERSE : 0));
 }

@@ -129,10 +129,10 @@ static uint64_t artist_directory_signature(const char * artist, metadata_db_grou
 static bool artist_thumbnail_load_persistent(const char * artist, uint32_t source_mtime,
                                              artwork_priority_t prio,
                                              artwork_cancel_fn cancel_cb, void * user_data,
-                                             uint16_t ** out_pixels, bool * out_temporary) {
+                                             uint16_t ** out_pixels, bool * out_temporary, bool photo) {
     *out_temporary = false;
     char found[PATH_MAX];
-    if (!albumart_artist_sized_thumb_fresh(artist, source_mtime, ALBUM_THUMBNAIL_PX,
+    if (!(photo ? albumart_artist_photo_sized_thumb_fresh : albumart_artist_sized_thumb_fresh)(artist, source_mtime, ALBUM_THUMBNAIL_PX,
                                            ALBUM_THUMBNAIL_PX, found, sizeof(found)))
         return false;
     uint8_t * data = NULL;
@@ -167,6 +167,30 @@ static void artist_thumbnail_set_alias(uint64_t album_key, int64_t song_id,
     resolution->alias_song_id = song_id;
 }
 
+/* A visible row (or the first-screen warm): the album's thumbnail is already on the card, so load
+ * it now instead of leaving it to a second job queued behind every other row's. */
+static void artist_thumbnail_load_alias_pixels(const char * found, uint64_t album_key, int64_t song_id,
+        artwork_priority_t prio, artwork_cancel_fn cancel_cb, void * cancel_user_data,
+        artist_thumbnail_resolution_t * resolution) {
+    uint8_t * data = NULL;
+    uint32_t size = 0;
+    if (albumart_load_file_ex(found, &data, &size, THUMBNAIL_SIDECAR_MAX_BYTES, prio) != ALBUMART_LOAD_OK)
+        return;
+    uint16_t * pixels = NULL;
+    cover_decode_result_t decoded = cover_decode_to_rgb565_ex(data, size, ALBUM_THUMBNAIL_PX,
+            ALBUM_THUMBNAIL_PX, prio, cancel_cb, cancel_user_data, &pixels);
+    free(data);
+    if (decoded == COVER_DECODE_OK && pixels) {
+        resolution->pixels = pixels;
+        resolution->pixel_key_kind = THUMBNAIL_KEY_ALBUM;
+        resolution->pixel_key = album_key;
+        resolution->pixel_song_id = song_id;
+        artwork_failure_cache_note_success(song_id);
+    } else {
+        free(pixels);
+    }
+}
+
 static artist_thumbnail_result_t artist_thumbnail_from_album_group(
         const char * artist, metadata_db_group_kind_t group_kind,
         artwork_priority_t prio,
@@ -198,6 +222,9 @@ static artist_thumbnail_result_t artist_thumbnail_from_album_group(
                     ALBUM_THUMBNAIL_PX, thumb_source_mtime, cache_path, sizeof(cache_path))) {
                 artist_thumbnail_set_alias(album_key, song.id, resolution);
                 albumart_artist_alias_store(artist, (unsigned int) group_kind, album_key, song.id);
+                if (prio == ARTWORK_PRIO_THUMBNAIL)
+                    artist_thumbnail_load_alias_pixels(cache_path, album_key, song.id, prio,
+                                                       cancel_cb, cancel_user_data, resolution);
                 return ARTIST_THUMB_FOUND;
             }
 
@@ -235,9 +262,9 @@ static artist_thumbnail_result_t artist_thumbnail_from_album_group(
     return ARTIST_THUMB_MISSING;
 }
 
-artist_thumbnail_result_t artist_thumbnail_load_or_decode(
+static artist_thumbnail_result_t artist_thumbnail_load(
         int64_t representative_song_id, metadata_db_group_kind_t group_kind, const char * artist_name,
-        artwork_priority_t prio, bool load_own_image,
+        artwork_priority_t prio, bool load_own_image, bool photo_only,
         uint64_t artist_key, artwork_cancel_fn cancel_cb, void * cancel_user_data,
         artist_thumbnail_resolution_t * resolution) {
     memset(resolution, 0, sizeof(*resolution));
@@ -256,15 +283,21 @@ artist_thumbnail_result_t artist_thumbnail_load_or_decode(
     char source_path[PATH_MAX];
     bool have_artist_source = have_artist_dir &&
         albumart_find_artist_sidecar(artist_dir, source_path, sizeof(source_path));
+    if (have_artist_source && photo_only) {
+        const char * name = thumbnail_directory_name(source_path);
+        have_artist_source = !strcasecmp(name, "artist.jpg") || !strcasecmp(name, "artist.png");
+    }
     if (have_artist_source && !load_own_image) return ARTIST_THUMB_OWN_IMAGE;
     if (have_artist_source) {
+        const char * name = thumbnail_directory_name(source_path);
+        bool real_photo = !strcasecmp(name, "artist.jpg") || !strcasecmp(name, "artist.png");
         struct stat source_st;
         uint32_t source_mtime = stat(source_path, &source_st) == 0
                                     ? (uint32_t) source_st.st_mtime : 0;
         bool cache_temporary = false;
         if (artist_thumbnail_load_persistent(artist, source_mtime, prio,
                 cancel_cb, cancel_user_data,
-                &resolution->pixels, &cache_temporary))
+                &resolution->pixels, &cache_temporary, real_photo))
             return ARTIST_THUMB_FOUND;
         if (cache_temporary) return ARTIST_THUMB_TEMPORARY;
 
@@ -278,8 +311,9 @@ artist_thumbnail_result_t artist_thumbnail_load_or_decode(
                     ALBUM_THUMBNAIL_PX, ALBUM_THUMBNAIL_PX, prio,
                     cancel_cb, cancel_user_data, &resolution->pixels);
             free(data);
+            data = NULL;
             if (decoded == COVER_DECODE_OK && resolution->pixels) {
-                albumart_artist_store_rgb565(artist, source_mtime, ALBUM_THUMBNAIL_PX,
+                (real_photo ? albumart_artist_photo_store_rgb565 : albumart_artist_store_rgb565)(artist, source_mtime, ALBUM_THUMBNAIL_PX,
                                              ALBUM_THUMBNAIL_PX, resolution->pixels);
                 return ARTIST_THUMB_FOUND;
             }
@@ -287,6 +321,11 @@ artist_thumbnail_result_t artist_thumbnail_load_or_decode(
             if (cover_decode_result_is_temporary(decoded)) return ARTIST_THUMB_TEMPORARY;
         }
         free(data);
+    }
+
+    if (photo_only) {
+        resolution->negative_confirmed = true;
+        return ARTIST_THUMB_MISSING;
     }
 
     uint64_t stored_album_key = 0;
@@ -303,13 +342,14 @@ artist_thumbnail_result_t artist_thumbnail_load_or_decode(
                          stored_album_song.tags.album, stored_album_song.tags.album_artist) >= 0;
         if (valid) {
             albumart_info_from_song_row(&stored_album_song, &stored_album_info);
-            uint32_t source_mtime = albumart_source_mtime(&stored_album_info);
-            valid = albumart_sized_thumb_fresh_with_source_mtime(&stored_album_info,
-                         ALBUM_THUMBNAIL_PX, ALBUM_THUMBNAIL_PX, source_mtime,
-                         found, sizeof(found));
+            valid = albumart_sized_thumb_fresh(&stored_album_info,
+                         ALBUM_THUMBNAIL_PX, ALBUM_THUMBNAIL_PX, found, sizeof(found));
         }
         if (valid) {
             artist_thumbnail_set_alias(stored_album_key, stored_album_song_id, resolution);
+            if (prio == ARTWORK_PRIO_THUMBNAIL)
+                artist_thumbnail_load_alias_pixels(found, stored_album_key, stored_album_song_id,
+                                                   prio, cancel_cb, cancel_user_data, resolution);
             return ARTIST_THUMB_FOUND;
         }
         albumart_artist_alias_remove(artist, (unsigned int) group_kind);
@@ -334,5 +374,23 @@ artist_thumbnail_result_t artist_thumbnail_load_or_decode(
             artist, group_kind, &representative, signature_dir));
         resolution->negative_confirmed = true;
     }
+    return result;
+}
+
+artist_thumbnail_result_t artist_thumbnail_load_or_decode(
+        int64_t song_id, metadata_db_group_kind_t kind, const char * artist,
+        artwork_priority_t prio, bool load_own_image, uint64_t key,
+        artwork_cancel_fn cancel, void * user, artist_thumbnail_resolution_t * resolution) {
+    return artist_thumbnail_load(song_id, kind, artist, prio, load_own_image, false,
+                                 key, cancel, user, resolution);
+}
+
+artist_thumbnail_result_t artist_thumbnail_load_photo(
+        int64_t song_id, metadata_db_group_kind_t kind, const char * artist,
+        artwork_priority_t prio, uint64_t key, artwork_cancel_fn cancel,
+        void * user, artist_thumbnail_resolution_t * resolution) {
+    artist_thumbnail_result_t result = artist_thumbnail_load(song_id, kind, artist, prio, true, true,
+                                                            key, cancel, user, resolution);
+    resolution->pixel_key_kind = THUMBNAIL_KEY_ARTIST_PHOTO;
     return result;
 }

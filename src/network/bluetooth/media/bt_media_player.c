@@ -1,4 +1,5 @@
 #include "bt_media_player.h"
+#include "../../../core/system/logging/db_log.h"
 #include "../../../core/system/logging/debug_log.h"
 #include "../../hiby/hiby_sys_server.h"
 #include "../../../core/text/utf8_util.h"
@@ -14,6 +15,9 @@
 #include <unistd.h>
 #include <linux/input.h>
 #include <pthread.h>
+
+#undef DBG_LOG
+#define DBG_LOG(...) DB_LOG_DBG("BT", __VA_ARGS__)
 
 /* AVRCP transport button support.
  * 1. Hosts a D-Bus org.mpris.MediaPlayer2.Player object via Media1.RegisterPlayer
@@ -329,7 +333,7 @@ static DBusHandlerResult handle_properties_get_all(DBusConnection * c, DBusMessa
 
 /* MPRIS's Volume/LoopStatus/Rate are writable in the spec, but this app
  * doesn't use MPRIS for volume (see bt_control_source_volume_sync_start()
- * in bluetooth_control.c) and has no remotely-controllable loop-status/rate
+ * in bt_source_volume.c) and has no remotely-controllable loop-status/rate
  * concept. Accept and ignore rather than erroring, so a conformant MPRIS
  * client doesn't get an unexpected failure for a property it expects to be
  * settable. */
@@ -609,6 +613,7 @@ static void * dispatch_thread_func(void * arg) {
     clock_gettime(CLOCK_MONOTONIC, &previous_iteration);
     struct timespec metadata_change_time = previous_iteration;
     for (;;) {
+        bt_media_player_dispatch_phone_command();
         struct timespec iteration_time;
         clock_gettime(CLOCK_MONOTONIC, &iteration_time);
         double elapsed_seconds = (double) (iteration_time.tv_sec - previous_iteration.tv_sec) +

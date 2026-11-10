@@ -1,8 +1,11 @@
 #include "plugin_http_bindings.h"
 
 #include "../../../network/http/client/http_client.h"
+#include "../../../network/download/download.h"
 #include "../../lua/plugin_lua_runtime.h"
 #include "../../storage/plugin_storage.h"
+#include "../../storage/plugin_reserved_dirs.h"
+#include "plugin_archive_bindings.h"
 
 #include "lauxlib.h"
 
@@ -93,50 +96,26 @@ static void plugin_dedupe_headers_case_insensitive(http_header_t * headers, int 
     *count = out;
 }
 
+static bool plugin_async_download(plugin_async_http_t *req) {
+    /* Recheck restrictions in the worker before opening the destination parent. */
+    if (plugin_storage_path_is_reserved(req->dest_path) || plugin_path_in_program_dirs(req->dest_path))
+        return false;
+    download_request_t request = {.url = req->url, .dest_path = req->dest_path,
+        .max_bytes = UINT64_C(2) << 30, .verify_tls = req->verify_tls,
+        .connect_timeout_ms = 10000U, .read_timeout_ms = 30000U};
+    download_result_t result;
+    download_error_t error = download_to_file(&request, &req->cancel, plugin_async_download_progress, req, &result);
+    if (error == DOWNLOAD_ERR_DIR_SYNC && result.committed) {
+        fprintf(stderr, "plugin: download committed but directory sync failed: %s\n", req->dest_path);
+        return true;
+    }
+    return error == DOWNLOAD_OK;
+}
+
 static void * plugin_async_http_thread_func(void * arg) {
     plugin_async_http_t * req = (plugin_async_http_t *) arg;
     if (req->is_download) {
-        char temp_path[PATH_MAX];
-        /* Defense in depth: l_plugin_download_file_async() already
-         * rejected a reserved dest_path before ever starting this thread,
-         * but re-check here too, immediately before touching the
-         * filesystem, rather than trusting that the only path into this
-         * branch is the one already-guarded call site -- the same
-         * discipline this codebase already applies to bounds/validity
-         * checks that matter (re-verify at the point of use, not just at
-         * the call site three frames up). Must NOT return early here --
-         * req->done still needs to be set below, via the function's
-         * normal shared tail, or plugin_manager_poll() would never reap
-         * this slot and it would leak permanently as "active". */
-        int n;
-        if (plugin_storage_path_is_reserved(req->dest_path)) {
-            n = -1; /* forces the "invalid" branch below without touching the filesystem */
-        } else {
-            n = snprintf(temp_path, sizeof(temp_path), "%s.part.XXXXXX", req->dest_path);
-        }
-        if (n <= 0 || (size_t) n >= sizeof(temp_path)) {
-            req->ok = false;
-        } else {
-            int fd = mkstemp(temp_path);
-            if (fd < 0) {
-                req->ok = false;
-            } else {
-                close(fd);
-                /* Review finding: http_get_to_file() had no size bound at
-                 * all for its file-sink write path -- http_get_to_file_
-                 * bounded() (0 = a generous 2 GiB built-in default) closes
-                 * that gap for plugin-driven downloads specifically,
-                 * without touching http_get_to_file() itself (DLNA/cover-
-                 * art downloads keep their original unlimited behavior). */
-                req->ok = http_get_to_file_bounded(req->url, req->verify_tls, temp_path, 0,
-                                                    plugin_async_download_progress, req);
-                bool cancelled = http_cancel_token_is_cancelled(&req->cancel);
-                if (req->ok && !cancelled) {
-                    req->ok = rename(temp_path, req->dest_path) == 0;
-                }
-                if (!req->ok || cancelled) remove(temp_path);
-            }
-        }
+        req->ok = plugin_async_download(req);
     } else {
         /* plugin.http_request()'s plain (non-download) path -- shares the
          * extended http_request_ex() (headers, methods beyond GET/POST,
@@ -468,6 +447,8 @@ int l_plugin_download_file_async(lua_State * L) {
         return luaL_error(L, "plugin.download_file_async: destination path is invalid or too long");
     if (plugin_storage_path_is_reserved(dest_path))
         return luaL_error(L, "plugin.download_file_async: path is reserved for plugin.storage/plugin.secrets");
+    if (plugin_path_in_program_dirs(dest_path))
+        return luaL_error(L, "plugin.download_file_async: the program folders (.apps, .apps-data, .emulators) are reserved");
 
     int slot = -1;
     for (int i = 0; i < PLUGIN_MAX_ASYNC_HTTP; i++) {
@@ -553,12 +534,20 @@ int l_plugin_cancel(lua_State * L) {
 }
 
 
+/* A finished download has already replaced dest_path, even when its
+ * callback is then skipped (cancelled, owner gone), so the cached image of
+ * that path is refreshed on every join. */
+static void join_request(plugin_async_http_t * req) {
+    pthread_join(req->thread, NULL);
+    if (req->is_download && req->ok) plugin_image_cache_forget(req->dest_path);
+}
+
 void plugin_http_bindings_clear_owner(lua_State * owner, bool aborted) {
     for (int i = 0; i < PLUGIN_MAX_ASYNC_HTTP; i++) {
         plugin_async_http_t * req = &plugin_async_http[i];
         if (!req->active || req->L != owner) continue;
         http_cancel_token_cancel(&req->cancel);
-        pthread_join(req->thread, NULL);
+        join_request(req);
         if (!aborted) luaL_unref(owner, LUA_REGISTRYINDEX, req->callback_ref);
         free(req->response_body);
         req->response_body = NULL;
@@ -570,13 +559,13 @@ void plugin_http_bindings_clear_owner(lua_State * owner, bool aborted) {
         req->callback_ref = LUA_NOREF;
     }
 }
-void plugin_http_bindings_cancel_all(void) {
+void plugin_http_bindings_cancel_all(plugin_http_owner_aborted_fn owner_is_aborted) {
     for (int i = 0; i < PLUGIN_MAX_ASYNC_HTTP; i++) {
         plugin_async_http_t * req = &plugin_async_http[i];
         if (!req->active) continue;
         http_cancel_token_cancel(&req->cancel);
-        pthread_join(req->thread, NULL);
-        luaL_unref(req->L, LUA_REGISTRYINDEX, req->callback_ref);
+        join_request(req);
+        if (!owner_is_aborted(req->L)) luaL_unref(req->L, LUA_REGISTRYINDEX, req->callback_ref);
         free(req->response_body);
         req->response_body = NULL;
         req->response_body_size = 0;
@@ -588,13 +577,16 @@ void plugin_http_bindings_cancel_all(void) {
     }
 }
 
-void plugin_http_bindings_poll(plugin_http_guarded_call_fn guarded_call) {
+void plugin_http_bindings_poll(plugin_http_guarded_call_fn guarded_call,
+                               plugin_http_owner_aborted_fn owner_is_aborted) {
     for (int i = 0; i < PLUGIN_MAX_ASYNC_HTTP; i++) {
         plugin_async_http_t * req = &plugin_async_http[i];
         if (!req->active || !atomic_load(&req->done)) continue;
-        pthread_join(req->thread, NULL);
+        join_request(req);
 
-        if (!http_cancel_token_is_cancelled(&req->cancel)) {
+        /* A hard-aborted owner is frozen: no callback, no registry access. */
+        bool owner_aborted = owner_is_aborted(req->L);
+        if (!http_cancel_token_is_cancelled(&req->cancel) && !owner_aborted) {
             lua_rawgeti(req->L, LUA_REGISTRYINDEX, req->callback_ref);
             int callback_args;
             if (req->is_download) {
@@ -636,14 +628,14 @@ void plugin_http_bindings_poll(plugin_http_guarded_call_fn guarded_call) {
                                            ? req->response_error : "network error or response limit exceeded");
                 callback_args = 3;
             }
-            if (guarded_call(req->L, callback_args, 0, 0) != LUA_OK) {
+            if (guarded_call(req->L, callback_args, 0, 0) != LUA_OK && !owner_is_aborted(req->L)) {
                 const char * err = lua_tostring(req->L, -1);
                 fprintf(stderr, "[plugins] HTTP callback error: %s\n", err ? err : "unknown error");
                 lua_pop(req->L, 1);
             }
         }
 
-        luaL_unref(req->L, LUA_REGISTRYINDEX, req->callback_ref);
+        if (!owner_is_aborted(req->L)) luaL_unref(req->L, LUA_REGISTRYINDEX, req->callback_ref);
         free(req->response_body);
         req->response_body = NULL;
         req->response_body_size = 0;

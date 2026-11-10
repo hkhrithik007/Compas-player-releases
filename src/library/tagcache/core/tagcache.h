@@ -13,15 +13,16 @@
  * pointer unchanged until a later ordinary update. The previous generation
  * stays loadable until that pointer is replaced. Numeric tags live in the
  * master index. Records and strings are read into caller-owned result storage.
- * Scan mutations use private disk files. This header is the storage engine used
- * exclusively by metadata_db.c. Query access is serialized by METADATA_DB_GUARD;
- * private generation construction may release that lock under the update guard.
- * Public player code must use
- * metadata_db.h instead. */
+ * Scan mutations use private disk files. This header is the storage engine
+ * behind metadata_db: database mutation and ordinary queries go through
+ * metadata_db.h, and the few other includers (library scan, remote catalog,
+ * library browse and thumbnail code, device info) use it for read-only
+ * projections and scan hooks. Query access is serialized by METADATA_DB_GUARD;
+ * private generation construction may release that lock under the update guard. */
 
 /* Layout version of the on-card database this build writes (the version of its
  * index files). Anything that reads the database must carry a reader for it. */
-#define TAGCACHE_DATABASE_FORMAT 7u
+#define TAGCACHE_DATABASE_FORMAT 8u
 
 #define TAGCACHE_PATH_MAX 600
 #define TAGCACHE_TAG_MAX 128
@@ -33,11 +34,7 @@
 #define TAGCACHE_GROUP_ARTIST 0
 #define TAGCACHE_GROUP_ALBUM_ARTIST 1
 #define TAGCACHE_GROUP_ALBUM 2
-
-#define TAGCACHE_AZ_ARTIST 0
-#define TAGCACHE_AZ_ALBUM_ARTIST 1
-#define TAGCACHE_AZ_ALBUM 2
-#define TAGCACHE_AZ_ALL_SONGS 3
+#define TAGCACHE_ALBUM_SORT_REVERSE 4
 
 typedef struct {
     int32_t id; /* 1-based stable slot id; deleted slots are never reused */
@@ -89,9 +86,6 @@ bool tagcache_open(const char * dir);
 /* tagcache_open() for inspection: an older index layout is read as it is rather
  * than migrated, and nothing is written. The caller must not update. */
 bool tagcache_open_read_only(const char * dir);
-/* True when the most recent open rewrote the indexes from an older layout, which
- * writes to the card even though no scan changed anything. */
-bool tagcache_indexes_migrated(void);
 tagcache_snapshot_t *tagcache_snapshot_open(bool recency);
 int tagcache_snapshot_count(const tagcache_snapshot_t *snapshot);
 bool tagcache_snapshot_path_at(const tagcache_snapshot_t *snapshot, int rank, char *out, size_t out_size);
@@ -112,7 +106,13 @@ void tagcache_close(void);
  * recovery rebuild reports RECOVERED. */
 tagcache_load_outcome_t tagcache_get_load_outcome(void);
 
-void tagcache_begin_update(void);
+/* Album joining for the generations published by the scan about to begin: an
+ * album artist sharing an album and folder with another one shows as "Various
+ * Artists". Stored tags and track artists stay raw. republish makes the scan
+ * publish even without changes while joining is, or was, in effect. */
+void tagcache_set_album_join(bool join, bool republish);
+/* True when joining is requested or the loaded generation has joined albums. */
+bool tagcache_album_join_active(void);
 void tagcache_begin_update_with_lock(void (*unlock)(void), void (*lock)(void));
 /* Targeted refresh keeps unseen rows without checking their paths. */
 void tagcache_begin_targeted_update_with_lock(void (*unlock)(void), void (*lock)(void));
@@ -121,16 +121,6 @@ bool tagcache_delete_target_path(const char * path);
 /* Marks path seen for this pass. Returns true and fills *out when a live
  * row exists whose stored mtime and size both match. */
 bool tagcache_lookup(const char * path, int32_t mtime, int32_t size, tagcache_song_t * out);
-void tagcache_upsert(const char * path, int32_t mtime, int32_t size, const char * title, const char * artist,
-                     const char * album, const char * album_artist, const char * genre,
-                     int32_t track_number, int32_t disc_number);
-/* tagcache_upsert() that also reports whether the stored tags differ from the
- * row it replaced (strings compared after interning). Inserts and failures
- * report true. */
-void tagcache_upsert_changed(const char * path, int32_t mtime, int32_t size, const char * title,
-                             const char * artist, const char * album, const char * album_artist,
-                             const char * genre, int32_t track_number, int32_t disc_number,
-                             bool * out_tags_changed);
 void tagcache_upsert_year_changed(const char * path, int32_t mtime, int32_t size, const char * title,
                                   const char * artist, const char * album, const char * album_artist,
                                   const char * genre, int32_t track_number, int32_t disc_number,
@@ -140,7 +130,6 @@ void tagcache_upsert_year_changed(const char * path, int32_t mtime, int32_t size
  * it. A rebuild after a failed load rejects an empty result and leaves the
  * generation pointer unchanged. Returns false on rejection or write failure,
  * in which case the committed reader is reopened. */
-bool tagcache_end_update(void);
 /* Releases the caller query lock during private generation construction. */
 bool tagcache_end_update_with_lock(void (*unlock)(void), void (*lock)(void));
 /* Discard staged scan mutations and reopen the committed files. */
@@ -155,12 +144,19 @@ enum {
 /* Numeric fields are always returned; requested string fields are populated. */
 bool tagcache_song_fields_by_id(int32_t id, unsigned fields, tagcache_song_t *out);
 bool tagcache_song_fields_at_title_rank(int32_t rank, unsigned fields, tagcache_song_t *out);
+/* True when a requested optional tag could not be read for this song (left empty). */
+bool tagcache_song_tags_incomplete(const tagcache_song_t *song);
 bool tagcache_song_fields_at_recency_rank(int32_t rank, unsigned fields, tagcache_song_t *out);
 int32_t tagcache_live_count(void);
 int32_t tagcache_slot_count(void);
 bool tagcache_song_by_id(int32_t id, tagcache_song_t * out);
-bool tagcache_song_by_path(const char * path, tagcache_song_t * out);
+/* Used by Compas Tools' compas-sdtool: true when the last open rewrote an older index layout. */
+bool tagcache_indexes_migrated(void);
+/* Used by Compas Tools' compas-sdtool: the song in a raw slot (0-based). */
 bool tagcache_song_at_slot(int32_t slot, tagcache_song_t * out);
+bool tagcache_song_by_path(const char * path, tagcache_song_t * out);
+/* tagcache_song_by_path() with the stored album artist, never the join label. */
+bool tagcache_song_by_path_raw(const char * path, tagcache_song_t * out);
 bool tagcache_song_at_title_rank(int32_t rank, tagcache_song_t * out);
 bool tagcache_song_at_recency_rank(int32_t rank, tagcache_song_t * out);
 
@@ -193,8 +189,7 @@ int tagcache_group_album_page(int kind, const char *name, int offset,
 int tagcache_group_album_offset(int kind, const char *name, const char *album, const char *album_artist);
 bool tagcache_album_group_at_sorted(int sort, int rank, tagcache_group_t *out);
 int tagcache_album_group_sorted_offset(int sort, const char *album, const char *album_artist);
-/* Strict inverse lookup for a known canonical album-group rank. Unlike the
- * compatibility offset helper above, this reports a failed index read. */
+/* Inverse lookup for a known canonical album-group rank, including reverse. */
 bool tagcache_album_group_sorted_rank(int sort, int canonical_rank, int *sorted_rank_out);
 bool tagcache_album_sort_available(int sort);
 
@@ -234,13 +229,9 @@ int tagcache_group_index(int kind, const char * name, const char * album_artist)
 
 int tagcache_cmp_ascii(const char * a, const char * b);
 
-/* Whether a raw ARTIST tag belongs to artist `name` under the current
- * delimiters. Queries must use this instead of comparing the raw string. */
-bool tagcache_artist_matches(const char * raw_artist, const char * name);
 /* First artist name a raw ARTIST tag is filed under. */
 void tagcache_artist_primary(const char * raw_artist, char * out, size_t out_size);
 /* Exact bounded artist membership names for a song's raw ARTIST tag. */
 int tagcache_artist_names(const char * raw_artist, char out[][TAGCACHE_TAG_MAX], int max_names);
-const char * tagcache_ascii_casestr(const char * hay, const char * needle);
 
 #endif /* TAGCACHE_H */

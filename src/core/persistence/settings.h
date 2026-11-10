@@ -7,6 +7,7 @@
 
 #include "../../hardware/input/button_mapping.h"
 #include "../themes/ui_customization.h"
+#include "../../network/bluetooth/control/bt_rc_trust.h"
 
 #define DEFAULT_ACCENT_COLOR 0xB0142B /* deep red; keep startup_splash.c and the bootloader in sync */
 
@@ -102,6 +103,7 @@ typedef struct {
      * assigned to another button. Remapped non-volume actions remain available.
      * Defaults off to preserve existing hardware behavior. */
     bool volume_lock_screen_off;
+    int hw_seek_step_seconds; /* 1..30 s per hardware-button seek step. */
 
     uint32_t accent_color;     /* packed 0xRRGGBB, applied to sliders/switches app-wide */
     bool accent_dynamic;       /* "Match album art": the playing cover's color replaces accent_color while shown */
@@ -187,16 +189,12 @@ typedef struct {
     bool dac_nos;
     bool dac_dre;
     usb_dsd_mode_t usb_dsd_output; /* Exact DSD pass-through bypasses software volume/DSP. */
+    int dsd_gain_db; /* 0..6 dB of extra DAC level while local native DSD plays. */
 
     /* Bluetooth output settings -- see bluetooth_control.h for the BlueALSA
      * 5 service behavior. */
     bool bt_volume_sync_enabled; /* Mirror hardware volume changes to the paired device. */
-    /* a2dp-sink profile: lets another device stream audio TO this one.
-     * Runtime-only, never persisted: the single-profile daemon cannot serve
-     * a2dp-source at the same time, so restoring this at boot would leave
-     * headphones unable to connect with no DAC overlay on screen to exit
-     * from. Leaving the overlay already clears it, so a stored "true" only
-     * ever came from powering off while the overlay was open. */
+    /* Runtime armed intent; incoming streams reserve output separately. */
     bool bt_dac_mode_enabled;
     char bt_codec[16];           /* "auto"/"ldac_hq"/"ldac_sq"/"ssc"/"aptx"/"aac"/"sbc"/"sbc_xq" */
     /* Resample Bluetooth output with the speex converter instead of
@@ -224,11 +222,27 @@ typedef struct {
         unsigned int rate;
     } bt_device_rates[BT_DEVICE_RATE_MAX];
     int bt_device_rate_count;
+    /* Per-accessory memory of Samsung SSC (bt_ssc_settings.h): it worked
+     * before, and the backoff after repeated failures. */
+    struct {
+        char mac[18];
+        bool worked;
+        unsigned char failures;
+        unsigned char skip;
+    } bt_ssc_devices[BT_DEVICE_RATE_MAX];
+    int bt_ssc_device_count;
+    /* Bluetooth devices trusted for Remote Control without the PIN (bt_rc_trust_settings.h). */
+    bt_rc_trust_entry_t bt_rc_trusted[BT_RC_TRUST_MAX];
+    int bt_rc_trusted_count;
     char bt_last_output_mac[18]; /* verified A2DP source MAC, empty when none is remembered */
     /* When true, BLE devices without a broadcast name are hidden from the
      * "Available Devices" list (shown as raw MAC addresses otherwise).
      * Paired devices are always shown regardless of this setting. */
     bool bt_hide_unnamed_devices;
+    bool wifi_restore_at_startup;
+    bool bt_restore_at_startup;
+    bool wifi_last_on;
+    bool bt_last_on;
 
     /* AirPlay receive mode -- see airplay_control.h. Mutually exclusive with
      * bt_dac_mode_enabled (both would fight over the same physical audio
@@ -289,7 +303,7 @@ typedef struct {
      * device charging overnight in a dark room. */
     bool led_indicator_enabled;
 
-    /* Settings -> About -> Developer Options -> "Enable debug logging" --
+    /* Settings -> System -> Developer Options -> "Enable debug logging" --
      * writes a detailed, timestamped log of library database scans and
      * album art cache jobs (including lazy load) to .logs/database_artwork.log
      * on the SD card (see db_log.h), and also gates the USB DAC bridge's own
@@ -322,10 +336,16 @@ typedef struct {
     /* Show artist and album-artist artwork in their library rows. Album and
      * song artwork is independent. Defaults on to preserve the existing UI. */
     bool show_artist_images;
+    bool peq_graph_include_preamp; /* EQ graph shows the combined response with the preamp; off shows the filter correction only */
+    bool join_albums; /* opt-in: album artists sharing an album and folder show as "Various Artists" when the library is published */
     int file_sort_mode; /* 0 Name, 1 Newest Modified; directories stay first. */
+    bool file_sort_reverse;
     int album_sort_mode; /* 0 Name, 1 Recently Added, 2 Release Year, 3 Album Artist then Year (oldest first). */
+    bool album_sort_reverse;
     int artist_albums_sort_mode; /* Ordering within an Artist's Albums view. */
+    bool artist_albums_sort_reverse;
     int album_artist_albums_sort_mode; /* Ordering within an Album Artist's Albums view. */
+    bool album_artist_albums_sort_reverse;
     int genre_view_mode; /* Inside a genre: 0 All Songs, 1 Artists, 2 Album Artist, 3 Albums. */
 
     /* Idle action after a long stretch idle (screen off, not playing, not
@@ -500,6 +520,10 @@ bool settings_load(player_settings_t * out);
  * mid-write can't corrupt the settings file. */
 void settings_save(const player_settings_t * settings);
 
+/* Sets settings->remote_control_pin so a concurrent settings_save() or
+ * settings_save_async() never persists a half-written PIN. */
+void settings_set_remote_control_pin(player_settings_t * settings, const char * pin);
+
 /* Bluetooth transport rate remembered per accessory; falls back to
  * bt_sample_rate when that accessory has no entry of its own. */
 unsigned int settings_bt_rate_for(const player_settings_t * settings, const char * mac);
@@ -508,6 +532,10 @@ void settings_bt_set_rate_for(player_settings_t * settings, const char * mac, un
 /* Queue a durable save without blocking the caller on filesystem syncs.
  * Rapid requests are coalesced to the newest complete snapshot. */
 void settings_save_async(const player_settings_t * settings);
+
+/* Non-latching barrier: waits until every queued save has reached storage.
+ * Later saves still work. Call before suspend or an in-process teardown. */
+void settings_save_drain(void);
 
 /* Terminal persistence barrier. Prevents later synchronous and asynchronous
  * saves, then waits for the newest queued snapshot and any active write to

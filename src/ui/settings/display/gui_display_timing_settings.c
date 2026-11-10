@@ -11,14 +11,8 @@
 
 static lv_obj_t * screen_timeout_screen;
 static lv_obj_t * screen_dimming_screen;
-static lv_obj_t * screen_dimming_switch;
-static lv_obj_t * screen_dimming_slider_card;
-static lv_obj_t * screen_dimming_slider;
-static lv_obj_t * screen_dimming_value_label;
-static lv_obj_t * screen_timeout_switch;
-static lv_obj_t * screen_timeout_slider_card;
-static lv_obj_t * screen_timeout_value_label;
-static lv_obj_t * screen_timeout_slider;
+static setting_slider_t screen_timeout_ui;
+static setting_slider_t screen_dimming_ui;
 
 /* "45s" below 1 minute, "1m"/"2m" on an exact minute, "1m 30s" otherwise --
  * matches the 30s-10min range (SCREEN_TIMEOUT_MIN/MAX_SECONDS) without ever
@@ -42,13 +36,9 @@ static int screen_timeout_seconds_to_step_index(int seconds) {
 static void screen_timeout_switch_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
     current_settings.screen_timeout_enabled = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
-    settings_save(&current_settings);
+    settings_save_async(&current_settings);
 
-    if (current_settings.screen_timeout_enabled) {
-        lv_obj_remove_flag(screen_timeout_slider_card, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(screen_timeout_slider_card, LV_OBJ_FLAG_HIDDEN);
-    }
+    setting_slider_set_enabled(&screen_timeout_ui, current_settings.screen_timeout_enabled);
 }
 
 /* Same VALUE_CHANGED-updates-live/RELEASED-persists split as the EQ sliders
@@ -63,11 +53,9 @@ static void screen_timeout_slider_event_cb(lv_event_t * e) {
 
     if (code == LV_EVENT_VALUE_CHANGED) {
         current_settings.screen_timeout_seconds = seconds;
-        char buf[32];
-        format_screen_timeout(buf, sizeof(buf), seconds);
-        lv_label_set_text(screen_timeout_value_label, buf);
+        setting_slider_set_index(&screen_timeout_ui, index);
     } else if (code == LV_EVENT_RELEASED) {
-        settings_save(&current_settings);
+        settings_save_async(&current_settings);
     }
 }
 
@@ -77,42 +65,18 @@ static lv_obj_t * build_screen_timeout_screen(void) {
 
     build_screen_header(scr, TR("Screen Timeout"), generic_back_cb, NULL, NULL);
 
-    /* Enable row configured with flex layout (SPACE_BETWEEN and flex-grow)
-     * so the text label wraps cleanly across font sizes without overlapping
-     * the switch. */
-    lv_obj_t * enable_row = lv_obj_create(scr);
-    lv_obj_set_width(enable_row, lv_pct(90));
-    lv_obj_set_height(enable_row, LV_SIZE_CONTENT);
-    lv_obj_align(enable_row, LV_ALIGN_TOP_MID, 0, STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT + 20);
-    lv_obj_set_style_bg_opa(enable_row, 0, 0);
-    lv_obj_set_style_border_width(enable_row, 0, 0);
-    lv_obj_remove_flag(enable_row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(enable_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(enable_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_gap(enable_row, 12, 0);
-
-    lv_obj_t * enable_label = lv_label_create(enable_row);
-    lv_label_set_text(enable_label, TR("Turn off screen automatically"));
-    lv_obj_add_style(enable_label, &style_theme_text_primary, 0);
-    lv_obj_set_style_text_font(enable_label, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
-    lv_label_set_long_mode(enable_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_flex_grow(enable_label, 1);
-
-    screen_timeout_switch = lv_switch_create(enable_row);
-    lv_obj_add_style(screen_timeout_switch, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-    if (current_settings.screen_timeout_enabled) lv_obj_add_state(screen_timeout_switch, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(screen_timeout_switch, screen_timeout_switch_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
-
-    /* Rounded slider card with vertical clearance below the track for the
-     * knob diameter and centered value label. */
-    screen_timeout_slider_card = build_setting_slider_card(scr, enable_row, BOARD_SCALE_PX(170), BOARD_SCALE_PX(18),
-        0, SCREEN_TIMEOUT_STEP_COUNT - 1,
-        screen_timeout_seconds_to_step_index(current_settings.screen_timeout_seconds),
-        screen_timeout_slider_event_cb, &screen_timeout_slider, &screen_timeout_value_label);
-    if (!current_settings.screen_timeout_enabled) lv_obj_add_flag(screen_timeout_slider_card, LV_OBJ_FLAG_HIDDEN);
-    char initial_buf[32];
-    format_screen_timeout(initial_buf, sizeof(initial_buf), current_settings.screen_timeout_seconds);
-    lv_label_set_text(screen_timeout_value_label, initial_buf);
+    screen_timeout_ui = build_setting_slider(scr, &(setting_slider_cfg_t) {
+        .toggle_label = TR("Turn off screen automatically"),
+        .checked = current_settings.screen_timeout_enabled,
+        .switch_cb = screen_timeout_switch_event_cb,
+        .caption = TR("Turn off after"),
+        .max_index = SCREEN_TIMEOUT_STEP_COUNT - 1,
+        .index = screen_timeout_seconds_to_step_index(current_settings.screen_timeout_seconds),
+        .steps = SCREEN_TIMEOUT_STEPS,
+        .fmt = format_screen_timeout,
+        .slider_cb = screen_timeout_slider_event_cb,
+    });
+    lv_obj_align(screen_timeout_ui.card, LV_ALIGN_TOP_MID, 0, STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT + 20);
 
     finalize_screen_navigation(scr);
     return scr;
@@ -133,13 +97,9 @@ static void screen_dimming_ui_switch_event_cb(lv_event_t * e) {
     if (!current_settings.screen_dimming_enabled) {
         backlight_set_dimmed(false);
     }
-    settings_save(&current_settings);
+    settings_save_async(&current_settings);
 
-    if (current_settings.screen_dimming_enabled) {
-        lv_obj_remove_flag(screen_dimming_slider_card, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(screen_dimming_slider_card, LV_OBJ_FLAG_HIDDEN);
-    }
+    setting_slider_set_enabled(&screen_dimming_ui, current_settings.screen_dimming_enabled);
 }
 
 static void screen_dim_delay_slider_event_cb(lv_event_t * e) {
@@ -149,11 +109,9 @@ static void screen_dim_delay_slider_event_cb(lv_event_t * e) {
 
     if (code == LV_EVENT_VALUE_CHANGED) {
         current_settings.screen_dim_delay_seconds = seconds;
-        char buf[32];
-        format_screen_timeout(buf, sizeof(buf), seconds);
-        lv_label_set_text(screen_dimming_value_label, buf);
+        setting_slider_set_index(&screen_dimming_ui, index);
     } else if (code == LV_EVENT_RELEASED) {
-        settings_save(&current_settings);
+        settings_save_async(&current_settings);
     }
 }
 
@@ -172,16 +130,14 @@ static void screen_dimming_screen_loaded_cb(lv_event_t * e) {
         }
     }
 
-    lv_slider_set_range(screen_dimming_slider, 0, effective_max_index);
+    setting_slider_set_max_index(&screen_dimming_ui, effective_max_index);
 
     int current_index = screen_dim_delay_seconds_to_step_index(current_settings.screen_dim_delay_seconds);
     if (current_index > effective_max_index) {
         current_settings.screen_dim_delay_seconds = SCREEN_DIM_DELAY_STEPS[effective_max_index];
-        lv_slider_set_value(screen_dimming_slider, effective_max_index, LV_ANIM_OFF);
-        char buf[32];
-        format_screen_timeout(buf, sizeof(buf), current_settings.screen_dim_delay_seconds);
-        lv_label_set_text(screen_dimming_value_label, buf);
-        settings_save(&current_settings);
+        lv_slider_set_value(screen_dimming_ui.slider, effective_max_index, LV_ANIM_OFF);
+        setting_slider_set_index(&screen_dimming_ui, effective_max_index);
+        settings_save_async(&current_settings);
     }
 }
 
@@ -192,37 +148,18 @@ static lv_obj_t * build_screen_dimming_screen(void) {
 
     build_screen_header(scr, TR("Screen Dimming"), generic_back_cb, NULL, NULL);
 
-    lv_obj_t * enable_row = lv_obj_create(scr);
-    lv_obj_set_width(enable_row, lv_pct(90));
-    lv_obj_set_height(enable_row, LV_SIZE_CONTENT);
-    lv_obj_align(enable_row, LV_ALIGN_TOP_MID, 0, STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT + 20);
-    lv_obj_set_style_bg_opa(enable_row, 0, 0);
-    lv_obj_set_style_border_width(enable_row, 0, 0);
-    lv_obj_remove_flag(enable_row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(enable_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(enable_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_gap(enable_row, 12, 0);
-
-    lv_obj_t * enable_label = lv_label_create(enable_row);
-    lv_label_set_text(enable_label, TR("Dim screen before timeout"));
-    lv_obj_add_style(enable_label, &style_theme_text_primary, 0);
-    lv_obj_set_style_text_font(enable_label, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
-    lv_label_set_long_mode(enable_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_flex_grow(enable_label, 1);
-
-    screen_dimming_switch = lv_switch_create(enable_row);
-    lv_obj_add_style(screen_dimming_switch, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-    if (current_settings.screen_dimming_enabled) lv_obj_add_state(screen_dimming_switch, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(screen_dimming_switch, screen_dimming_ui_switch_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
-
-    screen_dimming_slider_card = build_setting_slider_card(scr, enable_row, BOARD_SCALE_PX(170), BOARD_SCALE_PX(18),
-        0, SCREEN_DIM_DELAY_STEP_COUNT - 1,
-        screen_dim_delay_seconds_to_step_index(current_settings.screen_dim_delay_seconds),
-        screen_dim_delay_slider_event_cb, &screen_dimming_slider, &screen_dimming_value_label);
-    if (!current_settings.screen_dimming_enabled) lv_obj_add_flag(screen_dimming_slider_card, LV_OBJ_FLAG_HIDDEN);
-    char initial_buf[32];
-    format_screen_timeout(initial_buf, sizeof(initial_buf), current_settings.screen_dim_delay_seconds);
-    lv_label_set_text(screen_dimming_value_label, initial_buf);
+    screen_dimming_ui = build_setting_slider(scr, &(setting_slider_cfg_t) {
+        .toggle_label = TR("Dim screen before timeout"),
+        .checked = current_settings.screen_dimming_enabled,
+        .switch_cb = screen_dimming_ui_switch_event_cb,
+        .caption = TR("Dim after"),
+        .max_index = SCREEN_DIM_DELAY_STEP_COUNT - 1,
+        .index = screen_dim_delay_seconds_to_step_index(current_settings.screen_dim_delay_seconds),
+        .steps = SCREEN_DIM_DELAY_STEPS,
+        .fmt = format_screen_timeout,
+        .slider_cb = screen_dim_delay_slider_event_cb,
+    });
+    lv_obj_align(screen_dimming_ui.card, LV_ALIGN_TOP_MID, 0, STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT + 20);
 
     finalize_screen_navigation(scr);
     return scr;

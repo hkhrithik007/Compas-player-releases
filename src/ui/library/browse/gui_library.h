@@ -6,6 +6,7 @@
 #include "../../../library/remote/remote_collection.h"
 #include "../../../library/artwork/support/library_player_art.h"
 #include "../../settings/power/gui_power_hub.h"
+#include "../../widgets/lists/compact_list.h"
 #include "../../../library/metadata/scan/library_scan_storage.h"
 
 typedef struct group_song_entry_s {
@@ -44,6 +45,7 @@ void gui_library_suspend_boot_prompt(void);
  * reload can call gui_library_init() again from a clean slate. */
 void gui_library_teardown(void);
 void gui_library_refresh_music_screen(void);
+void gui_library_accent_changed(void);
 void gui_library_set_artist_images_enabled(bool enabled);
 typedef enum {
     GUI_LIBRARY_SORT_FILES,
@@ -53,6 +55,16 @@ typedef enum {
 } gui_library_sort_scope_t;
 /* Apply one persisted ordering without disturbing unrelated library views. */
 void gui_library_apply_sorting(gui_library_sort_scope_t scope);
+
+/* The Albums list as Cover Flow reuses it. The page is in the Albums screen's order
+ * (rows have the album, its album artist and, as identity, a song for the cover). */
+int albums_fetch_page(void * ctx, int offset, int count, compact_list_page_row_t out_rows[]);
+void gui_library_open_albums(void);
+/* An album by name and album artist: open it, or its long-press menu. Nothing if it is gone. */
+void gui_library_open_album(const char * name, const char * album_artist);
+void gui_library_open_album_menu(const char * name, const char * album_artist);
+/* The album order an artist (or album artist) page shows, as the database can serve it. UI thread only. */
+metadata_db_album_sort_t gui_library_group_album_sort(metadata_db_group_kind_t kind);
 
 void start_library_rescan(void);
 void start_library_auto_rescan(void);
@@ -66,22 +78,28 @@ void show_library_refresh_all_metadata_prompt(void);
 bool gui_library_auto_rescan_enabled(void);
 void poll_library_rescan(void);
 void poll_sd_format(void);
-void album_thumbnail_generation_poll(void);
 
 void open_add_to_playlist_for(const char * path);
 void gui_library_poll_playlists(void);
 /* Nonblocking duration/codec completion polling; updates only the current page. */
 void gui_library_poll_track_probes(void);
+/* Main loop, after a worker published (ui_wake_notify): make the poll timers that only
+ * check "is the worker done" run in this pass (thumbnail hand-off, paged list landing,
+ * album load). Their own guards (transition, scrolling) still apply. */
+void gui_library_jobs_ready_timers(void);
+/* True while any library worker is running or queued: page loads, lookups, probes, covers. */
+bool gui_library_background_busy(void);
 void on_cue_file_selected(const char * cue_path);
 void show_artist_albums(const char * name, metadata_db_group_kind_t kind);
 /* Opens the local artist or album group containing `path`, if the path is
  * present in the indexed library. Returns false for streams and unindexed
  * tracks. Album identity is the exact (album, album_artist) pair. */
 bool gui_library_open_now_playing_group(const char * path, bool album);
-void refresh_library_screens_after_rescan(void);
 
 void poll_az_index_drag(lv_timer_t * timer);
 void plugin_stream_tile_click_cb(lv_event_t * e);
+/* The screen came back on: a half-built Songs page goes back to its normal build pace at once. */
+void gui_library_screen_woke(void);
 void set_player_source_group_songs_direct(const group_song_entry_t * entries, int count, const char * title, int selected_index);
 
 bool search_close_if_active_for_screen(lv_obj_t * screen);
@@ -120,3 +138,7 @@ void gui_library_cancel_background_work(void);
 /* Frees the decoded thumbnail cache before an external session; rows refill it on demand. */
 void gui_library_release_memory_for_external_session(void);
 void gui_library_cancel_scan(void);
+
+/* Shared song detail line and source-format badge. */
+void gui_song_format_detail(char * out, size_t size, int seconds, const char * format);
+const char * gui_song_quality_asset(const char * suffix);

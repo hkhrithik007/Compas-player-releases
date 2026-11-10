@@ -4,6 +4,7 @@
 
 #include "../../../core/system/runtime/app_version.h"
 #include "../../manager/plugin_manager.h"
+#include "../../../ui/text/i18n/i18n.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -18,7 +19,7 @@ static const char * const plugin_capabilities[] = {
     "ui.settings_dashboard",
     "ui.music_layout", "ui.quick_drawer_layout",
     "ui.progress", "network.http.download_progress", "ui.list", "ui.settings", "ui.row_width", "ui.text_input", "ui.confirmation", "ui.toast", "ui.screenshot", "ui.theme",
-    "filesystem.sd", "playback.control", "playback.state", "playback.events",
+    "filesystem.sd", "filesystem.realpath", "playback.control", "playback.state", "playback.events",
     "library.artist_albums", "library.paged", "library.album_cover", "network.http.sync", "network.http.async",
     "network.http.download", "filesystem.mkdir", "crypto.md5", "audio.peq", "data.json",
     "storage.namespaced", "storage.secrets", "playback.remote", "playback.remote_resolve", "filesystem.playlists", "library.refresh",
@@ -30,14 +31,14 @@ static const char * const plugin_capabilities[] = {
     "playback.format", "playback.output_info", "playback.silent_volume", "audio.peq.transient",
     "playback.output_events", "playback.settings", "playback.ab_loop", "playback.ab_switch", "playback.http_seek",
     "audio.peq.state", "library.track_metadata", "playback.transient_volume",
-    "ui.player_actions", "ui.player_layout_restore",
-    "filesystem.file_ops", "ui.file_manager", "ui.player_menu", "ui.more_menu", "ui.file_picker",
-    "ui.startup_image", "audio.mseb.stock", "playback.stay_on_screen",
+    "ui.player_actions", "ui.player_layout_restore", "ui.now_playing.set_image", "ui.now_playing.set_text",
+    "filesystem.file_ops", "ui.file_manager", "ui.player_menu", "ui.more_menu", "ui.file_picker", "ui.color_picker",
+    "ui.startup_image", "audio.mseb.stock", "audio.soundstage", "playback.stay_on_screen",
     "ui.settings_list_10_sliders", "ui.button_lock", "playback.lyrics_refresh",
-    "audio.loop", "ui.breeze_stream_icons"
+    "audio.loop", "ui.breeze_stream_icons", "ui.list_hold", "ui.menu", "ui.text_view_style", "ui.text_view_replace",
+    "apps.list", "apps.launch",
+    "network.status", "i18n.tr"
 };
-
-
 
 int l_plugin_has_capability(lua_State * L) {
     const char * requested = luaL_checkstring(L, 1);
@@ -51,7 +52,7 @@ int l_plugin_has_capability(lua_State * L) {
 
 /* plugin.media_capabilities() -- see NEXT_TODO-style remote-provider plan,
  * requirement 11. Every field here is a verified fact about this exact
- * pipeline (audio.c's decoder_open()/audio_output.c), not an aspirational
+ * pipeline (audio_decoder_open.c's decoder_open()/audio_output.c), not an aspirational
  * one:
  * - mp3/aac/flac are all three already confirmed working for a direct
  *   http(s):// stream today (decoder_open()'s is_stream_url() branch --
@@ -121,5 +122,49 @@ int l_plugin_get_app_info(lua_State * L) {
 #endif
     lua_setfield(L, -2, "platform");
     lua_pushinteger(L, PLUGIN_API_VERSION); lua_setfield(L, -2, "plugin_api");
+    return 1;
+}
+
+/* plugin.language() -> the player's language code ("en", "es", "pt_BR"...). */
+int l_plugin_language(lua_State * L) {
+    lua_pushstring(L, i18n_get_language());
+    return 1;
+}
+
+/* Pushes table[code][text] and returns true when it is a string; pops
+ * everything otherwise. */
+static bool push_table_translation(lua_State * L, int table, const char * code, int text) {
+    if (lua_getfield(L, table, code) != LUA_TTABLE) {
+        lua_pop(L, 1);
+        return false;
+    }
+    lua_pushvalue(L, text);
+    if (lua_gettable(L, -2) != LUA_TSTRING) {
+        lua_pop(L, 2);
+        return false;
+    }
+    lua_remove(L, -2);
+    return true;
+}
+
+/* plugin.tr(text [, translations]) -> text in the player's language. The
+ * plugin's own table ({ es = { ["Chapters"] = "Capitulos" }, ... }) wins, a
+ * regional code ("pt_BR") falling back to its base language ("pt"); then the
+ * player's own catalog (English is the text itself). */
+int l_plugin_tr(lua_State * L) {
+    const char * text = luaL_checkstring(L, 1);
+    if (!lua_isnoneornil(L, 2)) luaL_checktype(L, 2, LUA_TTABLE);
+    const char * code = i18n_get_language();
+    if (lua_istable(L, 2)) {
+        if (push_table_translation(L, 2, code, 1)) return 1;
+        const char * sep = strchr(code, '_');
+        if (sep && (size_t)(sep - code) < I18N_CODE_MAX) {
+            char base[I18N_CODE_MAX];
+            memcpy(base, code, (size_t)(sep - code));
+            base[sep - code] = '\0';
+            if (push_table_translation(L, 2, base, 1)) return 1;
+        }
+    }
+    lua_pushstring(L, i18n_tr(text));
     return 1;
 }

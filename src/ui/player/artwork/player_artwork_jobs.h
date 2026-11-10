@@ -4,14 +4,19 @@
 #include <stdint.h>
 #include <limits.h>
 #include "../../../audio/engine/audio.h"
+#include "../../../network/services/subsonic_client.h"
 #include "player_artwork_cache.h"
 
-/* A stream_url selects the streamed-art path; otherwise local_track_path is
+/* Every decoded buffer is square and edge x edge pixels, with the edge the
+ * request was launched with (player_cover_raster_px() at that moment), so a
+ * layout change cannot make a late result be read at the wrong size.
+ * A stream_url or subsonic_cover_id selects the streamed-art path; otherwise local_track_path is
  * decoded. picture_data is an optional owned stream body and transfers with
  * the request. shown_cover is captured only when a request actually launches. */
 typedef struct {
     int for_index;
     unsigned int generation;
+    int edge;
 #ifdef UI_PERF_TRACE
     uint64_t request_perf_us;
 #endif
@@ -22,6 +27,11 @@ typedef struct {
     uint32_t picture_size;
     char stream_url[1536];
     bool stream_verify_tls;
+    /* Alternative to stream_url: a Subsonic cover id, read from the cover
+     * cache. subsonic_allow_net is decided on the UI thread. */
+    subsonic_server_t subsonic_server;
+    char subsonic_cover_id[256];
+    bool subsonic_allow_net;
     char local_track_path[PATH_MAX];
     char artist[128];
     char album[128];
@@ -42,6 +52,7 @@ typedef struct {
     bool valid;
     int for_index;
     unsigned int generation;
+    int edge;
     uint16_t * pixels;
     cover_file_id_t file;
     bool accent_valid;
@@ -56,6 +67,7 @@ typedef struct {
 typedef struct {
     int for_index;
     unsigned int generation;
+    int edge;
     audio_current_format_info_t format;
     bool ok;
     uint16_t * pixels;

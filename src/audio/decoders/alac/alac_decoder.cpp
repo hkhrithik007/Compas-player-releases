@@ -2,6 +2,7 @@
 
 extern "C" {
 #include "../../demux/mp4/mp4_demux.h"
+#include "../../demux/caf/caf_demux.h"
 }
 
 #include "ALACDecoder.h"
@@ -11,8 +12,14 @@ extern "C" {
 #include <cstring>
 #include <new>
 
+/* Where compressed ALAC packets come from: exactly one of the two is set. */
+struct alac_source {
+    mp4_demux_t * mp4;
+    caf_demux_t * caf;
+};
+
 struct alac_decoder {
-    mp4_demux_t * demux;
+    alac_source src;
     ALACDecoder * decoder;
 
     unsigned int channels;
@@ -63,18 +70,108 @@ static bool validate_alac_cookie(const uint8_t *cookie, uint32_t size,
     *sample_rate = read_be32(cookie + 20);
     return *frame_length > 0 && *frame_length <= 65536 &&
            *channels > 0 && *channels <= 8 &&
-           (*bit_depth == 16 || *bit_depth == 24) &&
+           (*bit_depth == 16 || *bit_depth == 20 || *bit_depth == 24 || *bit_depth == 32) &&
            *sample_rate >= 8000 && *sample_rate <= 384000;
 }
 
+static void src_close(alac_source * src) {
+    mp4_demux_close(src->mp4);
+    caf_demux_close(src->caf);
+    *src = alac_source();
+}
+
+/* Opens an ALAC stream from a CAF or MP4 file. */
+static bool src_open(const char * path, alac_source * src) {
+    char fourcc[5];
+    *src = alac_source();
+    src->caf = caf_demux_open(path);
+    if (src->caf) {
+        caf_demux_get_codec_fourcc(src->caf, fourcc);
+    } else {
+        src->mp4 = mp4_demux_open(path);
+        if (!src->mp4) return false;
+        mp4_demux_get_codec_fourcc(src->mp4, fourcc);
+    }
+    if (strcmp(fourcc, "alac") == 0) return true;
+    src_close(src);
+    return false;
+}
+
+static const uint8_t * src_config(const alac_source * src, uint32_t * size) {
+    return src->caf ? caf_demux_get_codec_config(src->caf, size)
+                    : mp4_demux_get_codec_config(src->mp4, size);
+}
+
+static uint32_t src_count(const alac_source * src) {
+    return src->caf ? caf_demux_get_packet_count(src->caf) : mp4_demux_get_sample_count(src->mp4);
+}
+
+static uint32_t src_frames_per_packet(const alac_source * src) {
+    return src->caf ? caf_demux_get_frames_per_packet(src->caf) : mp4_demux_get_frames_per_sample(src->mp4);
+}
+
+static bool src_read(alac_source * src, uint32_t index, uint8_t * buf, uint32_t cap, uint32_t * size) {
+    return src->caf ? caf_demux_read_packet(src->caf, index, buf, cap, size)
+                    : mp4_demux_read_sample(src->mp4, index, buf, cap, size);
+}
+
+/* Playable frames after the container's own priming/padding removal. */
+static uint64_t src_total_frames(const alac_source * src, uint32_t sample_rate) {
+    if (src->caf) return caf_demux_get_valid_frames(src->caf);
+    mp4_demux_set_pcm_sample_rate(src->mp4, sample_rate);
+    return mp4_demux_get_total_pcm_frame_count(src->mp4);
+}
+
+static uint64_t src_priming(const alac_source * src) {
+    if (src->caf) return caf_demux_get_priming_frames(src->caf);
+    uint64_t priming = 0, playable = 0;
+    return mp4_demux_get_gapless_trim(src->mp4, &priming, &playable) ? priming : 0;
+}
+
+/* Packet holding a playable frame, and how many of its frames precede it. */
+static bool src_map_frame(const alac_source * src, uint64_t frame, uint32_t * packet, uint64_t * discard) {
+    if (!src->caf) return mp4_demux_map_pcm_frame(src->mp4, frame, packet, discard);
+    uint64_t abs_frame = frame + caf_demux_get_priming_frames(src->caf);
+    uint32_t fpp = caf_demux_get_frames_per_packet(src->caf);
+    if (abs_frame / fpp > UINT32_MAX) return false;
+    *packet = (uint32_t) (abs_frame / fpp);
+    *discard = abs_frame % fpp;
+    return true;
+}
+
+/* Native ALAC output as 16-bit, and as 24-bit right-justified when wanted.
+ * 20-bit comes out left-justified in 3 bytes, so it reads like 24-bit. */
+static void convert_output(alac_decoder_t * dec, uint32_t frames) {
+    size_t count = (size_t) frames * dec->channels;
+    const uint8_t * raw = dec->raw_output_buf;
+    for (size_t i = 0; i < count; i++) {
+        int32_t v16, v24;
+        if (dec->bit_depth == 16) {
+            int16_t s;
+            memcpy(&s, raw + i * 2, sizeof(s));
+            v16 = v24 = s;
+        } else if (dec->bit_depth == 32) {
+            int32_t w;
+            memcpy(&w, raw + i * 4, sizeof(w));
+            v16 = w >> 16;
+            v24 = w >> 8;
+        } else { /* packed 3-byte little-endian samples */
+            v24 = raw[i * 3] | (raw[i * 3 + 1] << 8) | ((int8_t) raw[i * 3 + 2] * 65536);
+            v16 = v24 >> 8;
+        }
+        dec->carry_buffer[i] = (int16_t) v16;
+        if (dec->carry_buffer_s32) dec->carry_buffer_s32[i] = v24;
+    }
+}
+
 static bool decode_next_sample_ex(alac_decoder_t * dec, decoder_read_status_t * out_status) {
-    if (dec->current_sample_index >= mp4_demux_get_sample_count(dec->demux)) {
+    if (dec->current_sample_index >= src_count(&dec->src)) {
         if (out_status) *out_status = DECODER_READ_EOF;
         return false;
     }
 
     uint32_t compressed_size;
-    if (!mp4_demux_read_sample(dec->demux, dec->current_sample_index, dec->compressed_buf,
+    if (!src_read(&dec->src, dec->current_sample_index, dec->compressed_buf,
                                 dec->compressed_buf_capacity, &compressed_size)) {
         dec->consecutive_errors++;
         dec->current_sample_index++;
@@ -102,30 +199,7 @@ static bool decode_next_sample_ex(alac_decoder_t * dec, decoder_read_status_t * 
         return false;
     }
 
-    if (dec->bit_depth == 16) {
-        memcpy(dec->carry_buffer, dec->raw_output_buf, (size_t) out_frames * dec->channels * sizeof(int16_t));
-        if (dec->carry_buffer_s32) {
-            const int16_t * src16 = (const int16_t *) dec->raw_output_buf;
-            size_t sample_count = (size_t) out_frames * dec->channels;
-            for (size_t i = 0; i < sample_count; i++) {
-                dec->carry_buffer_s32[i] = (int32_t) src16[i];
-            }
-        }
-    } else { /* 24-bit: packed 3-byte little-endian samples per copyPredictorTo24/unmix24 */
-        const uint8_t * src = dec->raw_output_buf;
-        size_t sample_count = (size_t) out_frames * dec->channels;
-        for (size_t i = 0; i < sample_count; i++) {
-            int32_t v = src[i * 3] | (src[i * 3 + 1] << 8) | (src[i * 3 + 2] << 16);
-            if (v & 0x800000) v |= (int32_t) 0xFF000000; /* sign-extend */
-            dec->carry_buffer[i] = (int16_t) (v >> 8);
-            if (dec->carry_buffer_s32) {
-                /* ALAC decoded sample v is already a right-justified, sign-extended
-                 * true-magnitude int32 value -- do NOT shift, it is already in the
-                 * low 24 bits matching ALSA S24_LE layout. */
-                dec->carry_buffer_s32[i] = v;
-            }
-        }
-    }
+    convert_output(dec, out_frames);
 
     dec->consecutive_errors = 0;
     dec->carry_frames = out_frames;
@@ -139,108 +213,86 @@ static bool decode_next_sample(alac_decoder_t * dec) {
     return decode_next_sample_ex(dec, NULL);
 }
 
-extern "C" alac_decoder_t * alac_open_file(const char * path) {
-    mp4_demux_t * demux = mp4_demux_open(path);
-    if (!demux) return NULL;
-
-    char fourcc[5];
-    mp4_demux_get_codec_fourcc(demux, fourcc);
-    if (strcmp(fourcc, "alac") != 0) {
-        mp4_demux_close(demux);
-        return NULL;
-    }
-
+/* Builds the ALAC decoder from the stream's cookie, accepting 16/20/24/32-bit. */
+static ALACDecoder * create_codec(const alac_source * src) {
     uint32_t config_size;
-    const uint8_t * config = mp4_demux_get_codec_config(demux, &config_size);
-    if (!config || config_size == 0) {
-        mp4_demux_close(demux);
+    const uint8_t * config = src_config(src, &config_size);
+    uint32_t frame_length, sample_rate;
+    uint8_t channels, bit_depth;
+    if (!config || !validate_alac_cookie(config, config_size, &frame_length,
+                                         &sample_rate, &channels, &bit_depth))
         return NULL;
-    }
-
-    uint32_t cookie_frame_length, cookie_sample_rate;
-    uint8_t cookie_channels, cookie_bit_depth;
-    if (!validate_alac_cookie(config, config_size, &cookie_frame_length,
-                              &cookie_sample_rate, &cookie_channels, &cookie_bit_depth)) {
-        mp4_demux_close(demux);
-        return NULL;
-    }
     ALACDecoder * decoder = new (std::nothrow) ALACDecoder();
-    if (!decoder) { mp4_demux_close(demux); return NULL; }
+    if (!decoder) return NULL;
     /* Init() only reads from this buffer (parses header fields), never writes it,
      * despite the non-const signature. */
-    if (decoder->Init((void *) config, config_size) != 0) {
+    if (decoder->Init((void *) config, config_size) != 0 ||
+        decoder->mConfig.frameLength != frame_length ||
+        decoder->mConfig.sampleRate != sample_rate ||
+        decoder->mConfig.numChannels != channels ||
+        decoder->mConfig.bitDepth != bit_depth) {
         delete decoder;
-        mp4_demux_close(demux);
         return NULL;
     }
+    return decoder;
+}
 
-    if (decoder->mConfig.frameLength != cookie_frame_length ||
-        decoder->mConfig.sampleRate != cookie_sample_rate ||
-        decoder->mConfig.numChannels != cookie_channels ||
-        decoder->mConfig.bitDepth != cookie_bit_depth ||
-        (decoder->mConfig.bitDepth != 16 && decoder->mConfig.bitDepth != 24)) {
-        delete decoder;
-        mp4_demux_close(demux);
-        return NULL; /* 20/32-bit ALAC not handled -- rare in practice */
+/* Drops the encoder priming frames from the start of the first packet(s). */
+static bool skip_priming(alac_decoder_t * dec) {
+    uint64_t trim = src_priming(&dec->src);
+    while (trim > 0) {
+        uint64_t available = dec->carry_frames - dec->carry_read_pos;
+        if (trim < available) {
+            dec->carry_read_pos += (uint32_t) trim;
+            break;
+        }
+        trim -= available;
+        dec->carry_read_pos = dec->carry_frames;
+        if (trim > 0 && !decode_next_sample(dec)) return false;
     }
+    return true;
+}
 
-    alac_decoder_t * dec = (alac_decoder_t *) calloc(1, sizeof(alac_decoder_t));
-    if (!dec) { delete decoder; mp4_demux_close(demux); return NULL; }
-    dec->demux = demux;
-    dec->decoder = decoder;
-    dec->channels = decoder->mConfig.numChannels;
-    dec->sample_rate = decoder->mConfig.sampleRate;
-    dec->bit_depth = decoder->mConfig.bitDepth;
-    mp4_demux_set_pcm_sample_rate(demux, dec->sample_rate);
-    /* stts durations can be in a media timescale different from sample_rate;
-     * use the codec cookie for output buffer capacity, timeline APIs for seek
-     * timestamps. */
-    dec->frame_size = decoder->mConfig.frameLength;
-    if (dec->frame_size == 0) dec->frame_size = mp4_demux_get_frames_per_sample(demux);
-
-    /* Exact total (not sample_count * frame_size) -- the last sample
-     * typically represents fewer frames than a full access unit, and the
-     * container's own stts table already records the real per-sample
-     * durations. */
-    dec->total_pcm_frames = mp4_demux_get_total_pcm_frame_count(demux);
-
+static bool alloc_buffers(alac_decoder_t * dec) {
     /* Generous: worst case is uncompressed-ish escape frames, channels *
      * bytes-per-sample-at-full-depth * frame_size, plus header slack. */
     dec->compressed_buf_capacity = dec->frame_size * dec->channels * 4 + 4096;
     dec->compressed_buf = (uint8_t *) malloc(dec->compressed_buf_capacity);
 
-    size_t bytes_per_sample = (dec->bit_depth == 16) ? sizeof(int16_t) : 3;
+    size_t bytes_per_sample = dec->bit_depth == 16 ? 2 : dec->bit_depth == 32 ? 4 : 3;
     dec->raw_output_buf = (uint8_t *) malloc((size_t) dec->frame_size * dec->channels * bytes_per_sample);
     dec->carry_buffer = (int16_t *) malloc((size_t) dec->frame_size * dec->channels * sizeof(int16_t));
+    return dec->compressed_buf && dec->raw_output_buf && dec->carry_buffer;
+}
 
-    if (!dec->compressed_buf || !dec->raw_output_buf || !dec->carry_buffer) {
+extern "C" alac_decoder_t * alac_open_file(const char * path) {
+    alac_source src;
+    if (!src_open(path, &src)) return NULL;
+    ALACDecoder * decoder = create_codec(&src);
+    alac_decoder_t * dec = decoder ? (alac_decoder_t *) calloc(1, sizeof(alac_decoder_t)) : NULL;
+    if (!dec) {
+        delete decoder;
+        src_close(&src);
+        return NULL;
+    }
+    dec->src = src;
+    dec->decoder = decoder;
+    dec->channels = decoder->mConfig.numChannels;
+    dec->sample_rate = decoder->mConfig.sampleRate;
+    dec->bit_depth = decoder->mConfig.bitDepth;
+    /* The container's timescale can differ from sample_rate; the cookie sizes
+     * the output buffers. */
+    dec->frame_size = decoder->mConfig.frameLength;
+    if (dec->frame_size == 0) dec->frame_size = src_frames_per_packet(&src);
+
+    /* Exact total (not packet count * frame_size): the last packet usually
+     * holds fewer frames than a full one. */
+    dec->total_pcm_frames = src_total_frames(&src, dec->sample_rate);
+
+    if (!alloc_buffers(dec) || !decode_next_sample(dec) || !skip_priming(dec)) {
         alac_close(dec);
         return NULL;
     }
-
-    if (!decode_next_sample(dec)) {
-        alac_close(dec);
-        return NULL;
-    }
-    uint64_t priming = 0, playable = 0;
-    if (mp4_demux_get_gapless_trim(demux, &priming, &playable)) {
-        uint64_t trim = priming;
-        while (trim > 0) {
-            uint64_t available = dec->carry_frames - dec->carry_read_pos;
-            if (trim < available) {
-                dec->carry_read_pos += (uint32_t)trim;
-                trim = 0;
-                break;
-            }
-            trim -= available;
-            dec->carry_read_pos = dec->carry_frames;
-            if (trim > 0 && !decode_next_sample(dec)) {
-                alac_close(dec);
-                return NULL;
-            }
-        }
-    }
-
     return dec;
 }
 
@@ -301,23 +353,7 @@ decoder_read_result_t alac_read_pcm_frames_s16(alac_decoder_t * dec, uint64_t fr
 decoder_read_result_t alac_read_pcm_frames_s32(alac_decoder_t * dec, uint64_t frames_to_read, int32_t * buffer_out) {
     if (dec && !dec->carry_buffer_s32) {
         dec->carry_buffer_s32 = (int32_t *) malloc((size_t) dec->frame_size * dec->channels * sizeof(int32_t));
-        if (dec->carry_buffer_s32 && dec->carry_frames > 0) {
-            if (dec->bit_depth == 16) {
-                const int16_t * src16 = (const int16_t *) dec->raw_output_buf;
-                size_t sample_count = (size_t) dec->carry_frames * dec->channels;
-                for (size_t i = 0; i < sample_count; i++) {
-                    dec->carry_buffer_s32[i] = (int32_t) src16[i];
-                }
-            } else {
-                const uint8_t * src = dec->raw_output_buf;
-                size_t sample_count = (size_t) dec->carry_frames * dec->channels;
-                for (size_t i = 0; i < sample_count; i++) {
-                    int32_t v = src[i * 3] | (src[i * 3 + 1] << 8) | (src[i * 3 + 2] << 16);
-                    if (v & 0x800000) v |= (int32_t) 0xFF000000;
-                    dec->carry_buffer_s32[i] = v;
-                }
-            }
-        }
+        if (dec->carry_buffer_s32 && dec->carry_frames > 0) convert_output(dec, dec->carry_frames);
     }
 
     decoder_read_result_t res = { .frames = 0, .status = DECODER_READ_OK };
@@ -362,8 +398,8 @@ bool alac_seek_to_pcm_frame(alac_decoder_t * dec, uint64_t frame_index) {
     if (frame_index > dec->total_pcm_frames) frame_index = dec->total_pcm_frames;
     uint32_t target_sample;
     uint64_t discard;
-    if (!mp4_demux_map_pcm_frame(dec->demux, frame_index, &target_sample, &discard)) return false;
-    uint32_t sample_count = mp4_demux_get_sample_count(dec->demux);
+    if (!src_map_frame(&dec->src, frame_index, &target_sample, &discard)) return false;
+    uint32_t sample_count = src_count(&dec->src);
     if (target_sample >= sample_count) target_sample = sample_count > 0 ? sample_count - 1 : 0;
 
     dec->current_sample_index = target_sample;
@@ -380,7 +416,7 @@ bool alac_seek_to_pcm_frame(alac_decoder_t * dec, uint64_t frame_index) {
 void alac_close(alac_decoder_t * dec) {
     if (!dec) return;
     delete dec->decoder;
-    mp4_demux_close(dec->demux);
+    src_close(&dec->src);
     free(dec->compressed_buf);
     free(dec->raw_output_buf);
     free(dec->carry_buffer);

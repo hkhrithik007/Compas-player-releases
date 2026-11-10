@@ -2,6 +2,7 @@
 #define PLUGIN_MANAGER_H
 
 #include "plugin_api_version.h"
+#include "lua.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -12,8 +13,8 @@
 
 /* Third-party Lua plugin support. Every *.lua file under
  * <SD card>/.plugins/ is loaded into its own lua_State at startup, with a
- * small C API (the `plugin` global table, see plugin_manager.c's own
- * comment above register_plugin_api()) exposed for adding a row to an
+ * small C API (the `plugin` global table, see compas-plugins/PLUGINS.md)
+ * exposed for adding a row to an
  * existing list screen (see PLUGIN_MAX_BOOKS_LIST_ITEMS below), showing a
  * simple list screen, browsing the SD card, and driving playback -- so a
  * plugin is a plain text script, not compiled code. Each lua_State stays
@@ -30,7 +31,7 @@
 
 /* Same shape and same reasoning as PLUGIN_MAX_BOOKS_LIST_ITEMS above, for
  * plugin.register_list_item("settings", ...) -- sizes this target's own
- * slot in plugin_manager.c's shared plugin_list_items[][] storage (one
+ * slot in plugin_registries.c's shared plugin_list_items[][] storage (one
  * 2D array covering all 10 list targets via a plugin_list_target_desc_t
  * descriptor table, not a separate array per target), and gui.c's
  * build_settings_screen() sizes its own static items[] array off this (5
@@ -39,8 +40,8 @@
 #define PLUGIN_MAX_SETTINGS_LIST_ITEMS 8
 
 /* Same shape and reasoning as PLUGIN_MAX_SETTINGS_LIST_ITEMS above, for
- * plugin.register_list_item("display", ...) -- sizes plugin_manager.c's own
- * internal plugin_display_list_items[] array, and gui.c's build_settings_
+ * plugin.register_list_item("display", ...) -- sizes this target's own
+ * slot in plugin_registries.c's plugin_list_items[][] storage, and gui.c's build_settings_
  * display_screen() sizes its own static items[] array off this (4 built-in
  * rows -- "Accent Color", "Font Size", "Screen Timeout", "Swipe Up for
  * Home" -- plus this many plugin rows). Exists as its own list_id (not
@@ -50,8 +51,8 @@
 #define PLUGIN_MAX_DISPLAY_LIST_ITEMS 8
 
 /* Same shape and reasoning as PLUGIN_MAX_DISPLAY_LIST_ITEMS above, for
- * plugin.register_list_item("playback", ...) -- sizes plugin_manager.c's own
- * internal plugin_playback_list_items[] array, and gui_settings.c's
+ * plugin.register_list_item("playback", ...) -- sizes this target's own
+ * slot in plugin_registries.c's plugin_list_items[][] storage, and gui_settings.c's
  * build_music_playback_screen() (Settings > Music Settings > Playback)
  * appends these after its own built-in rows. One of five list_ids covering
  * Music Settings' submenus -- see PLUGIN_MAX_MUSIC_AUDIO_LIST_ITEMS below for
@@ -86,14 +87,14 @@
 #define PLUGIN_MAX_MUSIC_LIBRARY_LIST_ITEMS 8
 
 /* Same shape and reasoning as PLUGIN_MAX_DISPLAY_LIST_ITEMS above, for
- * plugin.register_list_item("power", ...) -- sizes plugin_manager.c's own
- * internal plugin_power_list_items[] array, and gui.c's build_settings_
+ * plugin.register_list_item("power", ...) -- sizes this target's own
+ * slot in plugin_registries.c's plugin_list_items[][] storage, and gui.c's build_settings_
  * power_screen() sizes its own static items[] array off this. */
 #define PLUGIN_MAX_POWER_LIST_ITEMS 8
 
 /* Same shape and reasoning as PLUGIN_MAX_DISPLAY_LIST_ITEMS above, for
- * plugin.register_list_item("system", ...) -- sizes plugin_manager.c's own
- * internal plugin_system_list_items[] array, and gui.c's build_settings_
+ * plugin.register_list_item("system", ...) -- sizes this target's own
+ * slot in plugin_registries.c's plugin_list_items[][] storage, and gui.c's build_settings_
  * system_screen() sizes its own static items[] array off this. */
 #define PLUGIN_MAX_SYSTEM_LIST_ITEMS 8
 
@@ -107,7 +108,7 @@
 #define PLUGIN_MAX_MORE_LIST_ITEMS 4
 
 /* Upper bound on how many tiles all plugins combined may register via
- * plugin.register_stream_media_tile() -- sizes plugin_manager.c's own
+ * plugin.register_stream_media_tile() -- sizes plugin_registries.c's own
  * internal plugin_stream_tiles[] array. Stream Media has exactly one
  * built-in tile (Subsonic) after this session's Qobuz/Tidal/Net Radio
  * cleanup, so unlike Home (already full at 6, can't scroll) it has real
@@ -119,7 +120,7 @@
 #define PLUGIN_MAX_STREAM_TILES 5
 
 /* Upper bound on how many tiles all plugins combined may register via
- * plugin.register_home_tile() -- sizes plugin_manager.c's own internal
+ * plugin.register_home_tile() -- sizes plugin_registries.c's own internal
  * plugin_home_tiles[] array. Unlike PLUGIN_MAX_STREAM_TILES, this is not
  * itself Home's real rendering ceiling -- home_layout.h's HOME_LAYOUT_MAX_
  * TILES (which bounds native + plugin tiles combined, as actually ordered
@@ -132,13 +133,13 @@
 /* ---- plugin.show_settings_list() -- a second, separate screen pool from
  * plugin.show_list() (PLUGIN_LIST_SCREEN_POOL_SIZE, gui.c), for a plugin's
  * OWN nested settings submenu with real toggle/slider rows, not plain
- * tappable text. Shared between plugin_manager.c (per-slot Lua callback ref
+ * tappable text. Shared between plugin_list_screens.c (per-slot Lua callback ref
  * storage, so a reused pool slot's stale refs get released rather than
  * leaked) and gui.c (the pool itself + its per-slot row state) -- see
- * gui.c's gui_plugin_show_settings_list() and plugin_manager.c's
+ * gui.c's gui_plugin_show_settings_list() and plugin_list_screens.c's
  * l_plugin_show_settings_list(). ---- */
 
-/* Row type tags, passed as plain ints across the gui.c/plugin_manager.c
+/* Row type tags, passed as plain ints across the gui.c/plugin_list_screens.c
  * boundary (parallel-array style, matching every other plugin.* bridge in
  * this codebase -- no shared struct type needed across the two headers). */
 #define PLUGIN_SETTINGS_ROW_TAP    0 /* plain tap row -- on_select(), no args */
@@ -148,18 +149,18 @@
 /* Two pool slots -- settings submenus nest shallower in practice than plain
  * list browsing (plugin.show_list()'s own pool is 4), so smaller with real
  * headroom under NAV_STACK_MAX. Sizes both gui.c's screen pool and
- * plugin_manager.c's per-slot callback-ref storage below. */
+ * plugin_list_screens.c's per-slot callback-ref storage below. */
 #define PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE 2
 
 /* Upper bound on rows per plugin.show_settings_list() call -- silently
  * truncates past this, same convention plugin.show_list()'s own
- * PLUGIN_MAX_LIST_ITEMS cap uses. Sizes both plugin_manager.c's per-slot ref
+ * PLUGIN_MAX_LIST_ITEMS cap uses. Sizes both plugin_list_screens.c's per-slot ref
  * storage and gui.c's per-slot row-state storage. */
 #define PLUGIN_SETTINGS_LIST_MAX_ROWS 24
 
 /* Upper bound on "slider"-type rows per call specifically -- separate from
  * PLUGIN_SETTINGS_LIST_MAX_ROWS because each slider row needs a real,
- * bounded slot in gui_shell.c's swipe_dead_zones[] (see SWIPE_DEAD_ZONE_MAX's own
+ * bounded slot in gui_shell_gestures.c's swipe_dead_zones[] (see SWIPE_DEAD_ZONE_MAX's own
  * comment there): PLUGIN_SETTINGS_LIST_SCREEN_POOL_SIZE pool slots x this
  * many sliders each is real, accounted-for headroom, not unbounded growth.
  * A slider row past this cap is silently dropped (not rendered at all),
@@ -187,7 +188,7 @@
  * across every loaded plugin combined -- luaL_error()s past this, same
  * cap-and-fail-loudly convention as PLUGIN_MAX_STREAM_TILES. Each playback,
  * device, volume, and battery event gets its own array sized off this in
- * plugin_manager.c. */
+ * plugin_events.c. */
 #define PLUGIN_MAX_EVENT_SUBSCRIBERS 16
 
 /* ---- plugin.set_interval(seconds, callback) / plugin.clear_interval(handle)
@@ -248,7 +249,7 @@ typedef struct {
  * Entries are sorted by filename, UNLESS the on-disk file count exceeds
  * `max`, in which case every currently-loaded plugin is placed first
  * (guaranteed never truncated out) and the remaining budget is filled
- * alphabetically -- see plugin_manager.c's own comment on this function for
+ * alphabetically -- see plugin_scan.c's own comment on this function for
  * why. */
 int plugin_manager_scan_available(plugin_available_entry_t * out, int max);
 
@@ -297,6 +298,8 @@ void plugin_manager_get_books_list_item_options(int index, const char ** out_ico
 int plugin_manager_get_music_list_item_count(void);
 const char * plugin_manager_get_music_list_item_label(int index);
 void plugin_manager_music_list_item_clicked(int index);
+/* Stable key for the Music order setting; false when the entry has no owner. */
+bool plugin_manager_get_music_list_item_key(int index, char * out, size_t cap);
 void plugin_manager_get_music_list_item_options(int index, const char ** out_icon, int32_t * out_height,
                                                  int32_t * out_width, const char ** out_text_size);
 
@@ -306,6 +309,12 @@ void plugin_manager_get_music_list_item_options(int index, const char ** out_ico
 int plugin_manager_get_settings_list_item_count(void);
 const char * plugin_manager_get_settings_list_item_label(int index);
 void plugin_manager_settings_list_item_clicked(int index);
+/* True/open the first live row registered by this exact file in any Settings
+ * list (Additional Tools first, then Display, Playback, Sound, Buttons & Remote,
+ * Power timers, Library, Power, System). Books, Music, player and More rows
+ * do not count. */
+bool plugin_manager_file_has_settings(const char * filename);
+bool plugin_manager_open_file_settings(const char * filename);
 void plugin_manager_get_settings_list_item_options(int index, const char ** out_icon, int32_t * out_height,
                                                     int32_t * out_width, const char ** out_text_size);
 
@@ -401,9 +410,12 @@ uint32_t plugin_manager_get_list_registry_generation(void);
  * with a 1-based Lua index. No-op if no plugin.show_list() call is still
  * "current" (i.e. none has ever been made yet). */
 void plugin_manager_list_item_selected(int slot, int index);
+/* Long press on a row: calls the list's on_hold(index) and returns true, or
+ * returns false (nothing called) when the list has no on_hold. */
+bool plugin_manager_list_item_held(int slot, int index);
 
-/* Same shape as the plugin_manager_get_tile_* / plugin_manager_tile_clicked
- * family above, but for the separate plugin.register_stream_media_tile()
+/* Same shape as the plugin_manager_list_item_selected()/_held()
+ * pair above, but for the separate plugin.register_stream_media_tile()
  * registry -- gui.c's build_stream_media_screen() reads these to append
  * plugin-registered tiles after the built-in Subsonic one. */
 int plugin_manager_get_stream_tile_count(void);
@@ -432,7 +444,7 @@ void plugin_manager_home_tile_clicked(int index);
  * at position `row` is tapped -- calls that row's own on_select Lua function
  * with no arguments. Unlike plugin_manager_list_item_selected() above (one
  * shared "current" ref for plugin.show_list()), this looks up a ref stored
- * per (slot, row) -- see plugin_manager.c's own plugin_settings_list_rows[]
+ * per (slot, row) -- see plugin_list_screens.c's own plugin_settings_list_rows[]
  * comment for why. No-op if slot/row is out of range or was never
  * populated. */
 void plugin_manager_settings_list_row_selected(int slot, int row);
@@ -468,6 +480,11 @@ void plugin_manager_notify_screen_woke(void);
 void plugin_manager_notify_queue_exhausted(int direction);
 void plugin_manager_notify_volume_changed(int percent);
 void plugin_manager_poll_battery(void);
+/* True if a live (not aborted) plugin listens for "network_changed". */
+bool plugin_manager_has_network_subscribers(void);
+/* UI thread only. Records the shell's cached Wi-Fi state, backs
+ * plugin.network_status(), and fires "network_changed" when it differs. */
+void plugin_manager_set_network_state(bool connected, bool wifi_enabled);
 void plugin_manager_notify_suspending(void);
 void plugin_manager_notify_system_resumed(void);
 void plugin_manager_notify_screenshot_saved(const char * path);
@@ -475,7 +492,7 @@ void plugin_manager_notify_screenshot_failed(const char * reason);
 void plugin_manager_notify_button_lock_changed(bool locked);
 
 /* ---- plugin.register_quick_toggle() -- a toggle in the quick drawer's
- * expanded area (gui_shell.c's build_quick_drawer(), third toggle row),
+ * expanded area (gui_shell_drawer_build.c's build_quick_drawer(), third toggle row),
  * alongside the native Wifi/Bluetooth/Sleep/Crossfade ones. For a plugin
  * whose feature is a plain on/off the user wants to reach without walking
  * into Settings (an MSEB-style tone tuner, a gain-mode switch). A plugin
@@ -489,6 +506,8 @@ int plugin_manager_get_quick_toggle_count(void);
 /* Registered toggle index, or -1 when its plugin is absent or disabled. */
 int plugin_manager_find_quick_toggle_by_id(const char * id);
 const char * plugin_manager_get_quick_toggle_label(int index);
+/* Stable key for the Quick Drawer order setting; false when it has no owner. */
+bool plugin_manager_get_quick_toggle_key(int index, char * out, size_t cap);
 const char * plugin_manager_get_quick_toggle_icon(int index);
 const char * plugin_manager_get_quick_toggle_icon_selected(int index);
 
@@ -519,14 +538,24 @@ void plugin_manager_interval_fired(int slot);
  * plugin.show_text_input() call is submitted (T9 keypad Enter) -- calls its
  * on_submit(text) once, then clears the pending ref (one-shot, matching
  * show_text_entry()'s own "never fires on cancel" semantics -- see
- * plugin_manager.c's l_plugin_show_text_input() for the caveat this
+ * plugin_ui_bindings.c's l_plugin_show_text_input() for the caveat this
  * inherits from the native singleton screen). */
 void plugin_manager_text_input_submitted(const char * text);
 void plugin_manager_text_input_cancelled(void);
 /* Dispatch or discard the one pending plugin.show_confirmation() callback. */
 void plugin_manager_confirmation_confirmed(void);
 void plugin_manager_confirmation_cancelled(void);
+/* Dispatch (index is 0-based) or discard the one pending plugin.show_menu() callback. */
+void plugin_manager_menu_selected(int index);
+void plugin_manager_menu_cancelled(void);
+/* plugin.launch_app() needs a user action: true once for the plugin whose
+ * callback the user triggered by tapping a row, tile or confirmation, while
+ * that callback runs. Any other plugin, a second call, or any other time
+ * gets false. */
+bool plugin_manager_user_action_take(lua_State * L);
 /* GUI bridge for the one pending plugin.pick_file() request. */
 void plugin_manager_file_picker_complete(const char * path);
+/* Same for plugin.pick_color(); rgb < 0 when the user backed out. */
+void plugin_manager_color_picker_complete(int32_t rgb);
 
 #endif /* PLUGIN_MANAGER_H */

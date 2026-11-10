@@ -21,6 +21,15 @@ typedef enum {
     BLOCK_H
 } cur_block_kind_t;
 
+typedef struct {
+    html_blocks * out;
+    size_t capacity, total_text_bytes, scratch_len;
+    char * scratch;
+    cur_block_kind_t cur_kind;
+    int cur_level;
+    bool in_block;
+} text_ctx;
+
 const char * html_status_reason(html_status status) {
     switch (status) {
         case HTML_OK: return "ok";
@@ -137,6 +146,44 @@ static bool flush_text_block(html_blocks * out, size_t * capacity, size_t * tota
     *scratch_len = 0;
     *in_block = false;
     return true;
+}
+
+static bool text_flush(text_ctx * t) {
+    return flush_text_block(t->out, &t->capacity, &t->total_text_bytes, t->cur_kind,
+                            t->cur_level, t->scratch, &t->scratch_len, &t->in_block);
+}
+
+static void text_open_p(text_ctx * t) {
+    if (!t->in_block) {
+        t->cur_kind = BLOCK_P;
+        t->cur_level = 0;
+        t->in_block = true;
+        t->scratch_len = 0;
+    }
+}
+
+static bool text_emit_bytes(text_ctx * t, const void * b, size_t n) {
+    text_open_p(t);
+    if (!check_text_cap(t->total_text_bytes, t->scratch_len, n)) return false;
+    memcpy(t->scratch + t->scratch_len, b, n);
+    t->scratch_len += n;
+    return true;
+}
+
+static bool text_emit_space(text_ctx * t) {
+    if (t->in_block && t->scratch_len > 0 && t->scratch[t->scratch_len - 1] != ' ' &&
+        t->scratch[t->scratch_len - 1] != '\n') {
+        return text_emit_bytes(t, " ", 1);
+    }
+    return true;
+}
+
+static bool text_emit_byte(text_ctx * t, unsigned char c) {
+    if (c == 0) c = '?';
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f') {
+        return text_emit_space(t);
+    }
+    return text_emit_bytes(t, &c, 1);
 }
 
 /* Skip until unquoted '>' or EOF */
@@ -478,7 +525,9 @@ static bool parse_img_tag(const unsigned char ** pptr, size_t * prem,
             }
         }
 
-        bool store_src = (strcmp(attr_name, "src") == 0 && img_src == NULL);
+        /* SVG <image> (EPUB cover pages) names its picture with href or xlink:href. */
+        bool store_src = img_src == NULL && (strcmp(attr_name, "src") == 0 || strcmp(attr_name, "href") == 0 ||
+                                             strcmp(attr_name, "xlink:href") == 0);
         bool store_alt = (strcmp(attr_name, "alt") == 0 && img_alt == NULL);
 
         if (has_val) {
@@ -594,17 +643,11 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
         return HTML_OK;
     }
 
-    char * scratch = (char *) malloc(HTML_MAX_TEXT_BYTES);
-    if (!scratch) {
+    text_ctx t = { .out = out, .cur_kind = BLOCK_NONE };
+    t.scratch = (char *) malloc(HTML_MAX_TEXT_BYTES);
+    if (!t.scratch) {
         return HTML_ERR_NOMEM;
     }
-
-    size_t capacity = 0;
-    size_t total_text_bytes = 0;
-    size_t scratch_len = 0;
-    cur_block_kind_t cur_kind = BLOCK_NONE;
-    int cur_level = 0;
-    bool in_block = false;
 
     drop_kind_t drop_kind = DROP_NONE;
     uint32_t drop_depth = 0;
@@ -724,31 +767,10 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
                     break;
                 }
                 unsigned char c = *ptr++; rem--;
-                if (c == 0) c = '?';
-                if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f') {
-                    if (in_block && scratch_len > 0 && scratch[scratch_len - 1] != ' ' && scratch[scratch_len - 1] != '\n') {
-                        if (check_text_cap(total_text_bytes, scratch_len, 1)) {
-                            scratch[scratch_len++] = ' ';
-                        } else {
-                            out->truncated = true;
-                            ptr += rem; rem = 0;
-                            break;
-                        }
-                    }
-                } else {
-                    if (!in_block) {
-                        cur_kind = BLOCK_P;
-                        cur_level = 0;
-                        in_block = true;
-                        scratch_len = 0;
-                    }
-                    if (check_text_cap(total_text_bytes, scratch_len, 1)) {
-                        scratch[scratch_len++] = (char)c;
-                    } else {
-                        out->truncated = true;
-                        ptr += rem; rem = 0;
-                        break;
-                    }
+                if (!text_emit_byte(&t, c)) {
+                    out->truncated = true;
+                    ptr += rem; rem = 0;
+                    break;
                 }
             }
             continue;
@@ -770,13 +792,10 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
 
         if (*ptr == '<') {
             if (rem == 1) {
-                if (!in_block) {
-                    cur_kind = BLOCK_P; cur_level = 0; in_block = true; scratch_len = 0;
-                }
-                if (check_text_cap(total_text_bytes, scratch_len, 1)) {
-                    scratch[scratch_len++] = '<';
-                } else {
+                if (!text_emit_bytes(&t, "<", 1)) {
                     out->truncated = true;
+                    ptr += rem; rem = 0;
+                    break;
                 }
                 ptr++; rem--;
                 continue;
@@ -790,7 +809,7 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
                     if (strcmp(name, "p") == 0 || strcmp(name, "div") == 0 ||
                         strcmp(name, "li") == 0 || strcmp(name, "blockquote") == 0 ||
                         (name[0] == 'h' && name[1] >= '1' && name[1] <= '6' && name[2] == '\0')) {
-                        if (!flush_text_block(out, &capacity, &total_text_bytes, cur_kind, cur_level, scratch, &scratch_len, &in_block)) {
+                        if (!text_flush(&t)) {
                             goto nomem;
                         }
                     }
@@ -807,7 +826,7 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
                 }
 
                 if (strcmp(name, "script") == 0) {
-                    if (!flush_text_block(out, &capacity, &total_text_bytes, cur_kind, cur_level, scratch, &scratch_len, &in_block)) goto nomem;
+                    if (!text_flush(&t)) goto nomem;
                     if (!skip_to_unquoted_gt(&ptr, &rem)) {
                         drop_kind = DROP_SCRIPT;
                         drop_depth = 1;
@@ -815,7 +834,7 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
                     continue;
                 }
                 if (strcmp(name, "style") == 0) {
-                    if (!flush_text_block(out, &capacity, &total_text_bytes, cur_kind, cur_level, scratch, &scratch_len, &in_block)) goto nomem;
+                    if (!text_flush(&t)) goto nomem;
                     if (!skip_to_unquoted_gt(&ptr, &rem)) {
                         drop_kind = DROP_STYLE;
                         drop_depth = 1;
@@ -823,7 +842,7 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
                     continue;
                 }
                 if (strcmp(name, "head") == 0) {
-                    if (!flush_text_block(out, &capacity, &total_text_bytes, cur_kind, cur_level, scratch, &scratch_len, &in_block)) goto nomem;
+                    if (!text_flush(&t)) goto nomem;
                     if (!skip_to_unquoted_gt(&ptr, &rem)) {
                         drop_kind = DROP_HEAD;
                         drop_depth = 1;
@@ -832,37 +851,27 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
                 }
 
                 if (name[0] == 'h' && name[1] >= '1' && name[1] <= '6' && name[2] == '\0') {
-                    if (!flush_text_block(out, &capacity, &total_text_bytes, cur_kind, cur_level, scratch, &scratch_len, &in_block)) goto nomem;
-                    cur_kind = BLOCK_H;
-                    cur_level = name[1] - '0';
-                    in_block = true;
-                    scratch_len = 0;
+                    if (!text_flush(&t)) goto nomem;
+                    t.cur_kind = BLOCK_H;
+                    t.cur_level = name[1] - '0';
+                    t.in_block = true;
+                    t.scratch_len = 0;
                     skip_to_unquoted_gt(&ptr, &rem);
                     continue;
                 }
                 if (strcmp(name, "p") == 0 || strcmp(name, "div") == 0 ||
                     strcmp(name, "li") == 0 || strcmp(name, "blockquote") == 0) {
-                    if (!flush_text_block(out, &capacity, &total_text_bytes, cur_kind, cur_level, scratch, &scratch_len, &in_block)) goto nomem;
-                    cur_kind = BLOCK_P;
-                    cur_level = 0;
-                    in_block = true;
-                    scratch_len = 0;
+                    if (!text_flush(&t)) goto nomem;
+                    text_open_p(&t);
                     skip_to_unquoted_gt(&ptr, &rem);
                     continue;
                 }
                 if (strcmp(name, "br") == 0) {
-                    if (!in_block) {
-                        cur_kind = BLOCK_P;
-                        cur_level = 0;
-                        in_block = true;
-                        scratch_len = 0;
+                    text_open_p(&t);
+                    if (t.scratch_len > 0 && t.scratch[t.scratch_len - 1] == ' ') {
+                        t.scratch_len--;
                     }
-                    if (scratch_len > 0 && scratch[scratch_len - 1] == ' ') {
-                        scratch_len--;
-                    }
-                    if (check_text_cap(total_text_bytes, scratch_len, 1)) {
-                        scratch[scratch_len++] = '\n';
-                    } else {
+                    if (!text_emit_bytes(&t, "\n", 1)) {
                         out->truncated = true;
                         ptr += rem; rem = 0;
                         break;
@@ -871,16 +880,16 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
                     continue;
                 }
                 if (strcmp(name, "hr") == 0) {
-                    if (!flush_text_block(out, &capacity, &total_text_bytes, cur_kind, cur_level, scratch, &scratch_len, &in_block)) goto nomem;
+                    if (!text_flush(&t)) goto nomem;
                     char * hr_text = alloc_empty_string();
                     if (!hr_text) goto nomem;
-                    if (!add_block(out, &capacity, "hr", 0, hr_text, NULL)) goto nomem;
+                    if (!add_block(out, &t.capacity, "hr", 0, hr_text, NULL)) goto nomem;
                     skip_to_unquoted_gt(&ptr, &rem);
                     continue;
                 }
-                if (strcmp(name, "img") == 0) {
-                    if (!flush_text_block(out, &capacity, &total_text_bytes, cur_kind, cur_level, scratch, &scratch_len, &in_block)) goto nomem;
-                    if (!parse_img_tag(&ptr, &rem, out, &capacity, &total_text_bytes, scratch)) goto nomem;
+                if (strcmp(name, "img") == 0 || strcmp(name, "image") == 0) {
+                    if (!text_flush(&t)) goto nomem;
+                    if (!parse_img_tag(&ptr, &rem, out, &t.capacity, &t.total_text_bytes, t.scratch)) goto nomem;
                     continue;
                 }
 
@@ -889,12 +898,7 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
                 continue;
             } else {
                 /* Literal '<' (e.g. '<3') */
-                if (!in_block) {
-                    cur_kind = BLOCK_P; cur_level = 0; in_block = true; scratch_len = 0;
-                }
-                if (check_text_cap(total_text_bytes, scratch_len, 1)) {
-                    scratch[scratch_len++] = '<';
-                } else {
+                if (!text_emit_bytes(&t, "<", 1)) {
                     out->truncated = true;
                     ptr += rem; rem = 0;
                     break;
@@ -911,28 +915,10 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
             bool is_sp = false;
             size_t cons = decode_entity(ptr, rem, ebuf, &elen, &is_sp);
             if (cons > 0) {
-                if (is_sp) {
-                    if (in_block && scratch_len > 0 && scratch[scratch_len - 1] != ' ' && scratch[scratch_len - 1] != '\n') {
-                        if (check_text_cap(total_text_bytes, scratch_len, 1)) {
-                            scratch[scratch_len++] = ' ';
-                        } else {
-                            out->truncated = true;
-                            ptr += rem; rem = 0;
-                            break;
-                        }
-                    }
-                } else {
-                    if (!in_block) {
-                        cur_kind = BLOCK_P; cur_level = 0; in_block = true; scratch_len = 0;
-                    }
-                    if (check_text_cap(total_text_bytes, scratch_len, elen)) {
-                        memcpy(scratch + scratch_len, ebuf, elen);
-                        scratch_len += elen;
-                    } else {
-                        out->truncated = true;
-                        ptr += rem; rem = 0;
-                        break;
-                    }
+                if (!(is_sp ? text_emit_space(&t) : text_emit_bytes(&t, ebuf, elen))) {
+                    out->truncated = true;
+                    ptr += rem; rem = 0;
+                    break;
                 }
                 ptr += cons; rem -= cons;
                 continue;
@@ -941,36 +927,18 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
 
         /* Normal text character */
         unsigned char c = *ptr++; rem--;
-        if (c == 0) c = '?';
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f') {
-            if (in_block && scratch_len > 0 && scratch[scratch_len - 1] != ' ' && scratch[scratch_len - 1] != '\n') {
-                if (check_text_cap(total_text_bytes, scratch_len, 1)) {
-                    scratch[scratch_len++] = ' ';
-                } else {
-                    out->truncated = true;
-                    ptr += rem; rem = 0;
-                    break;
-                }
-            }
-        } else {
-            if (!in_block) {
-                cur_kind = BLOCK_P; cur_level = 0; in_block = true; scratch_len = 0;
-            }
-            if (check_text_cap(total_text_bytes, scratch_len, 1)) {
-                scratch[scratch_len++] = (char)c;
-            } else {
-                out->truncated = true;
-                ptr += rem; rem = 0;
-                break;
-            }
+        if (!text_emit_byte(&t, c)) {
+            out->truncated = true;
+            ptr += rem; rem = 0;
+            break;
         }
     }
 
-    if (!flush_text_block(out, &capacity, &total_text_bytes, cur_kind, cur_level, scratch, &scratch_len, &in_block)) {
+    if (!text_flush(&t)) {
         goto nomem;
     }
 
-    free(scratch);
+    free(t.scratch);
     if (out->count == 0 && out->blocks) {
         free(out->blocks);
         out->blocks = NULL;
@@ -978,7 +946,7 @@ html_status html_to_blocks(const void * data, size_t len, html_blocks * out) {
     return HTML_OK;
 
 nomem:
-    free(scratch);
+    free(t.scratch);
     html_blocks_free(out);
     return HTML_ERR_NOMEM;
 }

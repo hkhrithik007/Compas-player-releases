@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -82,6 +83,7 @@ static char active_usb_device[32] = "";
 static usb_dsd_output_t *usb_dsd = NULL;
 static int requested_usb_dsd_mode, active_usb_dsd_mode;
 static unsigned usb_dsd_refused_rate; /* config_mutex; reset on device/mode change */
+static unsigned usb_native_refused_rate; /* config_mutex; native may fail while DoP works */
 
 static unsigned int device_channels = 0;
 static unsigned int device_sample_rate = 0;
@@ -191,13 +193,35 @@ void audio_output_set_dac_preferences(int filter, bool nos, bool dre) {
     pthread_mutex_unlock(&config_mutex);
 }
 
+bool audio_output_dac_nos_supported(void) {
+#if (defined(BOARD_R1) || defined(BOARD_R3PROII)) && !defined(HOST_BUILD)
+    struct mixer * mixer = get_alsa_mixer();
+    return mixer && mixer_get_ctl_by_name(mixer, "NOS_EN");
+#else
+    return false;
+#endif
+}
+
 static bool dac_controls_present(void) {
 #if (defined(BOARD_R1) || defined(BOARD_R3PROII)) && !defined(HOST_BUILD)
     struct mixer * mixer = get_alsa_mixer();
     return mixer && mixer_get_ctl_by_name(mixer, "Digital Filter") &&
-           mixer_get_ctl_by_name(mixer, "NOS_EN");
+           audio_output_dac_nos_supported();
+#elif defined(BOARD_R3II_2025) && !defined(HOST_BUILD)
+    struct mixer * mixer = get_alsa_mixer();
+    return mixer && mixer_get_ctl_by_name(mixer, "Digital Filter");
 #else
     return false;
+#endif
+}
+
+/* The 2025 codec takes 6 for its linear phase filter and treats any other
+ * value as the default apodizing one, matching the stock HiBy firmware. */
+static int dac_filter_value(int filter) {
+#if defined(BOARD_R3II_2025)
+    return filter == 1 ? 6 : 0;
+#else
+    return filter;
 #endif
 }
 
@@ -219,8 +243,8 @@ bool audio_output_dac_controls_supported(void) {
 static void apply_dac_preferences(bool dop) {
     if (!dac_controls_present()) return;
     pthread_mutex_lock(&config_mutex);
-    int filter = requested_dac_filter;
-    bool nos = requested_dac_nos && !dop;
+    int filter = dac_filter_value(requested_dac_filter);
+    bool nos = requested_dac_nos && !dop && audio_output_dac_nos_supported();
     bool dre = requested_dac_dre;
     pthread_mutex_unlock(&config_mutex);
     if (dac_preferences_written && filter == written_dac_filter &&
@@ -229,7 +253,9 @@ static void apply_dac_preferences(bool dop) {
     /* Ordering preserves the stored filter when leaving NOS. Do not trust
      * the driver's dummy getters. Its saved table survives power cycles. */
     int filter_result = mixer_ctl_set_value(mixer_get_ctl_by_name(mixer, "Digital Filter"), 0, filter);
-    int nos_result = mixer_ctl_set_value(mixer_get_ctl_by_name(mixer, "NOS_EN"), 0, nos ? 1 : 0);
+    int nos_result = 0;
+    if (audio_output_dac_nos_supported())
+        nos_result = mixer_ctl_set_value(mixer_get_ctl_by_name(mixer, "NOS_EN"), 0, nos ? 1 : 0);
     /* R3 Pro II's dual codec applies this to both chips and replays the
      * cached DRE setting during prepare for PCM and DSD alike. */
     int dre_result = 0;
@@ -250,8 +276,11 @@ static void apply_dac_preferences(bool dop) {
  * prepared, or the DAC reads PCM as DSD (noise). The control reads back 0
  * whatever was written, so the last value written is tracked here instead;
  * -1 forces the first write, which also clears a switch left on by a
- * crashed process. Called only by the output owner thread. */
-static int dop_switch_written = -1;
+ * crashed process. Written only by the output owner thread; atomic because
+ * the volume path also reads it to apply the DSD gain. */
+static _Atomic int dop_switch_written = -1;
+
+static bool refresh_hw_volume(void);
 
 /* A DoP rate the DAC refused (hw_params or the switch), so later tracks at
  * that rate are converted without another failed open. Owner thread only. */
@@ -273,6 +302,8 @@ static bool set_dop_switch(bool on) {
         return false;
     }
     dop_switch_written = on ? 1 : 0;
+    /* Raise (or restore) the DAC level before any stream data flows. */
+    refresh_hw_volume();
     return true;
 }
 
@@ -297,6 +328,37 @@ static void close_usb_device(void) {
     usb_aplay_fd = -1;
 }
 
+static usb_dsd_output_t * open_usb_passthrough(unsigned card, unsigned device, unsigned channels,
+                                                unsigned sample_rate, const char *usb_device, int usb_mode) {
+    usb_dsd_output_t *direct = NULL;
+    pthread_mutex_lock(&config_mutex);
+    bool native_refused = sample_rate == usb_native_refused_rate;
+    bool try_native = usb_mode == 1 && !native_refused;
+    pthread_mutex_unlock(&config_mutex);
+    if (try_native) {
+        direct = usb_dsd_output_open(card, device, true, channels, sample_rate);
+        if (!direct) {
+            pthread_mutex_lock(&config_mutex);
+            if (requested_target == OUTPUT_TARGET_USB && requested_usb_dsd_mode == usb_mode &&
+                !strcmp(usb_alsa_device, usb_device)) usb_native_refused_rate = sample_rate;
+            pthread_mutex_unlock(&config_mutex);
+            DBG_LOG("usb_dsd: native DSD refused at DoP-rate=%u; trying DoP\n", sample_rate);
+        }
+    }
+    if (usb_mode == 1 && native_refused)
+        DBG_LOG("usb_dsd: native DSD refusal cached at DoP-rate=%u; trying DoP\n", sample_rate);
+    if (!direct) direct = usb_dsd_output_open(card, device, false, channels, sample_rate);
+    if (!direct) {
+        DBG_LOG("usb_dsd: DoP refused at rate=%u; falling back to PCM conversion\n", sample_rate);
+        pthread_mutex_lock(&config_mutex);
+        if (requested_target == OUTPUT_TARGET_USB && requested_usb_dsd_mode == usb_mode &&
+            !strcmp(usb_alsa_device, usb_device)) usb_dsd_refused_rate = sample_rate;
+        pthread_mutex_unlock(&config_mutex);
+        return NULL;
+    }
+    return direct;
+}
+
 static bool open_device(unsigned int channels, unsigned int sample_rate, bool low_latency, bool want_s24,
                         bool dop, output_target_t target, const char * usb_device, int usb_mode) {
     if (target == OUTPUT_TARGET_USB) {
@@ -306,16 +368,14 @@ static bool open_device(unsigned int channels, unsigned int sample_rate, bool lo
             unsigned card, device; char extra;
             if (!usb_mode || sscanf(usb_device, "plughw:%u,%u%c", &card, &device, &extra) != 2)
                 return false;
-            direct = usb_dsd_output_open(card, device, usb_mode == 1, channels, sample_rate);
-            if (!direct) {
-                pthread_mutex_lock(&config_mutex);
-                if (requested_target == OUTPUT_TARGET_USB && requested_usb_dsd_mode == usb_mode &&
-                    !strcmp(usb_alsa_device, usb_device)) usb_dsd_refused_rate = sample_rate;
-                pthread_mutex_unlock(&config_mutex);
-                return false;
-            }
-        } else if (!spawn_aplay(usb_device, channels, sample_rate, format, false,
-                                &usb_aplay_pid, &usb_aplay_fd)) return false;
+            direct = open_usb_passthrough(card, device, channels, sample_rate, usb_device, usb_mode);
+            if (!direct) return false;
+        } else {
+            DBG_LOG("usb_dsd: USB PCM requested device=%s channels=%u rate=%u bits=%u\n",
+                    usb_device, channels, sample_rate, want_s24 ? 24u : 16u);
+            if (!spawn_aplay(usb_device, channels, sample_rate, format, false,
+                             &usb_aplay_pid, &usb_aplay_fd)) return false;
+        }
         pthread_mutex_lock(&state_mutex);
         usb_dsd = direct;
         active_usb_dsd_mode = usb_mode;
@@ -347,6 +407,8 @@ static bool open_device(unsigned int channels, unsigned int sample_rate, bool lo
         /* A PCM stream must never start with the DAC still in DoP mode; a
          * failed clear is retried by the caller's next open. */
         if (!dop && !set_dop_switch(false)) return false;
+        /* A restore that failed earlier is retried before PCM starts. */
+        if (!dop && !refresh_hw_volume()) return false;
         struct pcm_config config;
         memset(&config, 0, sizeof(config));
         config.channels = channels;
@@ -707,10 +769,10 @@ bool audio_output_write(const int16_t * buf, uint64_t frames, unsigned int chann
             
             if (err == ETIMEDOUT) {
                 DBG_LOG("audio_output: BT/USB pipe write timed out after 2s, closing device (target=%d written=%" PRIu64 "/%" PRIu64 " frames)\n",
-                        (int) target, out_frames_written ? *out_frames_written : 0ULL, frames);
+                        (int) target, out_frames_written ? *out_frames_written : UINT64_C(0), frames);
             } else {
                 DBG_LOG("audio_output: pipe write failed (target=%d errno=%d written=%" PRIu64 "/%" PRIu64 " frames)\n",
-                        (int) target, err, out_frames_written ? *out_frames_written : 0ULL, frames);
+                        (int) target, err, out_frames_written ? *out_frames_written : UINT64_C(0), frames);
             }
             return false;
         }
@@ -785,10 +847,10 @@ bool audio_output_write_s24(const int32_t * buf, uint64_t frames, unsigned int c
             else close_usb_device();
             if (err == ETIMEDOUT) {
                 DBG_LOG("audio_output: BT/USB S24 pipe write timed out after 2s, closing device (written=%" PRIu64 "/%" PRIu64 " frames)\n",
-                        out_frames_written ? *out_frames_written : 0ULL, frames);
+                        out_frames_written ? *out_frames_written : UINT64_C(0), frames);
             } else {
                 DBG_LOG("audio_output: BT/USB S24 pipe write failed (errno=%d written=%" PRIu64 "/%" PRIu64 " frames)\n",
-                        err, out_frames_written ? *out_frames_written : 0ULL, frames);
+                        err, out_frames_written ? *out_frames_written : UINT64_C(0), frames);
             }
             return false;
         }
@@ -821,7 +883,10 @@ bool audio_output_write_s24(const int32_t * buf, uint64_t frames, unsigned int c
 void audio_output_set_usb_dsd_mode(int mode) {
     pthread_mutex_lock(&config_mutex);
     mode = mode >= 0 && mode <= 2 ? mode : 0;
-    if (requested_usb_dsd_mode != mode) usb_dsd_refused_rate = 0;
+    if (requested_usb_dsd_mode != mode) {
+        usb_dsd_refused_rate = 0;
+        usb_native_refused_rate = 0;
+    }
     requested_usb_dsd_mode = mode;
     pthread_mutex_unlock(&config_mutex);
 }
@@ -921,8 +986,10 @@ void audio_output_set_bt_requested(bool requested) {
 
 void audio_output_set_usb_requested(bool requested, const char * alsa_device) {
     pthread_mutex_lock(&config_mutex);
-    if (usb_requested != requested || (requested && strcmp(usb_alsa_device, alsa_device)))
+    if (usb_requested != requested || (requested && strcmp(usb_alsa_device, alsa_device))) {
         usb_dsd_refused_rate = 0;
+        usb_native_refused_rate = 0;
+    }
     usb_requested = requested;
     if (requested) snprintf(usb_alsa_device, sizeof(usb_alsa_device), "%s", alsa_device);
     recompute_requested_target();
@@ -946,22 +1013,67 @@ static struct mixer * get_alsa_mixer(void) {
     return mixer;
 }
 
-static void audio_output_set_hw_volume_raw(int raw_left, int raw_right) {
+/* All of this is under hw_volume_mutex: the volume worker and the output
+ * owner (DoP switch edges) both write the hardware volume. */
+static pthread_mutex_t hw_volume_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int requested_raw_left = INT_MIN; /* what the volume path asked for */
+static int requested_raw_right = INT_MIN;
+static int dsd_gain_steps; /* raw steps removed while DoP is on */
+
+/* The stock firmware's DSD gain: lower the attenuation while DoP plays,
+ * never past the loudest step and never on the mute value. */
+static int gained_raw(int raw) {
+    if (raw >= HW_VOLUME_MAX_RAW || dop_switch_written != 1) return raw;
+    return raw > dsd_gain_steps ? raw - dsd_gain_steps : 0;
+}
+
+/* Writes the requested volume (with gain) unless it is already in place.
+ * True when the DAC holds the desired value afterwards (a control the card
+ * lacks counts as nothing to write). Call with hw_volume_mutex held. */
+static bool write_hw_volume_locked(void) {
     static struct mixer_ctl * left_ctl = NULL;
     static struct mixer_ctl * right_ctl = NULL;
     static int last_left = INT_MIN;
     static int last_right = INT_MIN;
+    if (requested_raw_left == INT_MIN) return true;
+    int raw_left = gained_raw(requested_raw_left);
+    int raw_right = gained_raw(requested_raw_right);
 
-    if (raw_left == last_left && raw_right == last_right) return;
+    if (raw_left == last_left && raw_right == last_right) return true;
 
     struct mixer * mixer = get_alsa_mixer();
-    if (!mixer) return;
+    if (!mixer) return false;
     if (!left_ctl) left_ctl = mixer_get_ctl_by_name(mixer, "Left Playback Volume");
     if (!right_ctl) right_ctl = mixer_get_ctl_by_name(mixer, "Right Playback Volume");
     if (left_ctl && raw_left != last_left && mixer_ctl_set_value(left_ctl, 0, raw_left) == 0)
         last_left = raw_left;
     if (right_ctl && raw_right != last_right && mixer_ctl_set_value(right_ctl, 0, raw_right) == 0)
         last_right = raw_right;
+    return (!left_ctl || last_left == raw_left) && (!right_ctl || last_right == raw_right);
+}
+
+static void audio_output_set_hw_volume_raw(int raw_left, int raw_right) {
+    pthread_mutex_lock(&hw_volume_mutex);
+    requested_raw_left = raw_left;
+    requested_raw_right = raw_right;
+    write_hw_volume_locked();
+    pthread_mutex_unlock(&hw_volume_mutex);
+}
+
+/* Makes the DAC hold the volume for the current DoP state; a no-op when it
+ * already does. False if a write failed. */
+static bool refresh_hw_volume(void) {
+    pthread_mutex_lock(&hw_volume_mutex);
+    bool ok = write_hw_volume_locked();
+    pthread_mutex_unlock(&hw_volume_mutex);
+    return ok;
+}
+
+void audio_output_set_dsd_gain_db(int db) {
+    pthread_mutex_lock(&hw_volume_mutex);
+    dsd_gain_steps = (db < 0 ? 0 : db > 6 ? 6 : db) * 2; /* 0.5 dB per raw step */
+    write_hw_volume_locked();
+    pthread_mutex_unlock(&hw_volume_mutex);
 }
 
 /* Route values for the R3 Pro II's "Output Port Switch" mixer control --

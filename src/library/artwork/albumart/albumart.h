@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../coordinator/artwork_coordinator.h"
+#include "../../../core/system/runtime/board_config.h"
 
 /* Persistent RGB565 cache sizes shared by the library and player.  The
  * on-card representation is a 24-bit BMP, while callers receive RGB565
@@ -12,7 +13,8 @@
 /* Generation of the cache file naming and contents; a new one retires older
  * caches. */
 #define ALBUMART_CACHE_VERSION "v4"
-#define ALBUMART_THUMBNAIL_SIZE 72
+/* 80 on the R1-class boards and 40 on the TempoTec V1 (no board define = 80). */
+#define ALBUMART_THUMBNAIL_SIZE BOARD_LIBRARY_THUMB_PX
 #define ALBUMART_PLAYER_CACHE_SIZE 480
 /* Largest external cover file the library reads, and how many other tracks of
  * an album are tried for embedded art when the representative one has none. */
@@ -67,6 +69,10 @@ bool albumart_sized_thumb_fresh_with_source_mtime(const albumart_info_t * info, 
  * accepts the hashed atomic BMP produced by albumart_store_rgb565(). */
 bool albumart_generated_cache_fresh(const albumart_info_t * info, int width, int height,
                                     char * found, size_t found_size);
+/* Same check with the caller's albumart_source_mtime(info), which costs a
+ * directory search, so a caller testing several caches computes it once. */
+bool albumart_generated_cache_fresh_with_source_mtime(const albumart_info_t * info, int width, int height,
+                                                      uint32_t source_mtime, char * found, size_t found_size);
 
 /* Shared case-insensitive (album, effective album artist) identity used by
  * tagcache album grouping, catalog album keys, and artwork thumbnail keys. */
@@ -89,6 +95,10 @@ uint32_t albumart_source_mtime_with_path(const albumart_info_t * info, char * si
 /* Artist thumbnails share the albumart cache directory, with a separate
  * filename namespace and a source mtime in the BMP header. Negative markers
  * store a caller-computed signature of the artist and album directories. */
+bool albumart_artist_photo_sized_thumb_fresh(const char * artist, uint32_t source_mtime,
+        int width, int height, char * found, size_t found_size);
+bool albumart_artist_photo_store_rgb565(const char * artist, uint32_t source_mtime,
+        int width, int height, const uint16_t * pixels);
 bool albumart_artist_sized_thumb_fresh(const char * artist, uint32_t source_mtime,
                                        int width, int height, char * found, size_t found_size);
 bool albumart_artist_store_rgb565(const char * artist, uint32_t source_mtime,

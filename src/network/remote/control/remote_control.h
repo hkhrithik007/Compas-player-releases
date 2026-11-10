@@ -33,9 +33,15 @@ bool remote_control_generate_new_pin(void);
  * been created yet. out_pin is empty only if that generation failed. */
 void remote_control_get_pin(char * out_pin, size_t out_pin_size);
 
+/* Stack size for every thread that runs remote_control_handle_stream(). */
+#define REMOTE_CONTROL_CLIENT_STACK_SIZE (256u * 1024u)
+
 /* Handles one HTTP request on a connected byte-stream socket (for example an
- * RFCOMM connection). The caller retains ownership of fd and must close it. */
-void remote_control_handle_stream(int fd);
+ * RFCOMM connection). bt_mac is the peer's "AA:BB:CC:DD:EE:FF" on Bluetooth,
+ * NULL otherwise. A peer on the trusted list (bt_rc_trust.h) skips the PIN;
+ * any other peer needs it exactly like Wi-Fi, and a valid PIN trusts it. The
+ * caller retains ownership of fd and must close it. */
+void remote_control_handle_stream(int fd, const char * bt_mac);
 
 /* Longest file path the remote folder and favorite requests hand to the UI. */
 #define REMOTE_CONTROL_PATH_MAX 1024
@@ -60,11 +66,12 @@ void remote_control_get_import_state(remote_import_state_t *state, char *error, 
  * 3=Shuffle with repeat, 4=Shuffle once).
  * favorite is the player's cached heart state for that track. accent_rgb is
  * the effective UI accent copied by the UI-thread caller; the network thread
- * only reads its published snapshot. */
+ * only reads its published snapshot. dac_mode means the enabled Bluetooth
+ * receiver owns playback; its cached stream replaces local track state. */
 void remote_control_notify_status(bool playing, bool paused, const char * title, const char * artist,
                                    const char * album, const char * path, int position_seconds,
                                    int duration_seconds, float volume, int play_mode, bool favorite,
-                                   uint32_t accent_rgb);
+                                   uint32_t accent_rgb, bool dac_mode);
 void remote_control_notify_library_sorting(int albums, int artists, int album_artists);
 bool remote_control_consume_library_sorting(int *scope, int *mode);
 bool remote_control_consume_collection(remote_collection_play_request_t *request);
@@ -79,7 +86,7 @@ bool remote_control_consume_prev(void);
 
 /* POST /api/playback/mode without a parameter cycles play mode. With
  * ?mode=N, selects N directly (0=Sequential, 1=Repeat All, 2=Repeat One,
- * 3=Shuffle). Both requests are consumed on the UI thread. */
+ * 3=Shuffle with repeat, 4=Shuffle once). Both requests are consumed on the UI thread. */
 bool remote_control_consume_mode_cycle(void);
 bool remote_control_consume_play_mode(int * out_mode);
 
@@ -124,7 +131,6 @@ bool remote_control_consume_play_index(int64_t * out_index, char * out_playlist,
  * - GET /api/library/albums?artist=NAME or ?album_artist=NAME
  * - GET /api/library (with offset/limit/q and artist/album_artist/album/genre filters)
  * - GET /api/playlists/songs?name=NAME
- * - GET /api/art (optional ?index=N)
- * - GET /assets/icon?name= */
+ * - GET /api/art (optional ?index=N) */
 
 #endif /* REMOTE_CONTROL_H */

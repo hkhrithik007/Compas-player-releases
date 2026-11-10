@@ -4,6 +4,12 @@
 #include "../../player/screen/gui_lyrics.h"
 #include "../../widgets/builders/screen_builders.h"
 #include "../../application/gui.h"
+#ifdef UI_PERF_TRACE
+#include "../../diagnostics/ui_draw_trace.h"
+#define TRACE_UNWRAP_FONT(f) ui_draw_trace_unwrap_font(f)
+#else
+#define TRACE_UNWRAP_FONT(f) ((void) 0)
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +36,9 @@ lv_font_t app_font_lyrics;
 #elif BOARD_SCREEN_HEIGHT >= 720
   #define PLAYER_TITLE_FONT_PX 24
   #define PLAYER_META_FONT_PX  18
+#elif BOARD_COMPACT_UI
+  #define PLAYER_TITLE_FONT_PX 16
+  #define PLAYER_META_FONT_PX  16
 #else
   #define PLAYER_TITLE_FONT_PX 16
   #define PLAYER_META_FONT_PX  16
@@ -54,6 +63,7 @@ lv_font_t app_font_display;
   #define DISPLAY_FONT_FILE FALLBACK_FONT_ROOT "Montserrat-Medium.ttf"
   #define KOREAN_FONT_FILE FALLBACK_FONT_ROOT "korean.ttf"
   #define THAI_FONT_FILE FALLBACK_FONT_ROOT "thai.ttf"
+  #define CHINESE_FONT_FILE FALLBACK_FONT_ROOT "chinese.ttf"
   #define EMOJI_FONT_FILE FALLBACK_FONT_ROOT "emoji.ttf"
   #define ARABIC_FONT_FILE FALLBACK_FONT_ROOT "arabic.ttf"
   #define CUSTOM_FONT_SD_DIR "music/Fonts"
@@ -66,6 +76,7 @@ lv_font_t app_font_display;
   #define DISPLAY_FONT_FILE "/usr/resource/fonts/Montserrat-Medium.ttf"
   #define KOREAN_FONT_FILE "/usr/resource/fonts/Korean.ttf"
   #define THAI_FONT_FILE "/usr/resource/fonts/Thai.ttf"
+  #define CHINESE_FONT_FILE "/usr/resource/fonts/chinese.ttf"
   #define EMOJI_FONT_FILE "/usr/resource/fonts/emoji.ttf"
   #define ARABIC_FONT_FILE "/usr/resource/fonts/arabic.ttf"
   #define CUSTOM_FONT_SD_DIR "/data/mnt/sd_0/Fonts"
@@ -76,7 +87,6 @@ lv_font_t app_font_display;
 #endif
 
 extern player_settings_t current_settings;
-extern void settings_save(const player_settings_t * s);
 extern void player_transition_mark_dirty(void);
 
 static int s_font_size_tier = 1;
@@ -91,7 +101,7 @@ static bool s_fallback_loaded = false;
  * during list scrolling. The buffer is shared across pixel-size instances built from
  * the same file.
  *
- * Fallback faces (CJK, Korean, Thai, Emoji, Arabic) stream from disk to preserve RAM given their
+ * Fallback faces (CJK, Chinese, Korean, Thai, Emoji, Arabic) stream from disk to preserve RAM given their
  * larger file sizes and lower consultation frequency.
  *
  * s_custom_font_data/_size/_generation holds the committed buffer that built
@@ -110,6 +120,7 @@ typedef enum {
     FACE_SRC_THAI,
     FACE_SRC_EMOJI,
     FACE_SRC_ARABIC,
+    FACE_SRC_CHINESE,
     FACE_SRC_DISPLAY,
     FACE_SRC_COUNT
 } face_source_type_t;
@@ -121,24 +132,50 @@ typedef struct {
     lv_font_t * font;
 } loaded_face_entry_t;
 
-/* Distinct pixel sizes (four general UI sizes and independent Lyrics,
- * Player, and display sizes) x (1 primary + 5 fallback faces) is 48. A tier
- * switch holds the retained sizes alongside four new ones, so leave room for
- * one more face per size and an extra size before a switch can run out. */
-#define MAX_LOADED_FACES 64
+/* Up to twelve distinct pixel sizes (four general UI sizes, Lyrics, Player
+ * title/meta, display and four fixed sizes) x (1 primary + 7 fallback faces)
+ * is 96. A tier switch holds the retained sizes alongside four new ones, so
+ * leave room for those before a switch can run out. */
+#define MAX_LOADED_FACES 128
 static loaded_face_entry_t s_loaded_faces[MAX_LOADED_FACES];
 static int s_loaded_face_count = 0;
 
 typedef struct {
     loaded_face_entry_t entries[MAX_LOADED_FACES];
     int count;
+    uint32_t montserrat_copy_mask;
+    /* Live faces reused by a candidate get relinked while it is built; their
+     * original links are restored if the candidate is abandoned. */
+    bool reused[MAX_LOADED_FACES];
+    const lv_font_t * reused_fallback[MAX_LOADED_FACES];
 } face_table_t;
+
+/* Twelve live handles (four tiers, lyrics, player title/meta, display, four
+ * fixed sizes) plus twelve candidate slots. Static copies outlive table swaps;
+ * reservations and live handles prevent reuse during a transaction. */
+#define MONTSERRAT_COPY_COUNT 24
+static lv_font_t s_montserrat_copies[MONTSERRAT_COPY_COUNT];
+
+/* Fixed-size handles for text that does not follow the Font Size tier (topbar
+ * digits and AM/PM, quick drawer captions). Like app_font_player_*, they are
+ * rebuilt in every font transaction so they follow the custom font; the array
+ * is static so labels can keep the pointers. */
+static const int s_fixed_sizes[] = { 12, 16, 18, 28 };
+#define FIXED_FONT_COUNT ((int) (sizeof(s_fixed_sizes) / sizeof(s_fixed_sizes[0])))
+static lv_font_t s_fixed_font[FIXED_FONT_COUNT];
+
+static lv_font_t * fixed_font_for_px(int px) {
+    for (int i = 0; i < FIXED_FONT_COUNT; i++) {
+        if (s_fixed_sizes[i] == px) return &s_fixed_font[i];
+    }
+    return NULL;
+}
 
 /* Tier and Lyrics values are design-reference pixels. R3II's 320x480
  * geometry scales those references to its physical panel; Montserrat is
  * compiled only at even sizes, so round upward after scaling. */
 static int board_font_px(int reference_px) {
-#if defined(BOARD_R3II_2025)
+#if BOARD_COMPACT_UI
     int scaled_px = BOARD_SCALE_PX(reference_px);
     int compiled_px = ((scaled_px + 1) / 2) * 2;
     return compiled_px < 12 ? 12 : compiled_px;
@@ -197,6 +234,35 @@ static const lv_font_t * get_montserrat_font_for_px(int px) {
     }
 }
 
+static bool montserrat_copy_live(const lv_font_t * copy) {
+    const lv_font_t * handles[] = {
+        &app_font_16, &app_font_20, &app_font_22, &app_font_28,
+        &app_font_lyrics, &app_font_player_title, &app_font_player_meta,
+        &app_font_display,
+    };
+    for (size_t j = 0; j < sizeof(handles) / sizeof(handles[0]); j++) {
+        if (handles[j]->fallback == copy) return true;
+    }
+    for (int j = 0; j < FIXED_FONT_COUNT; j++) {
+        if (s_fixed_font[j].fallback == copy) return true;
+    }
+    return false;
+}
+
+static lv_font_t * reserve_montserrat_copy(face_table_t * tbl, int px) {
+    if (!tbl) return NULL;
+    for (int i = 0; i < MONTSERRAT_COPY_COUNT; i++) {
+        uint32_t bit = (uint32_t) 1 << i;
+        if (tbl->montserrat_copy_mask & bit) continue;
+        if (montserrat_copy_live(&s_montserrat_copies[i])) continue;
+        s_montserrat_copies[i] = *get_montserrat_font_for_px(px);
+        s_montserrat_copies[i].fallback = NULL;
+        tbl->montserrat_copy_mask |= bit;
+        return &s_montserrat_copies[i];
+    }
+    return NULL;
+}
+
 static void font_chain_append(lv_font_t ** head, lv_font_t * font) {
     if (!font) return;
     font->fallback = NULL;
@@ -228,6 +294,8 @@ static const char * face_source_file_path(face_source_type_t type, bool custom_s
             return EMOJI_FONT_FILE;
         case FACE_SRC_ARABIC:
             return ARABIC_FONT_FILE;
+        case FACE_SRC_CHINESE:
+            return CHINESE_FONT_FILE;
         case FACE_SRC_DISPLAY:
             /* The same Montserrat face used by the compiled UI fonts. */
             return DISPLAY_FONT_FILE;
@@ -330,6 +398,9 @@ static lv_font_t * load_face_from_file(face_source_type_t type, int pixel_size, 
             DBG_LOG("fallback_font: failed loading custom face (in-memory) at %d px\n", pixel_size);
             return NULL;
         }
+#ifdef UI_PERF_TRACE
+        ui_draw_trace_wrap_font(font);
+#endif
         return font;
     }
 
@@ -348,6 +419,9 @@ static lv_font_t * load_face_from_file(face_source_type_t type, int pixel_size, 
         DBG_LOG("fallback_font: failed loading face type=%d size=%d from %s\n", (int)type, pixel_size, filepath);
         return NULL;
     }
+#ifdef UI_PERF_TRACE
+    ui_draw_trace_wrap_font(font);
+#endif
     return font;
 }
 
@@ -389,6 +463,8 @@ static lv_font_t * get_or_load_face_in_table(face_table_t * tbl, face_source_typ
     tbl->entries[tbl->count].pixel_size = pixel_size;
     tbl->entries[tbl->count].custom_generation = (type == FACE_SRC_CUSTOM) ? custom_gen : 0;
     tbl->entries[tbl->count].font = font;
+    tbl->reused[tbl->count] = existing_font != NULL;
+    tbl->reused_fallback[tbl->count] = existing_font ? existing_font->fallback : NULL;
     tbl->count++;
     return font;
 }
@@ -405,11 +481,14 @@ static bool build_candidate_slot(face_table_t * tbl, lv_font_t * out_font, int p
 
     if (primary_custom) {
         *out_font = *primary_custom;
+        lv_font_t * mont_copy = reserve_montserrat_copy(tbl, pixel_size);
+        if (!mont_copy) return false;
+        out_font->fallback = mont_copy;
     } else {
         const lv_font_t * mont = get_montserrat_font_for_px(pixel_size);
         *out_font = *mont;
+        out_font->fallback = NULL;
     }
-    out_font->fallback = NULL;
 
     if (include_fallbacks) {
         lv_font_t * cjk = get_or_load_face_in_table(tbl, FACE_SRC_CJK, pixel_size, custom_staged, custom_gen);
@@ -417,13 +496,19 @@ static bool build_candidate_slot(face_table_t * tbl, lv_font_t * out_font, int p
         lv_font_t * th = get_or_load_face_in_table(tbl, FACE_SRC_THAI, pixel_size, custom_staged, custom_gen);
         lv_font_t * emoji = get_or_load_face_in_table(tbl, FACE_SRC_EMOJI, pixel_size, custom_staged, custom_gen);
         lv_font_t * arabic = get_or_load_face_in_table(tbl, FACE_SRC_ARABIC, pixel_size, custom_staged, custom_gen);
+        lv_font_t * chinese = get_or_load_face_in_table(tbl, FACE_SRC_CHINESE, pixel_size, custom_staged, custom_gen);
+        /* Full Montserrat covers glyphs the compiled subset lacks (Romanian
+         * comma-below letters); optional and always last. */
+        lv_font_t * full_mont = get_or_load_face_in_table(tbl, FACE_SRC_DISPLAY, pixel_size, custom_staged, custom_gen);
 
-        lv_font_t * fallback_head = NULL;
+        lv_font_t * fallback_head = (lv_font_t *) out_font->fallback;
         if (cjk) font_chain_append(&fallback_head, cjk);
+        if (chinese) font_chain_append(&fallback_head, chinese);
         if (kr)  font_chain_append(&fallback_head, kr);
         if (th)  font_chain_append(&fallback_head, th);
         if (emoji) font_chain_append(&fallback_head, emoji);
         if (arabic) font_chain_append(&fallback_head, arabic);
+        if (full_mont) font_chain_append(&fallback_head, full_mont);
 
         out_font->fallback = fallback_head;
     }
@@ -450,6 +535,11 @@ static bool build_candidate_display_slot(face_table_t * tbl, lv_font_t * out_fon
         *out_font = *primary;
     }
     out_font->fallback = NULL;
+    if (custom_staged && primary) {
+        lv_font_t * mont_copy = reserve_montserrat_copy(tbl, 40);
+        if (!mont_copy) return false;
+        out_font->fallback = mont_copy;
+    }
 
     if (include_fallbacks) {
         lv_font_t * cjk = get_or_load_face_in_table(tbl, FACE_SRC_CJK, DISPLAY_FONT_PX, custom_staged, custom_gen);
@@ -457,15 +547,44 @@ static bool build_candidate_display_slot(face_table_t * tbl, lv_font_t * out_fon
         lv_font_t * th = get_or_load_face_in_table(tbl, FACE_SRC_THAI, DISPLAY_FONT_PX, custom_staged, custom_gen);
         lv_font_t * emoji = get_or_load_face_in_table(tbl, FACE_SRC_EMOJI, DISPLAY_FONT_PX, custom_staged, custom_gen);
         lv_font_t * arabic = get_or_load_face_in_table(tbl, FACE_SRC_ARABIC, DISPLAY_FONT_PX, custom_staged, custom_gen);
-        lv_font_t * head = NULL;
+        lv_font_t * chinese = get_or_load_face_in_table(tbl, FACE_SRC_CHINESE, DISPLAY_FONT_PX, custom_staged, custom_gen);
+        /* Already the primary when no custom font is selected. */
+        lv_font_t * full_mont = custom_staged
+            ? get_or_load_face_in_table(tbl, FACE_SRC_DISPLAY, DISPLAY_FONT_PX, custom_staged, custom_gen)
+            : NULL;
+        lv_font_t * head = (lv_font_t *) out_font->fallback;
         if (cjk) font_chain_append(&head, cjk);
+        if (chinese) font_chain_append(&head, chinese);
         if (kr) font_chain_append(&head, kr);
         if (th) font_chain_append(&head, th);
         if (emoji) font_chain_append(&head, emoji);
         if (arabic) font_chain_append(&head, arabic);
+        if (full_mont) font_chain_append(&head, full_mont);
         out_font->fallback = head;
     }
     return true;
+}
+
+/* Builds every fixed-size slot into out[FIXED_FONT_COUNT]; commit with
+ * commit_fixed_slots() once the whole transaction has succeeded. Every slot
+ * starts as plain compiled Montserrat, so callers that ignore a failure
+ * (startup, deferred fallback load) still publish renderable fonts. */
+static bool build_candidate_fixed_slots(face_table_t * tbl, lv_font_t * out,
+                                        bool custom_staged, uint32_t custom_gen,
+                                        bool include_fallbacks) {
+    for (int i = 0; i < FIXED_FONT_COUNT; i++) {
+        out[i] = *get_montserrat_font_for_px(s_fixed_sizes[i]);
+        out[i].fallback = NULL;
+    }
+    for (int i = 0; i < FIXED_FONT_COUNT; i++) {
+        if (!build_candidate_slot(tbl, &out[i], s_fixed_sizes[i], custom_staged, custom_gen, include_fallbacks))
+            return false;
+    }
+    return true;
+}
+
+static void commit_fixed_slots(const lv_font_t * cand) {
+    for (int i = 0; i < FIXED_FONT_COUNT; i++) s_fixed_font[i] = cand[i];
 }
 
 /* A size-tier transaction must not reuse an active tiny-TTF face while it
@@ -495,10 +614,13 @@ static bool build_new_tier_slot(face_table_t * tbl, lv_font_t * out_font,
                                         s_custom_font_generation);
         if (!custom) return false;
         *out_font = *custom;
+        lv_font_t * mont_copy = reserve_montserrat_copy(tbl, pixel_size);
+        if (!mont_copy) return false;
+        out_font->fallback = mont_copy;
     } else {
         *out_font = *get_montserrat_font_for_px(pixel_size);
+        out_font->fallback = NULL;
     }
-    out_font->fallback = NULL;
 
     if (!include_fallbacks) return true;
 
@@ -515,13 +637,20 @@ static bool build_new_tier_slot(face_table_t * tbl, lv_font_t * out_font,
     /* Arabic is optional like Emoji: standalone player updates may not include
      * the asset yet, and its absence must not fail a font-size transaction. */
     lv_font_t * arabic = load_new_face_in_table(tbl, FACE_SRC_ARABIC, pixel_size, false, 0);
+    /* Chinese is optional for the same reason as Emoji and Arabic. */
+    lv_font_t * chinese = load_new_face_in_table(tbl, FACE_SRC_CHINESE, pixel_size, false, 0);
+    /* Full Montserrat is optional and last: it covers glyphs missing from the
+     * compiled subset (Romanian comma-below letters). */
+    lv_font_t * full_mont = load_new_face_in_table(tbl, FACE_SRC_DISPLAY, pixel_size, false, 0);
 
-    lv_font_t * head = NULL;
+    lv_font_t * head = (lv_font_t *) out_font->fallback;
     font_chain_append(&head, cjk);
+    if (chinese) font_chain_append(&head, chinese);
     font_chain_append(&head, kr);
     font_chain_append(&head, th);
     if (emoji) font_chain_append(&head, emoji);
     if (arabic) font_chain_append(&head, arabic);
+    if (full_mont) font_chain_append(&head, full_mont);
     out_font->fallback = head;
     return true;
 }
@@ -534,6 +663,11 @@ static bool face_table_contains_font(const face_table_t * tbl, const lv_font_t *
 }
 
 static void destroy_new_candidate_faces(face_table_t * tbl) {
+    /* Unlink the abandoned candidate from live chains before freeing its faces. */
+    for (int i = 0; i < tbl->count; i++) {
+        if (tbl->reused[i] && tbl->entries[i].font)
+            tbl->entries[i].font->fallback = tbl->reused_fallback[i];
+    }
     for (int i = 0; i < tbl->count; i++) {
         lv_font_t * font = tbl->entries[i].font;
         bool active = false;
@@ -543,7 +677,7 @@ static void destroy_new_candidate_faces(face_table_t * tbl) {
                 break;
             }
         }
-        if (!active && font) lv_tiny_ttf_destroy(font);
+        if (!active && font) { TRACE_UNWRAP_FONT(font); lv_tiny_ttf_destroy(font); }
     }
 }
 
@@ -551,6 +685,7 @@ static void destroy_obsolete_faces(const face_table_t * candidate) {
     for (int j = 0; j < s_loaded_face_count; j++) {
         lv_font_t * old_font = s_loaded_faces[j].font;
         if (old_font && !face_table_contains_font(candidate, old_font)) {
+            TRACE_UNWRAP_FONT(old_font);
             lv_tiny_ttf_destroy(old_font);
         }
     }
@@ -574,7 +709,7 @@ bool fallback_font_apply_size_tier(int tier) {
      * startup and is safe because the chain is not rewired. */
     for (int i = 0; i < s_loaded_face_count; i++) {
         int px = s_loaded_faces[i].pixel_size;
-        if ((px == lyrics_px || px == size_player_title || px == size_player_meta || px == DISPLAY_FONT_PX) &&
+        if ((px == lyrics_px || px == size_player_title || px == size_player_meta || px == DISPLAY_FONT_PX || fixed_font_for_px(px)) &&
             candidate.count < MAX_LOADED_FACES) {
             candidate.entries[candidate.count++] = s_loaded_faces[i];
         }
@@ -595,6 +730,7 @@ bool fallback_font_apply_size_tier(int tier) {
         if ((px) == lyrics_px) (out) = app_font_lyrics; \
         else if ((px) == size_player_title) (out) = app_font_player_title; \
         else if ((px) == size_player_meta) (out) = app_font_player_meta; \
+        else if (fixed_font_for_px(px)) (out) = *fixed_font_for_px(px); \
         else if (!build_new_tier_slot(&candidate, &(out), (px), s_fallback_loaded)) ok = false; \
     } while (0)
     BUILD_TIER_SLOT(cand_16, size_16);
@@ -615,7 +751,7 @@ bool fallback_font_apply_size_tier(int tier) {
      * slots, even when its pixel size overlaps a newly built UI slot. */
     for (int i = 0; i < s_loaded_face_count; i++) {
         int px = s_loaded_faces[i].pixel_size;
-        if ((px == lyrics_px || px == size_player_title || px == size_player_meta || px == DISPLAY_FONT_PX) &&
+        if ((px == lyrics_px || px == size_player_title || px == size_player_meta || px == DISPLAY_FONT_PX || fixed_font_for_px(px)) &&
             !face_table_contains_font(&candidate, s_loaded_faces[i].font)) {
             if (candidate.count >= MAX_LOADED_FACES) {
                 destroy_new_candidate_faces(&candidate);
@@ -628,7 +764,7 @@ bool fallback_font_apply_size_tier(int tier) {
 
     for (int i = 0; i < s_loaded_face_count; i++) {
         lv_font_t * old = s_loaded_faces[i].font;
-        if (old && !face_table_contains_font(&candidate, old)) lv_tiny_ttf_destroy(old);
+        if (old && !face_table_contains_font(&candidate, old)) { TRACE_UNWRAP_FONT(old); lv_tiny_ttf_destroy(old); }
     }
 
     app_font_16 = cand_16;
@@ -666,6 +802,7 @@ bool fallback_font_apply_lyrics_size_tier(int tier) {
 
     face_table_t candidate_table = {0};
     lv_font_t cand_16, cand_20, cand_22, cand_28, cand_lyrics, cand_player_title, cand_player_meta, cand_display;
+    lv_font_t cand_fixed[FIXED_FONT_COUNT];
 
     bool ok = true;
     ok = ok && build_candidate_slot(&candidate_table, &cand_16, size_16, s_custom_staged_valid, s_custom_font_generation, s_fallback_loaded);
@@ -676,6 +813,7 @@ bool fallback_font_apply_lyrics_size_tier(int tier) {
     ok = ok && build_candidate_slot(&candidate_table, &cand_player_title, size_player_title, s_custom_staged_valid, s_custom_font_generation, s_fallback_loaded);
     ok = ok && build_candidate_slot(&candidate_table, &cand_player_meta, size_player_meta, s_custom_staged_valid, s_custom_font_generation, s_fallback_loaded);
     ok = ok && build_candidate_display_slot(&candidate_table, &cand_display, s_custom_staged_valid, s_custom_font_generation, s_fallback_loaded);
+    ok = ok && build_candidate_fixed_slots(&candidate_table, cand_fixed, s_custom_staged_valid, s_custom_font_generation, s_fallback_loaded);
 
     if (!ok) {
         DBG_LOG("fallback_font: lyrics tier %d build failed; keeping tier %d\n", tier, s_lyrics_font_size_tier);
@@ -694,6 +832,7 @@ bool fallback_font_apply_lyrics_size_tier(int tier) {
     app_font_player_title = cand_player_title;
     app_font_player_meta = cand_player_meta;
     app_font_display = cand_display;
+    commit_fixed_slots(cand_fixed);
 
     s_loaded_face_count = candidate_table.count;
     for (int i = 0; i < candidate_table.count; i++) {
@@ -1018,6 +1157,7 @@ bool fallback_font_apply_custom(const char * custom_filename) {
     /* Build candidate faces in separate table to ensure 100% transactional safety */
     face_table_t candidate_table = {0};
     lv_font_t cand_16, cand_20, cand_22, cand_28, cand_lyrics, cand_player_title, cand_player_meta, cand_display;
+    lv_font_t cand_fixed[FIXED_FONT_COUNT];
 
     bool ok = true;
     ok = ok && build_candidate_slot(&candidate_table, &cand_16, size_16, candidate_staged_valid, target_gen, s_fallback_loaded);
@@ -1028,6 +1168,7 @@ bool fallback_font_apply_custom(const char * custom_filename) {
     ok = ok && build_candidate_slot(&candidate_table, &cand_player_title, size_player_title, candidate_staged_valid, target_gen, s_fallback_loaded);
     ok = ok && build_candidate_slot(&candidate_table, &cand_player_meta, size_player_meta, candidate_staged_valid, target_gen, s_fallback_loaded);
     ok = ok && build_candidate_display_slot(&candidate_table, &cand_display, candidate_staged_valid, target_gen, s_fallback_loaded);
+    ok = ok && build_candidate_fixed_slots(&candidate_table, cand_fixed, candidate_staged_valid, target_gen, s_fallback_loaded);
 
     if (!ok) {
         DBG_LOG("fallback_font: candidate build failed; rolling back without touching active font stack\n");
@@ -1048,6 +1189,7 @@ bool fallback_font_apply_custom(const char * custom_filename) {
     app_font_player_title = cand_player_title;
     app_font_player_meta = cand_player_meta;
     app_font_display = cand_display;
+    commit_fixed_slots(cand_fixed);
 
     s_loaded_face_count = candidate_table.count;
     for (int i = 0; i < candidate_table.count; i++) {
@@ -1120,12 +1262,29 @@ void fallback_font_init_early(int font_size_tier, int lyrics_font_size_tier) {
     build_candidate_slot(&init_table, &app_font_player_title, size_player_title, s_custom_staged_valid, s_custom_font_generation, false);
     build_candidate_slot(&init_table, &app_font_player_meta, size_player_meta, s_custom_staged_valid, s_custom_font_generation, false);
     build_candidate_display_slot(&init_table, &app_font_display, s_custom_staged_valid, s_custom_font_generation, false);
+    build_candidate_fixed_slots(&init_table, s_fixed_font, s_custom_staged_valid, s_custom_font_generation, false);
 
     s_loaded_face_count = init_table.count;
     for (int i = 0; i < init_table.count; i++) {
         s_loaded_faces[i] = init_table.entries[i];
     }
     if (s_custom_staged_valid) commit_custom_font_data(s_custom_font_generation);
+}
+
+/* Fixed-size UI handles (see s_fixed_font): the sizes in s_fixed_sizes follow
+ * the custom font and fallback chain; any other size is plain compiled
+ * Montserrat. */
+const lv_font_t * fallback_font_fixed(int px) {
+    const lv_font_t * font = fixed_font_for_px(px);
+    return font ? font : get_montserrat_font_for_px(px);
+}
+
+const lv_font_t * fallback_font_ui_12(void) {
+    return fallback_font_fixed(12);
+}
+
+bool fallback_font_is_loaded(void) {
+    return s_fallback_loaded;
 }
 
 void fallback_font_load_now(void) {
@@ -1150,6 +1309,7 @@ void fallback_font_load_now(void) {
 
     face_table_t table = {0};
     lv_font_t cand_16, cand_20, cand_22, cand_28, cand_lyrics, cand_player_title, cand_player_meta, cand_display;
+    lv_font_t cand_fixed[FIXED_FONT_COUNT];
 
     build_candidate_slot(&table, &cand_16, size_16, s_custom_staged_valid, s_custom_font_generation, true);
     build_candidate_slot(&table, &cand_20, size_20, s_custom_staged_valid, s_custom_font_generation, true);
@@ -1159,6 +1319,7 @@ void fallback_font_load_now(void) {
     build_candidate_slot(&table, &cand_player_title, size_player_title, s_custom_staged_valid, s_custom_font_generation, true);
     build_candidate_slot(&table, &cand_player_meta, size_player_meta, s_custom_staged_valid, s_custom_font_generation, true);
     build_candidate_display_slot(&table, &cand_display, s_custom_staged_valid, s_custom_font_generation, true);
+    build_candidate_fixed_slots(&table, cand_fixed, s_custom_staged_valid, s_custom_font_generation, true);
 
     /* Atomic swap */
     app_font_16 = cand_16;
@@ -1169,6 +1330,7 @@ void fallback_font_load_now(void) {
     app_font_player_title = cand_player_title;
     app_font_player_meta = cand_player_meta;
     app_font_display = cand_display;
+    commit_fixed_slots(cand_fixed);
 
     s_loaded_face_count = table.count;
     for (int i = 0; i < table.count; i++) {

@@ -1,6 +1,8 @@
 #include "../ui/diagnostics/ui_frame_trace.h"
+#include "../ui/diagnostics/ui_blit_verify.h"
 #include "../core/system/runtime/app_version.h"
 #include "lvgl/lvgl.h"
+#include "lvgl/src/display/lv_display_private.h"
 #include "../audio/engine/audio.h"
 #include "../audio/visualization/waveform.h"
 #include "../hardware/indicators/backlight.h"
@@ -32,6 +34,7 @@
 #include "../core/ui/display/ui_wake.h"
 #include "../ui/text/fonts/ui_fonts.h"
 #include "../ui/text/rendering/fallback_font.h"
+#include "../ui/shell/gui_navigation.h"
 #include <fcntl.h>
 
 #ifdef HOST_BUILD
@@ -109,7 +112,8 @@ bool main_loop_discard_pointer_input(void) { return false; }
  * array from a signal handler is safe (no allocation, no lock). */
 extern char g_scan_last_path[PATH_MAX];
 
-/* Always-on crash line on internal storage. The SD diag below is opt-in and
+/* Crash line on internal storage, deliberately written regardless of the
+ * debug logging setting. The SD diag below is opt-in and
  * a full SD card (or logging left off) used to leave no record at all:
  * stderr is not kept, and the bootloader only sees the wait status. This
  * path stays async-signal-safe: stack buffers and open/write/fsync/close. */
@@ -501,15 +505,20 @@ static void settle_sd_mount_during_splash(void) {
     }
 }
 
-/* Startup histories stay on internal flash across reboots. The shared logger
- * retains prior launches and flushes each stage before its operation begins. */
+/* With debug logging on, startup histories stay on internal flash across
+ * reboots; the shared logger retains prior launches and flushes each stage
+ * before its operation begins. The first checkpoint runs before settings_load(),
+ * so the decision is read once from the settings file and kept for the rest of
+ * this boot (later logs use db_log_enabled()). With logging off, no file is
+ * created, opened or rotated. */
 static boot_trace_t player_boot_trace = BOOT_TRACE_INITIALIZER;
 static bool player_boot_trace_attempted;
 
 void boot_checkpoint(const char * step) {
     if (!player_boot_trace_attempted) {
         player_boot_trace_attempted = true;
-        (void)boot_trace_open(&player_boot_trace, "/usr/data/boot_debug.log");
+        if (logging_enabled_in_settings_file())
+            (void)boot_trace_open(&player_boot_trace, "/usr/data/boot_debug.log");
     }
     (void)boot_trace_checkpoint(&player_boot_trace, step);
 }
@@ -552,6 +561,12 @@ static volatile sig_atomic_t discard_blocked_time;
 
 void main_loop_discard_elapsed_time(void) {
     discard_blocked_time = 1;
+}
+
+/* The refresh timer's callback: rendering happens in the main loop, after the
+ * timers; the timer itself only carries pause/resume/ready. */
+static void refr_timer_stub_cb(lv_timer_t * timer) {
+    (void)timer;
 }
 
 /* Milliseconds to add to LVGL's clock for the real time `now` since `last`. */
@@ -706,6 +721,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "Error: Failed to create SDL2 window\n");
         return 1;
     }
+    ui_wake_init(); /* workers cut the loop's sleep short here too */
     settings_load(&current_settings);
     if (current_settings.screen_upside_down) {
         lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_180);
@@ -835,6 +851,9 @@ int main(int argc, char ** argv) {
     boot_checkpoint("startup fallback fonts begin");
 #endif
     fallback_font_load_now();
+    /* Startup snapshots precede fallback loading. Rebuild them so transitions
+     * use the same multilingual fonts as the live screens. */
+    gui_navigation_invalidate_font_snapshots();
 #ifndef HOST_BUILD
     boot_checkpoint("startup fallback fonts done");
 #endif
@@ -873,6 +892,21 @@ int main(int argc, char ** argv) {
      * looping on the literal constant here keeps that guarantee visible at
      * the one place it actually matters instead of relying on a variable
      * defined and set far away. */
+    /* The loop below renders after the timers (see there); the refresh timer
+     * keeps its pause/resume/ready rules but must not also fire on its own
+     * 16 ms period, which drifts against the panel's vsync. */
+    {
+        lv_timer_t * refr_timer = lv_display_get_refr_timer(disp);
+        if (refr_timer) {
+            lv_timer_set_period(refr_timer, 1000);
+            /* The handler must never render by itself: a render in the middle
+             * of the timer list leaves the later timers' damage for a second
+             * render in the same pass. */
+            lv_timer_set_cb(refr_timer, refr_timer_stub_cb);
+        }
+    }
+    uint32_t render_start_tick = 0;
+    bool rendered_once = false;
 #ifdef HOST_BUILD
     while (running) {
 #else
@@ -888,7 +922,32 @@ int main(int argc, char ** argv) {
         if (first_mainloop_handler)
             boot_checkpoint("first mainloop handler begin");
 #endif
+        /* A worker published a result: let the pollers that only check "is the
+         * job done" run in this very pass, then apply what they found below. */
+        bool jobs_ready = ui_wake_take_jobs() || gui_jobs_take_deferred();
+        if (jobs_ready) gui_jobs_dispatch_begin();
         uint32_t time_till_next = lv_timer_handler();
+        if (jobs_ready) gui_jobs_dispatch_end();
+        /* Render here, after every timer and result of this pass, not from the
+         * refresh timer's own period: that period drifted against the panel's
+         * 16.3 ms vsync, so a frame sometimes started just before the vsync
+         * and was presented a whole refresh late. The pan blocks until the
+         * vsync, so the loop locks onto the panel instead. The refresh timer
+         * still carries every pause/resume/ready rule (screen off, RAM-stage,
+         * lyrics barrier): it is only rendered when it is not paused. */
+        uint32_t now_tick = custom_tick_get();
+        lv_timer_t * refr_timer = lv_display_get_refr_timer(disp);
+        /* Never more than one render per refresh period, whatever woke the
+         * loop (a flood of worker notifies) and whether or not the pan blocks. */
+        if (refr_timer && !lv_timer_get_paused(refr_timer) &&
+            (!rendered_once || now_tick - render_start_tick >= LV_DEF_REFR_PERIOD)) {
+            render_start_tick = now_tick;
+            rendered_once = true;
+            lv_display_refr_timer(refr_timer);
+#ifdef UI_PERF_TRACE
+            ui_blit_verify_after_render();
+#endif
+        }
 #ifdef UI_PERF_TRACE
         ui_frame_trace_event(UI_FRAME_TRACE_EVENT_HANDLER_END, time_till_next, 0);
 #endif
@@ -936,6 +995,15 @@ int main(int argc, char ** argv) {
          * paused/resumed state of the refresh timer. */
         uint32_t idle_cap_ms = backlight_screen_is_on() ? 100 : 500;
         if (time_till_next > idle_cap_ms) time_till_next = idle_cap_ms;
+        /* Damage queued while rendering (or by a result) asks for another frame:
+         * keep the old one-render-per-refresh-period rate, measured from this
+         * render's start, instead of spinning when nothing blocks. Only while
+         * the display really has invalidated areas: otherwise sleep in full. */
+        if (refr_timer && !lv_timer_get_paused(refr_timer) && backlight_screen_is_on() && disp->inv_p > 0) {
+            uint32_t since_render = custom_tick_get() - render_start_tick;
+            uint32_t until_next = since_render >= LV_DEF_REFR_PERIOD ? 0 : LV_DEF_REFR_PERIOD - since_render;
+            if (time_till_next > until_next) time_till_next = until_next;
+        }
 #ifdef UI_PERF_TRACE
         ui_frame_trace_event(UI_FRAME_TRACE_EVENT_SLEEP_BEGIN, time_till_next, 0);
 #endif
@@ -975,7 +1043,7 @@ int main(int argc, char ** argv) {
         } else
 #endif
         {
-        usleep(time_till_next * 1000);
+        ui_wake_sleep(time_till_next);
 #ifdef UI_PERF_TRACE
         ui_frame_trace_event(UI_FRAME_TRACE_EVENT_SLEEP_END, time_till_next, 0);
 #endif

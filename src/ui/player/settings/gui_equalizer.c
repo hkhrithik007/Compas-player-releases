@@ -7,6 +7,7 @@
 #include "../../shell/gui_navigation.h"
 #include "../../appearance/gui_theme.h"
 #include "../../text/i18n/i18n.h"
+#include "../../text/rendering/fallback_font.h"
 #include "../../assets/assets.h"
 #include "../../../audio/effects/peq.h"
 #include <math.h>
@@ -73,6 +74,8 @@ static lv_obj_t * eq_bypass_state_label;
 static lv_obj_t * eq_title_label;
 static bool eq_graph_visible;
 static lv_obj_t * eq_graph_panel, *eq_graph_chart, *eq_graph_caption;
+static lv_obj_t * eq_graph_reference;
+static lv_obj_t * eq_graph_preamp_switch;
 static lv_chart_series_t * eq_graph_series;
 static lv_obj_t * eq_graph_min_label, *eq_graph_low_label, *eq_graph_zero_label;
 static lv_obj_t * eq_graph_high_label, *eq_graph_max_label;
@@ -94,6 +97,21 @@ void gui_settings_refresh_font_geometry(void) {
 #define EQ_FREQ_MIN_HZ 20.0
 #define EQ_FREQ_MAX_HZ 20000.0
 #define EQ_FREQ_SLIDER_MAX 1000
+#define EQ_GRAPH_X_MAX 1000000
+#define EQ_GRAPH_BASE_POINTS 512
+#define EQ_GRAPH_MAX_POINTS (EQ_GRAPH_BASE_POINTS + PEQ_NUM_BANDS)
+
+static int eq_compare_freq(const void * a, const void * b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
+/* Both sample positions and grid ticks use the scatter chart's integer X
+ * coordinates. Let LVGL do the same pixel rounding for each. */
+static int32_t eq_graph_frequency_x(double frequency) {
+    return (int32_t)lround(EQ_GRAPH_X_MAX * log(frequency / EQ_FREQ_MIN_HZ) /
+                          log(EQ_FREQ_MAX_HZ / EQ_FREQ_MIN_HZ));
+}
 
 static int32_t freq_to_slider(double freq_hz) {
     if (freq_hz < EQ_FREQ_MIN_HZ) freq_hz = EQ_FREQ_MIN_HZ;
@@ -355,6 +373,15 @@ static void eq_band_enabled_switch_event_cb(lv_event_t * e) {
     peq_save();
 }
 
+/* The graph shows the combined response with the preamp, or the filter
+ * correction only (Squiglink's view); a display choice, saved in settings. */
+static void eq_graph_preamp_switch_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+    current_settings.peq_graph_include_preamp = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    settings_save_async(&current_settings);
+    eq_refresh_graph();
+}
+
 static void eq_freq_slider_event_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     const peq_band_t * band = peq_get_band(current_eq_band);
@@ -524,11 +551,27 @@ static void refresh_all_eq_widgets(void) {
 
 static void eq_refresh_graph(void) {
     if (eq_graph_visible && eq_graph_chart && eq_graph_series) {
-        double f[128], db[128], peak = 0.0;
-        for (size_t i = 0; i < 128; ++i) f[i] = EQ_FREQ_MIN_HZ * pow(EQ_FREQ_MAX_HZ / EQ_FREQ_MIN_HZ, (double)i / 127.0);
-        peq_get_response_db(f, db, 128, 48000);
-        for (size_t i = 0; i < 128; ++i) if (fabs(db[i]) > peak) peak = fabs(db[i]);
-        int range = (int)(ceil(peak / 6.0) * 6.0);
+        double f[EQ_GRAPH_MAX_POINTS], db[EQ_GRAPH_MAX_POINTS], peak = 0.0;
+        size_t count = EQ_GRAPH_BASE_POINTS;
+        for (size_t i = 0; i < EQ_GRAPH_BASE_POINTS; ++i)
+            f[i] = EQ_FREQ_MIN_HZ * pow(EQ_FREQ_MAX_HZ / EQ_FREQ_MIN_HZ, (double)i / (EQ_GRAPH_BASE_POINTS - 1));
+        for (int i = 0; i < PEQ_NUM_BANDS; ++i) {
+            const peq_band_t * band = peq_get_band(i);
+            if (band && band->enabled && isfinite(band->freq_hz) && band->freq_hz >= EQ_FREQ_MIN_HZ && band->freq_hz <= EQ_FREQ_MAX_HZ)
+                f[count++] = band->freq_hz;
+        }
+        qsort(f, count, sizeof(f[0]), eq_compare_freq);
+        size_t unique = 0;
+        for (size_t i = 0; i < count; ++i)
+            if (!unique || f[i] != f[unique - 1]) f[unique++] = f[i];
+        count = unique;
+        const bool with_preamp = current_settings.peq_graph_include_preamp;
+        if (with_preamp) peq_get_response_db(f, db, count, 48000);
+        else peq_get_filter_response_db(f, db, count, 48000);
+        for (size_t i = 0; i < count; ++i) if (isfinite(db[i]) && fabs(db[i]) > peak) peak = fabs(db[i]);
+        /* Match the centi-dB samples, so coefficient rounding just above an
+         * exact 6 dB step does not unnecessarily expand the vertical scale. */
+        int range = (((int)lround(peak * 100.0) + 599) / 600) * 6;
         if (range < 12) range = 12;
         if (range > 144) range = 144;
         if (eq_graph_min_label) lv_label_set_text_fmt(eq_graph_min_label, "-%d", range);
@@ -537,14 +580,27 @@ static void eq_refresh_graph(void) {
         if (eq_graph_high_label) lv_label_set_text_fmt(eq_graph_high_label, "+%d", range / 2);
         if (eq_graph_max_label) lv_label_set_text_fmt(eq_graph_max_label, "+%d", range);
         lv_chart_set_range(eq_graph_chart, LV_CHART_AXIS_PRIMARY_Y, -range * 100, range * 100);
-        for (size_t i = 0; i < 128; ++i) {
-            int value = (int)lround(db[i] * 100.0);
+        lv_chart_set_axis_range(eq_graph_chart, LV_CHART_AXIS_PRIMARY_X, 0, EQ_GRAPH_X_MAX);
+        lv_chart_set_point_count(eq_graph_chart, (uint32_t)count);
+        for (size_t i = 0; i < count; ++i) {
+            int value = isfinite(db[i]) ? (int)lround(db[i] * 100.0) : 0;
             if (value < -range * 100) value = -range * 100;
             if (value > range * 100) value = range * 100;
-            lv_chart_set_value_by_id(eq_graph_chart, eq_graph_series, (uint16_t)i, value);
+            int32_t x = eq_graph_frequency_x(f[i]);
+            lv_chart_set_series_value_by_id2(eq_graph_chart, eq_graph_series, (uint32_t)i, x, value);
         }
         lv_chart_refresh(eq_graph_chart);
-        if (eq_graph_caption) lv_label_set_text(eq_graph_caption, peq_get_bypass() ? TR("Combined response (dB) · EQ off") : TR("Combined response (dB)"));
+        const bool off = peq_get_bypass();
+        if (eq_graph_caption) {
+            if (with_preamp) lv_label_set_text(eq_graph_caption, off ? TR("Combined response (dB) · EQ off") : TR("Combined response (dB)"));
+            else lv_label_set_text(eq_graph_caption, off ? TR("EQ correction (dB) · EQ off") : TR("EQ correction (dB)"));
+        }
+        if (eq_graph_reference) {
+            double preamp = peq_get_preamp_db();
+            if (!isfinite(preamp)) preamp = 0.0;
+            if (with_preamp) lv_label_set_text(eq_graph_reference, TR("48 kHz reference"));
+            else lv_label_set_text_fmt(eq_graph_reference, TR("48 kHz · Preamp excluded (%+.1f dB)"), preamp);
+        }
     }
 }
 
@@ -731,6 +787,11 @@ static void populate_eq_profiles_screen(void) {
         lv_label_set_text(label, TR("No saved profiles"));
         lv_obj_add_style(label, &style_theme_text_muted, 0);
         lv_obj_set_style_pad_left(label, 24, 0);
+        /* Preserve the default 16 px primary face and add multilingual fallback.
+         * Constrain long translations to the list content width. */
+        lv_obj_set_style_text_font(label, fallback_font_fixed(16), 0);
+        lv_obj_set_width(label, LV_PCT(100));
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
         if (!eq_profiles_edit_mode && !eq_profiles_replace_mode &&
             eq_profiles_download_available())
             add_pill_chevron_row(eq_profiles_list, TR("Download profiles"), eq_profiles_download_cb);
@@ -755,16 +816,25 @@ static void populate_eq_profiles_screen(void) {
         lv_label_set_text(label, display);
         lv_obj_add_style(label, &style_theme_text_primary, 0);
         lv_obj_set_style_text_font(label, gui_theme_font(GUI_FONT_ROLE_ROW), 0);
-        lv_obj_set_width(label, LIST_ROW_WIDTH - LIST_ROW_LABEL_INSET - BOARD_SCALE_PX(64));
-        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-        lv_obj_align(label, LV_ALIGN_LEFT_MID, LIST_ROW_LABEL_INSET, 0);
+        const int32_t name_w = LIST_ROW_WIDTH - LIST_ROW_LABEL_INSET - BOARD_SCALE_PX(64);
+        lv_obj_set_width(label, name_w);
+        const bool tall = ui_row_fit_label(row, label, gui_theme_font(GUI_FONT_ROLE_ROW),
+                                           LIST_ROW_WIDTH, LIST_ROW_LABEL_INSET, name_w);
 
         if (eq_profiles_edit_mode) {
             lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_add_event_cb(row, eq_profile_rename_row_cb, LV_EVENT_CLICKED, eq_profile_paths[i]);
             lv_obj_t * delete_icon = lv_image_create(row);
+            if (tall) lv_obj_add_flag(delete_icon, LV_OBJ_FLAG_FLOATING);
             lv_image_set_src(delete_icon, asset_path("touch_list/del.png"));
+#if defined(BOARD_TEMPOTEC_V1)
+            lv_obj_set_size(delete_icon, BOARD_SCALE_PX(34), BOARD_SCALE_PX(34));
+            lv_image_set_inner_align(delete_icon, LV_IMAGE_ALIGN_CONTAIN);
+            lv_obj_align(delete_icon, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(20), 0);
+            lv_obj_set_ext_click_area(delete_icon, BOARD_SCALE_PX(6));
+#else
             lv_obj_align(delete_icon, LV_ALIGN_RIGHT_MID, -20, 0);
+#endif
             lv_obj_add_flag(delete_icon, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_add_event_cb(delete_icon, eq_profile_delete_row_cb, LV_EVENT_CLICKED, eq_profile_paths[i]);
         } else if (eq_profiles_replace_mode) {
@@ -1129,7 +1199,7 @@ static void eq_graph_grid_draw_cb(lv_event_t * e) {
     static const double ticks[] = {20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000};
     line.opa = lv_obj_get_style_line_opa(chart, LV_PART_MAIN);
     for (size_t i = 0; i < sizeof(ticks) / sizeof(ticks[0]); ++i) {
-        line.p1.x = line.p2.x = area.x1 + (int32_t)lround(width * log10(ticks[i] / EQ_FREQ_MIN_HZ) / log10(EQ_FREQ_MAX_HZ / EQ_FREQ_MIN_HZ));
+        line.p1.x = line.p2.x = area.x1 + lv_map(eq_graph_frequency_x(ticks[i]), 0, EQ_GRAPH_X_MAX, 0, width);
         if (line.p1.x > area.x2) line.p1.x = line.p2.x = area.x2;
         line.p1.y = area.y1;
         line.p2.y = area.y1 + height;
@@ -1138,7 +1208,7 @@ static void eq_graph_grid_draw_cb(lv_event_t * e) {
     for (int i = 0; i < 5; ++i) {
         line.p1.x = area.x1;
         line.p2.x = area.x1 + width;
-        line.p1.y = line.p2.y = area.y1 + height * i / 4;
+        line.p1.y = line.p2.y = area.y1 + height - height * (4 - i) / 4;
         line.opa = i == 2 ? LV_OPA_70 : lv_obj_get_style_line_opa(chart, LV_PART_MAIN);
         line.width = i == 2 ? 2 : 1;
         lv_draw_line(layer, &line);
@@ -1232,15 +1302,31 @@ static lv_obj_t * build_eq_screen(void) {
     lv_obj_set_style_pad_gap(eq_graph_panel, BOARD_SCALE_PX(4), 0);
     lv_obj_remove_flag(eq_graph_panel, LV_OBJ_FLAG_SCROLLABLE);
     eq_graph_caption = lv_label_create(eq_graph_panel);
-    lv_label_set_text(eq_graph_caption, TR("Combined response (dB)"));
+    lv_label_set_text(eq_graph_caption, TR("EQ correction (dB)"));
     lv_obj_set_width(eq_graph_caption, lv_pct(100));
     lv_label_set_long_mode(eq_graph_caption, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(eq_graph_caption, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
     lv_obj_add_style(eq_graph_caption, &style_theme_text_primary, 0);
-    lv_obj_t * graph_reference = lv_label_create(eq_graph_panel);
-    lv_label_set_text(graph_reference, TR("48 kHz reference"));
-    lv_obj_set_style_text_font(graph_reference, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
-    lv_obj_add_style(graph_reference, &style_theme_text_muted, 0);
+    eq_graph_reference = lv_label_create(eq_graph_panel);
+    lv_label_set_text_fmt(eq_graph_reference, TR("48 kHz · Preamp excluded (%+.1f dB)"), 0.0);
+    lv_obj_set_width(eq_graph_reference, lv_pct(100));
+    lv_label_set_long_mode(eq_graph_reference, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(eq_graph_reference, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_obj_add_style(eq_graph_reference, &style_theme_text_muted, 0);
+    lv_obj_t * preamp_row = lv_obj_create(eq_graph_panel);
+    lv_obj_remove_style_all(preamp_row);
+    lv_obj_set_size(preamp_row, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(preamp_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(preamp_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(preamp_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * preamp_label = lv_label_create(preamp_row);
+    lv_label_set_text(preamp_label, TR("Include preamp"));
+    lv_obj_set_style_text_font(preamp_label, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_obj_add_style(preamp_label, &style_theme_text_primary, 0);
+    eq_graph_preamp_switch = lv_switch_create(preamp_row);
+    lv_obj_add_style(eq_graph_preamp_switch, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    if (current_settings.peq_graph_include_preamp) lv_obj_add_state(eq_graph_preamp_switch, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(eq_graph_preamp_switch, eq_graph_preamp_switch_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_t * graph_plot_row = lv_obj_create(eq_graph_panel);
     lv_obj_set_width(graph_plot_row, lv_pct(100));
     lv_obj_set_flex_grow(graph_plot_row, 1);
@@ -1280,12 +1366,11 @@ static lv_obj_t * build_eq_screen(void) {
     lv_obj_set_style_pad_ver(eq_graph_chart,
         lv_font_get_line_height(gui_theme_font(GUI_FONT_ROLE_SUBTEXT)) / 2, 0);
     lv_obj_set_flex_grow(eq_graph_chart, 1);
-    lv_chart_set_type(eq_graph_chart, LV_CHART_TYPE_LINE);
-    lv_chart_set_point_count(eq_graph_chart, 128);
+    lv_chart_set_type(eq_graph_chart, LV_CHART_TYPE_SCATTER);
+    lv_chart_set_point_count(eq_graph_chart, EQ_GRAPH_BASE_POINTS);
     /* Draw the frequency grid in logarithmic coordinates behind the curve. */
     lv_chart_set_div_line_count(eq_graph_chart, 0, 0);
     lv_chart_set_range(eq_graph_chart, LV_CHART_AXIS_PRIMARY_Y, -1200, 1200);
-    lv_chart_set_update_mode(eq_graph_chart, LV_CHART_UPDATE_MODE_SHIFT);
     lv_obj_set_style_bg_opa(eq_graph_chart, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(eq_graph_chart, 0, 0);
     lv_obj_set_style_line_color(eq_graph_chart, lv_color_make(128, 128, 128), LV_PART_MAIN);
@@ -1433,7 +1518,7 @@ void gui_equalizer_teardown_screens(void) {
     eq_freq_slider = eq_gain_slider = eq_q_slider = NULL;
     eq_type_dropdown = eq_freq_value_label = eq_gain_value_label = eq_q_value_label = NULL;
     eq_band_number_label = eq_profile_button_label = eq_main_content = eq_footer = eq_bypass_state_label = NULL;
-    eq_graph_panel = eq_graph_chart = eq_graph_caption = NULL;
+    eq_graph_panel = eq_graph_chart = eq_graph_caption = eq_graph_reference = eq_graph_preamp_switch = NULL;
     eq_graph_series = NULL;
     eq_graph_min_label = eq_graph_low_label = eq_graph_zero_label = NULL;
     eq_graph_high_label = eq_graph_max_label = NULL;

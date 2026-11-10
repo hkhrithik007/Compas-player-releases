@@ -19,6 +19,7 @@ bool gui_shell_wifi_effective_enabled(void);
 /* Ensure the existing asynchronous Wi-Fi toggle worker is headed to enabled.
  * Idempotent while already enabled or while an enable is in flight. */
 bool gui_shell_wifi_ensure_enabled(void);
+void gui_shell_bt_request_power(bool powered);
 bool gui_shell_wifi_enabled_and_settled(void);
 /* Cached connection state from the shell's existing Wi-Fi status worker.
  * Does not require the Network settings page's IP/details snapshot. */
@@ -38,9 +39,7 @@ void gui_shell_refresh_quick_drawer_cover(void);
  * image_recolor cannot retint without flattening the glyph too) and
  * re-points the widgets at the new buffers. Call after the accent changes. */
 void gui_shell_refresh_quick_drawer_toggle_accent(void);
-void gui_shell_update_quick_drawer_favorite(bool is_favorite);
 void gui_shell_update_quick_drawer_play_state(bool is_playing);
-void gui_shell_update_quick_drawer_play_mode(int mode);
 
 void gui_shell_init(uint32_t screen_width, uint32_t screen_height);
 /* The screen-construction half of gui_shell_init(), without the Bluetooth-
@@ -54,7 +53,6 @@ void gui_shell_teardown(void);
 void gui_shell_refresh_static_assets(void);
 void refresh_clock_label(void);
 void refresh_battery_topbar(void);
-void refresh_wifi_topbar(void);
 void refresh_volume_topbar(int32_t percent);
 void gui_shell_apply_topbar_settings(void);
 void quick_drawer_mark_snapshot_dirty(void);
@@ -74,7 +72,6 @@ void unregister_swipe_dead_zone(lv_obj_t * obj);
 /* For gui_reload.c's in-process UI reload -- see its own comment. Must run
  * before any screen's sliders are actually deleted. */
 void reset_swipe_dead_zones(void);
-void poll_quick_drawer(void);
 void open_quick_drawer(void);
 void close_quick_drawer(void);
 
@@ -102,12 +99,10 @@ int quick_drawer_sleep_timer_remaining_seconds(void);
 void gui_shell_resume_connections(bool wifi_was_on, bool bt_was_on);
 
 void gui_shell_suspend_connections(bool * wifi_was_on, bool * bt_was_on);
-void refresh_headphone_icon(void);
 
 void gui_shell_update_topbar(bool screen_just_woke);
 
 bool point_in_swipe_dead_zone(lv_point_t p);
-void gui_shell_resume_fast_timers(void);
 void gui_shell_reset_drag_state(void);
 /* Set the raw-touch guard after an external session reset. Held contacts stay
  * suppressed until their release; when no contact is held, the next tap works. */
@@ -141,5 +136,29 @@ void gui_shell_cancel_background_work(void);
 
 lv_obj_t * gui_shell_get_status_bar_band(void);
 lv_obj_t * gui_shell_get_home_indicator_band(void);
+/* Whether the global status bar is hidden for this screen by the Player / Lyrics policy. */
+#if defined(BOARD_TEMPOTEC_V1)
+bool gui_shell_player_topbar_hidden(lv_obj_t * screen);
+#else
+#define gui_shell_player_topbar_hidden(screen) \
+    (current_settings.hide_player_topbar && \
+     ((screen) == gui_player_get_screen() || (screen) == gui_lyrics_get_screen()))
+
+#endif
 void gui_shell_set_status_bar_screen_context(lv_obj_t * screen);
 void gui_shell_set_home_indicator_visible(bool visible);
+
+bool gui_shell_bt_dac_owns_output(void);
+bool gui_shell_bt_dac_receiving(void);
+bool gui_shell_bt_dac_failed(void);
+bool gui_shell_bt_dac_busy(void);
+bool gui_shell_bt_dac_profile_ready(void);
+void gui_shell_bt_dac_release(void);
+/* Leave Bluetooth DAC; restore_source also brings back the source profile (false when powering off). */
+bool gui_shell_bt_dac_shutdown(bool restore_source);
+/* Turn Bluetooth DAC back on once Bluetooth has gone off and come back on. */
+void gui_shell_bt_dac_remember(bool restore);
+void gui_shell_bt_dac_finish_profiles(void);
+
+
+bool gui_shell_bt_dac_profile_failed(void);
