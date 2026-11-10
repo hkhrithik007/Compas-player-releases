@@ -5,6 +5,7 @@
 #include "../library/browse/gui_file_manager.h"
 #include "../../library/browser/files/file_browser.h"
 #include "../appearance/gui_theme.h"
+#include "../appearance/gui_color_picker.h"
 #include "../shell/gui_notifications.h"
 #include "../library/browse/gui_library.h"
 #include "../player/screen/gui_queue.h"
@@ -48,7 +49,7 @@ extern char plugin_now_playing_album[256];
 extern double plugin_now_playing_duration;
 
 
-/* ---- Plugin list screens (src/plugins/manager/plugin_manager.c's gui_plugin_show_list()
+/* ---- Plugin list screens (src/plugins/manager/plugin_list_screens.c's gui_plugin_show_list()
  * bridge) ----
  *
  * A small pool of reusable screens, not one shared screen, because a plugin
@@ -66,42 +67,101 @@ static lv_obj_t * plugin_list_lists[PLUGIN_LIST_SCREEN_POOL_SIZE];
 static int plugin_list_pool_next = 0;
 static int plugin_list_selected_indices[PLUGIN_LIST_SCREEN_POOL_SIZE];
 
-/* A single native picker screen shares the library browser's indexed list.
- * The browser owns no Lua state; it reports a copied result after navigation
- * has left the screen, so plugin code never runs inside an LVGL row event. */
-static lv_obj_t * plugin_picker_screen;
-static file_browser_t * plugin_picker_browser;
-static bool plugin_picker_finishing;
-static bool plugin_picker_active;
-static lv_timer_t * plugin_picker_timer;
-static char plugin_picker_result[PATH_MAX];
+/* Native picker screens (file, color). A picker reports a copied result after
+ * navigation has left its screen, so plugin code never runs inside an LVGL
+ * event. The screen is reusable and kept until the next open or teardown. */
+typedef struct {
+    lv_obj_t * screen;
+    lv_timer_t * timer;
+    bool active;
+    bool finishing; /* a result is chosen or the picker is being cancelled */
+    void (*dispatch)(void); /* hands the result to the plugin manager */
+} plugin_picker_t;
 
-static void plugin_picker_dispatch(void) {
+static void plugin_file_picker_dispatch(void);
+static void plugin_color_picker_dispatch(void);
+static plugin_picker_t plugin_file_picker = { .dispatch = plugin_file_picker_dispatch };
+static plugin_picker_t plugin_color_picker = { .dispatch = plugin_color_picker_dispatch };
+static file_browser_t * plugin_picker_browser;
+static char plugin_picker_result[PATH_MAX];
+static int32_t plugin_color_result = -1; /* -1: cancelled */
+static lv_obj_t * plugin_color_widget;
+
+/* The picker is still open while it is on top, or while the shared keyboard
+ * it opened (a color picker's hex entry) sits directly above it. */
+static bool plugin_picker_open(const plugin_picker_t * p) {
+    int depth = gui_navigation_get_depth();
+    return gui_navigation_is_top(p->screen) ||
+           (depth >= 2 && gui_navigation_get_screen_at(depth - 1) == gui_text_input_get_screen() &&
+            gui_navigation_get_screen_at(depth - 2) == p->screen);
+}
+
+static void plugin_picker_timer_cb(lv_timer_t * timer) {
+    plugin_picker_t * p = lv_timer_get_user_data(timer);
+    if (!p->active || gui_navigation_transition_in_progress()) return;
+    if (plugin_picker_open(p)) return;
+    p->finishing = true;
+    p->active = false;
+    /* Back/Home may leave the reusable screen below other navigation items.
+     * Remove every occurrence only after transitions have settled. */
+    for (int i = gui_navigation_get_depth() - 1; i >= 0; i--)
+        if (gui_navigation_get_screen_at(i) == p->screen) nav_remove_stack_slot(i);
+    p->timer = NULL;
+    lv_timer_delete(timer);
+    p->dispatch();
+}
+
+/* Pushes the built screen and starts watching for it to leave the stack. */
+static bool plugin_picker_start(plugin_picker_t * p) {
+    /* A push during a slide can be lost when the slide loads its destination. */
+    if (gui_navigation_transition_in_progress()) return false;
+    if (p->timer) lv_timer_delete(p->timer);
+    p->timer = lv_timer_create(plugin_picker_timer_cb, 25, p);
+    if (!p->timer) return false;
+    nav_push(p->screen);
+    p->active = true;
+    return true;
+}
+
+/* Drops the screen without navigating (it is off the stack or being torn down). */
+static void plugin_picker_discard(plugin_picker_t * p) {
+    p->active = false;
+    p->finishing = true;
+    if (p->timer) { lv_timer_delete(p->timer); p->timer = NULL; }
+    if (!p->screen) return;
+    gui_navigation_remove_screen_instances(&p->screen, 1);
+    lv_obj_delete(p->screen);
+    p->screen = NULL;
+}
+
+static void plugin_picker_cancel(plugin_picker_t * p) {
+    p->finishing = true;
+    p->active = false;
+    if (p->timer) { lv_timer_delete(p->timer); p->timer = NULL; }
+    if (!p->screen) return;
+    if (gui_navigation_is_top(p->screen)) nav_pop();
+    else gui_navigation_remove_screen_instances(&p->screen, 1);
+}
+
+static void plugin_file_picker_dispatch(void) {
     char result[PATH_MAX];
     snprintf(result, sizeof(result), "%s", plugin_picker_result);
-    plugin_picker_active = false;
+    plugin_file_picker.active = false;
     plugin_picker_result[0] = '\0';
     plugin_manager_file_picker_complete(result[0] ? result : NULL);
 }
 
-static void plugin_picker_timer_cb(lv_timer_t * timer) {
-    if (!plugin_picker_active || gui_navigation_transition_in_progress()) return;
-    if (gui_navigation_is_top(plugin_picker_screen)) return;
-    plugin_picker_finishing = true;
-    plugin_picker_active = false;
-    /* Back/Home may leave the reusable screen below other navigation items.
-     * Remove every occurrence only after transitions have settled. */
-    for (int i = gui_navigation_get_depth() - 1; i >= 0; i--)
-        if (gui_navigation_get_screen_at(i) == plugin_picker_screen) nav_remove_stack_slot(i);
-    plugin_picker_timer = NULL;
-    lv_timer_delete(timer);
-    plugin_picker_dispatch();
+static void plugin_color_picker_dispatch(void) {
+    int32_t result = plugin_color_result;
+    plugin_color_picker.active = false;
+    plugin_color_result = -1;
+    plugin_manager_color_picker_complete(result);
 }
 
 static void plugin_picker_file_selected(const char * path) {
-    if (plugin_picker_finishing) return;
+    if (plugin_file_picker.finishing) return;
     snprintf(plugin_picker_result, sizeof(plugin_picker_result), "%s", path ? path : "");
-    plugin_picker_finishing = true;
+    plugin_file_picker.finishing = true;
     nav_pop();
 }
 
@@ -115,7 +175,7 @@ static lv_obj_t * plugin_progress_percent;
 static int plugin_progress_percent_value = INT_MIN;
 
 /* One plugin confirmation at a time. The modal owns only LVGL objects; its
- * callback ref and Lua owner stay in plugin_manager.c. */
+ * callback ref and Lua owner stay in plugin_ui_bindings.c. */
 static gui_popup_t plugin_confirmation_popup;
 
 static void plugin_confirmation_object_deleted(lv_event_t * event) {
@@ -162,6 +222,84 @@ bool gui_plugin_show_confirmation(const char * title, const char * confirm_label
     lv_obj_add_event_cb(plugin_confirmation_popup.popup, plugin_confirmation_object_deleted, LV_EVENT_DELETE, NULL);
     lv_obj_add_event_cb(plugin_confirmation_popup.backdrop, plugin_confirmation_object_deleted, LV_EVENT_DELETE, NULL);
     gui_popup_show(&plugin_confirmation_popup);
+    return true;
+}
+
+/* One plugin menu at a time: a titled popup of tappable rows plus Cancel.
+ * Like the confirmation, it owns only LVGL objects; the callback ref lives
+ * in plugin_ui_bindings.c. It is dismissed without a call if the screen it was
+ * opened over goes away. */
+static gui_popup_t plugin_menu_popup;
+static lv_obj_t * plugin_menu_screen;
+static lv_obj_t * plugin_menu_title;
+
+static void plugin_menu_screen_event_cb(lv_event_t * event) {
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_DELETE) plugin_menu_screen = NULL;
+    else if (code != LV_EVENT_SCREEN_UNLOAD_START) return;
+    gui_plugin_close_menu();
+    plugin_manager_menu_cancelled();
+}
+
+static void plugin_menu_object_deleted(lv_event_t * event) {
+    lv_obj_t * target = lv_event_get_target(event);
+    if (plugin_menu_popup.popup == target || plugin_menu_popup.backdrop == target) {
+        gui_popup_hide(&plugin_menu_popup);
+        if (plugin_menu_popup.popup == target) plugin_menu_popup.popup = NULL;
+        if (plugin_menu_popup.backdrop == target) plugin_menu_popup.backdrop = NULL;
+    }
+}
+
+void gui_plugin_close_menu(void) {
+    if (plugin_menu_screen) {
+        lv_obj_remove_event_cb(plugin_menu_screen, plugin_menu_screen_event_cb);
+        plugin_menu_screen = NULL;
+    }
+    gui_popup_teardown(&plugin_menu_popup);
+    plugin_menu_title = NULL;
+}
+
+static void plugin_menu_cancel_cb(lv_event_t * event) {
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
+    gui_plugin_close_menu();
+    plugin_manager_menu_cancelled();
+}
+
+static void plugin_menu_row_cb(lv_event_t * event) {
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
+    int index = (int) (intptr_t) lv_event_get_user_data(event);
+    /* Close before dispatching Lua: the callback may open another menu. */
+    gui_plugin_close_menu();
+    plugin_manager_menu_selected(index);
+}
+
+bool gui_plugin_show_menu(const char * title, const char * const * items, int count, int selected_index) {
+    lv_display_t * display = lv_display_get_default();
+    lv_obj_t * screen = lv_screen_active();
+    if (!display || !lv_layer_top() || !screen || gui_navigation_transition_in_progress() ||
+        plugin_menu_popup.popup || plugin_menu_popup.backdrop)
+        return false;
+    build_titled_popup(&plugin_menu_popup, plugin_menu_cancel_cb, &plugin_menu_title, NULL);
+    if (!plugin_menu_popup.popup || !plugin_menu_popup.backdrop || !plugin_menu_title) {
+        gui_popup_teardown(&plugin_menu_popup);
+        return false;
+    }
+    lv_label_set_text(plugin_menu_title, title);
+    lv_color_t text = lv_color_white();
+    lv_style_value_t value;
+    if (lv_style_get_prop(&style_theme_text_primary, LV_STYLE_TEXT_COLOR, &value) == LV_STYLE_RES_FOUND)
+        text = value.color;
+    for (int i = 0; i < count; i++) {
+        add_popup_action_row(plugin_menu_popup.popup, items[i], i == selected_index ? accent_lv_color() : text,
+                             plugin_menu_row_cb, (void *) (intptr_t) i);
+    }
+    add_popup_action_row(plugin_menu_popup.popup, TR("Cancel"), lv_color_hex(GUI_BREEZE_NEGATIVE),
+                         plugin_menu_cancel_cb, NULL);
+    lv_obj_add_event_cb(plugin_menu_popup.popup, plugin_menu_object_deleted, LV_EVENT_DELETE, NULL);
+    lv_obj_add_event_cb(plugin_menu_popup.backdrop, plugin_menu_object_deleted, LV_EVENT_DELETE, NULL);
+    plugin_menu_screen = screen;
+    lv_obj_add_event_cb(screen, plugin_menu_screen_event_cb, LV_EVENT_ALL, NULL);
+    gui_popup_show(&plugin_menu_popup);
     return true;
 }
 
@@ -387,6 +525,16 @@ static void plugin_list_row_click_cb(lv_event_t * e) {
     plugin_manager_list_item_selected(slot, index);
 }
 
+/* A long press that the plugin handles must not also select the row on
+ * release, so the pending release is swallowed only when on_hold ran. */
+static void plugin_list_row_hold_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED) return;
+    intptr_t packed = (intptr_t) lv_event_get_user_data(e);
+    lv_indev_t * indev = lv_indev_active();
+    if (plugin_manager_list_item_held((int) (packed >> 16), (int) (packed & 0xFFFF)) && indev)
+        lv_indev_wait_release(indev);
+}
+
 /* A fixed single-line box is what makes LVGL's circular long mode a marquee
  * rather than allowing the label itself to grow over adjacent UI. The mode
  * has no visible effect when the text already fits. */
@@ -452,7 +600,8 @@ static void plugin_grid_build(int slot, lv_obj_t * list, const char * const * la
             image_src = resolved;
         }
         intptr_t packed = ((intptr_t) slot << 16) | (intptr_t) (i & 0xFFFF);
-        add_cover_card(list, labels[i], image_src, columns, plugin_list_row_click_cb, (void *) packed);
+        lv_obj_t * card = add_cover_card(list, labels[i], image_src, columns, plugin_list_row_click_cb, (void *) packed);
+        if (card) lv_obj_add_event_cb(card, plugin_list_row_hold_cb, LV_EVENT_LONG_PRESSED, (void *) packed);
     }
 }
 
@@ -571,6 +720,7 @@ int gui_plugin_show_list(const char * title, const char * const * labels, const 
             lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
             intptr_t packed = ((intptr_t) slot << 16) | (intptr_t) (i & 0xFFFF);
             lv_obj_add_event_cb(row, plugin_list_row_click_cb, LV_EVENT_CLICKED, (void *) packed);
+            lv_obj_add_event_cb(row, plugin_list_row_hold_cb, LV_EVENT_LONG_PRESSED, (void *) packed);
             continue;
         }
 
@@ -632,11 +782,10 @@ int gui_plugin_show_list(const char * title, const char * const * labels, const 
             lv_obj_align(label, LV_ALIGN_LEFT_MID, label_left, 0);
             configure_plugin_row_label(row, label, label_width, wrap_labels && wrap_labels[i]);
         }
-        if (icon) decorate_category_row(row, NULL, NULL);
-
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
         intptr_t packed = ((intptr_t) slot << 16) | (intptr_t) (i & 0xFFFF);
         lv_obj_add_event_cb(row, plugin_list_row_click_cb, LV_EVENT_CLICKED, (void *) packed);
+        lv_obj_add_event_cb(row, plugin_list_row_hold_cb, LV_EVENT_LONG_PRESSED, (void *) packed);
     }
 
     plugin_list_apply_selection(slot, selected_index);
@@ -680,7 +829,7 @@ void gui_plugin_play_paths(const char * const * paths, int count, int start_inde
  * remote_track.h's own comment on why this, not the real stream_url, is
  * what playlist[]/last_track/Favorites ever see) and publishes the
  * matching descriptor table before handing off to the same on_file_
- * selected() every other play-launch path uses. plugin_manager.c has
+ * selected() every other play-launch path uses. plugin_events.c has
  * already validated every field (bounded lengths, non-empty provider/
  * track_id) before calling this -- this function re-validates anyway
  * (every remote_track_make_key() result checked, no unconditional malloc)
@@ -698,6 +847,7 @@ void gui_plugin_play_paths(const char * const * paths, int count, int start_inde
  * never-published) remote_track_meta_t table. */
 void gui_plugin_play_remote_tracks(const remote_track_meta_t * tracks, int count, int start_index) {
     if (count <= 0) return;
+    if (!gui_player_local_playback_allowed()) return;
     if (start_index < 0) start_index = 0;
     if (start_index >= count) start_index = count - 1;
 
@@ -751,7 +901,7 @@ void gui_plugin_set_background_color(const char * slot, uint32_t rgb) {
         lv_obj_report_style_change(&pill_row_bg_style);
         gui_theme_update_surface_contrast();
     }
-    /* Else: unknown slot -- plugin_manager.c's l_plugin_set_background_color()
+    /* Else: unknown slot -- plugin_ui_bindings.c's l_plugin_set_background_color()
      * already validates against the three known names and raises a Lua
      * error before ever reaching here, so this is unreachable in practice;
      * silently ignored rather than asserting, matching this file's own
@@ -804,7 +954,7 @@ home_layout_config_t home_layout_config = { 0 };
 launcher_layout_config_t launcher_layout_config = { 0 };
 player_layout_config_t player_layout_config = { 0 };
 
-/* plugin_manager.c's l_plugin_set_home_layout() has already validated every
+/* plugin_ui_bindings.c's l_plugin_set_home_layout() has already validated every
  * enum-like field (key -> array index, mode, align, text_size) before
  * building *config, so this is a plain copy -- see home_layout.h's own
  * comment for why a call made after boot only affects the NEXT app start. */
@@ -835,7 +985,7 @@ void gui_plugin_reset_player_layout(void) {
 
 /* ---- Playback control bridges -- see gui.h's own comment on why these
  * can't just call audio_toggle_pause()/audio_stop()/audio_set_volume()
- * directly from plugin_manager.c the way plugin.eq_*() calls peq_* directly.
+ * directly from plugin_playback_bindings.c the way plugin.eq_*() calls peq_* directly.
  * Each of these calls the exact same local helper the native UI itself uses
  * for that action, so a plugin-driven change looks identical to a
  * button/remote-control-driven one. ---- */
@@ -1206,7 +1356,6 @@ static void populate_plugin_settings_list_screen(int slot) {
             int32_t left = icon ? BOARD_SCALE_PX(96) : BOARD_SCALE_PX(24);
             lv_obj_align(label, LV_ALIGN_LEFT_MID, left, 0);
             configure_plugin_row_label(row_obj, label, row_width - left - BOARD_SCALE_PX(112), st->wrap);
-            if (icon) decorate_category_row(row_obj, NULL, NULL);
         } else if (st->type == PLUGIN_SETTINGS_ROW_SLIDER) {
             lv_obj_t * card = add_pill_slider_row(list, st->label, st->slider_min, st->slider_max, st->slider_value,
                                                    plugin_settings_slider_event_cb, packed, icon, text_size);
@@ -1237,7 +1386,6 @@ static void populate_plugin_settings_list_screen(int slot) {
             int32_t left = icon ? BOARD_SCALE_PX(96) : BOARD_SCALE_PX(24);
             lv_obj_align(label, LV_ALIGN_LEFT_MID, left, 0);
             configure_plugin_row_label(row_obj, label, row_width - left - BOARD_SCALE_PX(60), st->wrap);
-            if (icon) decorate_category_row(row_obj, NULL, NULL);
         }
     }
 
@@ -1375,16 +1523,14 @@ void gui_plugins_teardown(void) {
     gui_plugin_close_progress();
     gui_plugin_close_confirmation();
     plugin_manager_confirmation_cancelled();
-    plugin_picker_active = false;
-    plugin_picker_finishing = true;
+    gui_plugin_close_menu();
+    plugin_manager_menu_cancelled();
     plugin_picker_result[0] = '\0';
-    if (plugin_picker_timer) { lv_timer_delete(plugin_picker_timer); plugin_picker_timer = NULL; }
-    if (plugin_picker_screen) {
-        gui_navigation_remove_screen_instances(&plugin_picker_screen, 1);
-        plugin_picker_browser = NULL;
-        lv_obj_delete(plugin_picker_screen);
-        plugin_picker_screen = NULL;
-    }
+    plugin_color_result = -1;
+    plugin_picker_discard(&plugin_file_picker);
+    plugin_picker_browser = NULL;
+    plugin_picker_discard(&plugin_color_picker);
+    plugin_color_widget = NULL;
     for (int i = 0; i < PLUGIN_LIST_SCREEN_POOL_SIZE; i++) {
         if (plugin_list_screens[i]) { lv_obj_delete(plugin_list_screens[i]); plugin_list_screens[i] = NULL; }
     }
@@ -1413,41 +1559,93 @@ bool gui_plugin_open_file_manager(const char * folder) {
 
 static void plugin_picker_back_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    if (!file_browser_go_up_for_screen(plugin_picker_screen)) nav_pop();
+    if (!file_browser_go_up_for_screen(plugin_file_picker.screen)) nav_pop();
 }
 
 bool gui_plugin_pick_file(const char * folder) {
-    if (plugin_picker_active) return false;
-    if (!plugin_picker_screen) {
-        plugin_picker_screen = lv_obj_create(NULL);
-        if (!plugin_picker_screen) return false;
-        lv_obj_add_style(plugin_picker_screen, &style_theme_screen_bg, 0);
-        build_screen_header(plugin_picker_screen, TR("Select a file"), plugin_picker_back_cb, NULL, NULL);
+    plugin_picker_t * p = &plugin_file_picker;
+    if (p->active) return false;
+    if (!p->screen) {
+        p->screen = lv_obj_create(NULL);
+        if (!p->screen) return false;
+        lv_obj_add_style(p->screen, &style_theme_screen_bg, 0);
+        build_screen_header(p->screen, TR("Select a file"), plugin_picker_back_cb, NULL, NULL);
     }
-    plugin_picker_finishing = false;
+    p->finishing = false;
     plugin_picker_result[0] = '\0';
     if (!plugin_picker_browser) {
         file_browser_options_t options = { .on_pick_file = plugin_picker_file_selected };
-        plugin_picker_browser = file_browser_create(plugin_picker_screen, MUSIC_ROOT_DIR, &options);
+        plugin_picker_browser = file_browser_create(p->screen, MUSIC_ROOT_DIR, &options);
         if (!plugin_picker_browser) return false;
-        finalize_screen_navigation(plugin_picker_screen);
+        finalize_screen_navigation(p->screen);
     }
     if (!file_browser_open_dir(plugin_picker_browser, folder ? folder : MUSIC_ROOT_DIR)) return false;
-    if (plugin_picker_timer) lv_timer_delete(plugin_picker_timer);
-    plugin_picker_timer = lv_timer_create(plugin_picker_timer_cb, 25, NULL);
-    if (!plugin_picker_timer) return false;
-    nav_push(plugin_picker_screen);
-    plugin_picker_active = true;
-    return true;
+    return plugin_picker_start(p);
 }
 
 void gui_plugin_cancel_file_picker(void) {
-    plugin_picker_finishing = true;
-    plugin_picker_active = false;
-    if (plugin_picker_timer) { lv_timer_delete(plugin_picker_timer); plugin_picker_timer = NULL; }
-    if (!plugin_picker_screen) return;
-    if (gui_navigation_is_top(plugin_picker_screen)) nav_pop();
-    else gui_navigation_remove_screen_instances(&plugin_picker_screen, 1);
+    plugin_picker_cancel(&plugin_file_picker);
+}
+
+static void plugin_color_done_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED || plugin_color_picker.finishing) return;
+    plugin_color_result = (int32_t) gui_color_picker_get_rgb(plugin_color_widget);
+    plugin_color_picker.finishing = true;
+    nav_pop();
+}
+
+bool gui_plugin_pick_color(uint32_t rgb, const uint32_t * presets, int preset_count) {
+    plugin_picker_t * p = &plugin_color_picker;
+    /* The previous screen may still be sliding out after a cancel; it is
+     * deleted below, so wait for the transition to settle. */
+    if (p->active || gui_navigation_transition_in_progress()) return false;
+    plugin_picker_discard(p);
+    p->screen = lv_obj_create(NULL);
+    if (!p->screen) return false;
+    lv_obj_add_style(p->screen, &style_theme_screen_bg, 0);
+    lv_obj_remove_flag(p->screen, LV_OBJ_FLAG_SCROLLABLE);
+    build_screen_header(p->screen, TR("Select a color"), generic_back_cb, NULL, NULL);
+
+    int32_t top = STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT;
+    int32_t card_w = BOARD_SCREEN_WIDTH - 2 * BOARD_SCALE_PX(20);
+    int32_t done_h = BOARD_SCALE_PX(56);
+    int32_t done_band = done_h + HOME_INDICATOR_CONTENT_INSET;
+
+    lv_obj_t * body = lv_obj_create(p->screen);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_size(body, BOARD_SCREEN_WIDTH, BOARD_SCREEN_HEIGHT - top - done_band);
+    lv_obj_set_pos(body, 0, top);
+    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_top(body, BOARD_SCALE_PX(8), 0);
+    lv_obj_set_style_pad_bottom(body, BOARD_SCALE_PX(16), 0);
+    lv_obj_set_scroll_dir(body, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_OFF);
+    plugin_color_widget = gui_color_picker_create(body, card_w, rgb, presets, preset_count, NULL, NULL);
+    if (!plugin_color_widget) {
+        plugin_picker_discard(p);
+        return false;
+    }
+
+    lv_obj_t * done = gui_card_create(p->screen, card_w);
+    lv_obj_set_size(done, card_w, done_h);
+    lv_obj_align(done, LV_ALIGN_BOTTOM_MID, 0, -HOME_INDICATOR_CONTENT_INSET);
+    lv_obj_add_flag(done, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(done, plugin_color_done_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * done_label = gui_card_text(done, TR("Done"), GUI_FONT_ROLE_ROW, false);
+    lv_obj_add_style(done_label, gui_theme_accent_style(), 0);
+    lv_obj_center(done_label);
+
+    finalize_screen_navigation(p->screen);
+    p->finishing = false;
+    plugin_color_result = -1;
+    if (plugin_picker_start(p)) return true;
+    plugin_picker_discard(p);
+    return false;
+}
+
+void gui_plugin_cancel_color_picker(void) {
+    plugin_picker_cancel(&plugin_color_picker);
 }
 
 void gui_plugin_refresh_file_browsers(void) {

@@ -80,7 +80,7 @@ static void custom_font_apply_timer_cb(lv_timer_t * timer) {
     gui_navigation_invalidate_font_snapshots();
     snprintf(current_settings.custom_font, sizeof(current_settings.custom_font), "%s",
              index < 0 ? "" : target);
-    settings_save(&current_settings);
+    settings_save_async(&current_settings);
     lv_obj_report_style_change(NULL);
     /* Same full-display walk as font_size_apply_timer_cb() -- Custom Font
      * also rewrites app_font_* metrics in place, so unvisited Settings
@@ -223,4 +223,3 @@ void gui_custom_font_teardown(void) {
     if (custom_font_screen) { lv_obj_delete(custom_font_screen); custom_font_screen = NULL; }
 }
 
-lv_obj_t * gui_settings_get_custom_font_screen(void) { return custom_font_screen; }

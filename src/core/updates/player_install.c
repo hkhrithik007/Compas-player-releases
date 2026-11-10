@@ -24,6 +24,8 @@ const char *player_install_board_asset(void) {
     return "compas_player_r3proii";
 #elif defined(BOARD_R3II_2025)
     return "compas_player_r3ii_2025";
+#elif defined(BOARD_TEMPOTEC_V1)
+    return "compas_player_tempotec_v1";
 #else
     return "compas_player";
 #endif
@@ -136,6 +138,8 @@ static bool board_marker_valid(int fd, uint64_t size, bool allow_missing) {
     static const char own[] = "r3proii";
 #elif defined(BOARD_R3II_2025)
     static const char own[] = "r3ii_2025";
+#elif defined(BOARD_TEMPOTEC_V1)
+    static const char own[] = "tempotec_v1";
 #else
     static const char own[] = "r1";
 #endif
@@ -170,7 +174,13 @@ static bool board_marker_valid(int fd, uint64_t size, bool allow_missing) {
                 size_t token_size = (size_t)(end - suffix);
                 bool recognized = (token_size == 2 && memcmp(suffix, "r1", 2) == 0) ||
                                   (token_size == 7 && memcmp(suffix, "r3proii", 7) == 0) ||
+#if defined(BOARD_TEMPOTEC_V1)
+                                  (token_size == 9 && memcmp(suffix, "r3ii_2025", 9) == 0) ||
+                                  (token_size == sizeof("tempotec_v1") - 1 &&
+                                   memcmp(suffix, "tempotec_v1", sizeof("tempotec_v1") - 1) == 0);
+#else
                                   (token_size == 9 && memcmp(suffix, "r3ii_2025", 9) == 0);
+#endif
                 if (!recognized)
                     continue;
                 if (token_size != strlen(own) || memcmp(suffix, own, token_size) != 0)
@@ -330,25 +340,36 @@ static bool archive_sd_if_present(const char *requested, const struct stat *snap
     return archive_source(PLAYER_INSTALL_SD_SOURCE, &st, dir_out, archived, archived_snapshot);
 }
 
-bool player_install_fd(int source_fd, uint64_t size, const char *expected_sha256,
-                       bool allow_missing_board_marker, bool preflighted,
-                       const char *sd_source_path, const struct stat *sd_snapshot, char *error,
-                       size_t error_size) {
-    if (!error || !error_size)
-        return false;
-    error[0] = '\0';
-    if (source_fd < 0 || !size || size > PLAYER_INSTALL_MAX_BYTES ||
-        (expected_sha256 && !hash_text(expected_sha256)) ||
-        (!expected_sha256 && (!sd_source_path || !sd_snapshot || allow_missing_board_marker)) ||
-        (preflighted && (!sd_source_path || !sd_snapshot || allow_missing_board_marker)) ||
-        ((sd_source_path != NULL) != (sd_snapshot != NULL))) {
-        snprintf(error, error_size, "%s", ERR("Invalid player image or checksum."));
-        return false;
+static bool copy_fd_exact(int src, int out, uint64_t size) {
+    unsigned char buf[32768];
+    uint64_t copied = 0;
+    while (copied < size) {
+        size_t want = sizeof(buf);
+        if (size - copied < want)
+            want = (size_t)(size - copied);
+        ssize_t n = pread(src, buf, want, (off_t)copied);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            return false;
+        size_t at = 0;
+        while (at < (size_t)n) {
+            ssize_t w = write(out, buf + at, (size_t)n - at);
+            if (w < 0 && errno == EINTR)
+                continue;
+            if (w <= 0)
+                return false;
+            at += (size_t)w;
+        }
+        copied += (uint64_t)n;
     }
+    return copied == size;
+}
+
+static bool install_verified(int source_fd, uint64_t size, const char *expected_sha256,
+                             const char *sd_source_path, const struct stat *sd_snapshot,
+                             char *error, size_t error_size) {
     struct stat source_before;
-    if (!preflighted &&
-        !player_install_preflight_fd(source_fd, allow_missing_board_marker, error, error_size))
-        return false;
     uint64_t source_size = 0;
     char digest[65];
     if (fstat(source_fd, &source_before) != 0 || source_before.st_size < 0 ||
@@ -392,40 +413,12 @@ bool player_install_fd(int source_fd, uint64_t size, const char *expected_sha256
         snprintf(error, error_size, "%s", ERR("Could not prepare the player update."));
         return false;
     }
-    bool ok = true;
-    unsigned char buf[32768];
-    uint64_t copied = 0;
-    while (copied < size) {
-        size_t want = sizeof(buf);
-        if (size - copied < want)
-            want = (size_t)(size - copied);
-        ssize_t n = pread(source_fd, buf, want, (off_t)copied);
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0) {
-            ok = false;
-            break;
-        }
-        size_t at = 0;
-        while (at < (size_t)n) {
-            ssize_t w = write(out, buf + at, (size_t)n - at);
-            if (w < 0 && errno == EINTR)
-                continue;
-            if (w <= 0) {
-                ok = false;
-                break;
-            }
-            at += (size_t)w;
-        }
-        if (!ok)
-            break;
-        copied += (uint64_t)n;
-    }
+    bool ok = copy_fd_exact(source_fd, out, size);
     struct stat outst;
     uint64_t copied_size = 0;
     char copied_sha[65];
     if (ok)
-        ok = copied == size && fchmod(out, 0755) == 0 && fsync(out) == 0 &&
+        ok = fchmod(out, 0755) == 0 && fsync(out) == 0 &&
              fstat(out, &outst) == 0 && elf_valid(out, &outst) &&
              player_install_sha256_fd(out, PLAYER_INSTALL_MAX_BYTES, &copied_size, copied_sha) &&
              copied_size == size && !strcmp(copied_sha, expected);
@@ -488,4 +481,32 @@ bool player_install_fd(int source_fd, uint64_t size, const char *expected_sha256
         close(sddir);
     close(data);
     return true;
+}
+
+bool player_install_online_fd(int fd, uint64_t size, const char *expected_sha256,
+                              char *error, size_t error_size) {
+    if (!error || !error_size)
+        return false;
+    error[0] = '\0';
+    if (fd < 0 || !size || size > PLAYER_INSTALL_MAX_BYTES || !hash_text(expected_sha256)) {
+        snprintf(error, error_size, "%s", ERR("Invalid player image or checksum."));
+        return false;
+    }
+    if (!player_install_preflight_fd(fd, true, error, error_size))
+        return false;
+    return install_verified(fd, size, expected_sha256, NULL, NULL, error, error_size);
+}
+
+bool player_install_sd_fd(int fd, const char *sd_path, const struct stat *snapshot,
+                          char *error, size_t error_size) {
+    if (!error || !error_size)
+        return false;
+    error[0] = '\0';
+    if (fd < 0 || !sd_path || !snapshot || snapshot->st_size <= 0 ||
+        (uint64_t)snapshot->st_size > PLAYER_INSTALL_MAX_BYTES) {
+        snprintf(error, error_size, "%s", ERR("Invalid player image or checksum."));
+        return false;
+    }
+    return install_verified(fd, (uint64_t)snapshot->st_size, NULL, sd_path, snapshot,
+                            error, error_size);
 }

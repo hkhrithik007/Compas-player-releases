@@ -41,11 +41,11 @@ typedef struct {
     bool has_track_number;
     bool has_disc_number;
 
-    /* Release year from common DATE/YEAR, ID3 recording-time/year, MP4
-     * ©day, and APE YEAR tags. Date precision is intentionally reduced to
-     * its validated four-digit year for library sorting. */
+    /* Original release year, falling back to the release/recording year.
+     * Dates are reduced to their validated four-digit year for sorting. */
     int release_year;
     bool has_release_year;
+    bool has_original_year; /* Parser priority state; not persisted. */
 
     /* Embedded cover art (FLAC METADATA_BLOCK_PICTURE, MP3 ID3v2 APIC),
      * still-encoded (JPEG or PNG) bytes -- NULL if the file has none or
@@ -100,25 +100,28 @@ typedef struct {
 } track_metadata_t;
 
 /* Reads title/artist/album/album_artist/genre tags, embedded cover art,
- * embedded lyrics, and ReplayGain track/album gain (if present) from a FLAC
- * (VORBIS_COMMENT + METADATA_BLOCK_PICTURE), MP3 (ID3v2 APIC/USLT/TXXX/TPE2/
- * TCON, falling back to ID3v1 which has none of those), M4A (moov/udta/meta/
- * ilst atoms), or WAV (RIFF LIST/INFO, title/artist/album only, plus an ID3v2
- * USLT fallback for lyrics) file. Fields that aren't present or can't be
- * parsed are left as empty/NULL with the corresponding has_* flag (or a NULL
+ * embedded lyrics, and ReplayGain track/album gain (if present) from any
+ * supported audio file (FLAC, MP3/AAC ID3v2 with ID3v1 fallback, M4A, WAV,
+ * AIFF, Ogg/Opus, WavPack, CAF, DSF/DFF, APE, WMA, SACD ISO, CUE tracks).
+ * Fields that aren't present or can't be parsed are left as empty/NULL with the corresponding has_* flag (or a NULL
  * check, for the picture/lyrics) false -- callers should fall back to the
  * filename, a placeholder image, or no gain adjustment in that case. */
 void metadata_read(const char * path, track_metadata_t * out);
 
+/* Calls item() for every UTF-8 text item of a file's APEv2 footer tag. */
+typedef void (*metadata_text_item_fn)(void * ctx, const char * key, size_t key_len, const char * value, size_t value_len);
+void metadata_ape_text_items(const char * path, metadata_text_item_fn item, void * ctx);
+
 /* Reads textual tags, sequencing, and ReplayGain without extracting
  * embedded cover artwork. Embedded lyrics are also omitted; callers that
  * need lyrics should use the separate lyrics loader. */
+void metadata_read_without_artwork(const char * path, track_metadata_t * out);
+
 /* Makes each text tag a single display line (control characters become
  * spaces) and clears has_* for tags with no visible characters. Every
  * metadata_read*() result is already normalized; call it for metadata built
  * from other sources (streams, remote catalogs). */
 void metadata_normalize_text_tags(track_metadata_t * out);
-void metadata_read_without_artwork(const char * path, track_metadata_t * out);
 
 /* Like metadata_read(), but retains embedded lyrics while omitting artwork. */
 void metadata_read_lyrics_without_artwork(const char * path, track_metadata_t * out);

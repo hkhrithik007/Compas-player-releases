@@ -5,15 +5,15 @@
 #include <stdint.h>
 
 /* Native-side config for plugin.set_home_layout() (PLUGINS.md), shared
- * between plugin_manager.c (parses/validates the Lua table into this) and
+ * between plugin_ui_bindings.c (parses/validates the Lua table into this) and
  * gui_home.c's Home builder (the only reader). No LVGL
  * dependency, same reasoning remote_track.h stays LVGL-free -- kept as a
- * plain struct passed across the plugin_manager.c/gui.c-family boundary,
+ * plain struct passed across the plugin_ui_bindings.c/gui.c-family boundary,
  * like remote_track_meta_t is for plugin.play_remote().
  *
  * Home has 7 addressable native tiles, published as home_layout_tile_keys[]
  * (defined in gui_home.c, the file that owns their native order) so
- * plugin_manager.c
+ * plugin_ui_bindings.c
  * can validate a Lua `key` string against it without a second, potentially-
  * drifting copy of the list. Since API 7, a plugin can also register its own
  * tile (plugin.register_home_tile(), PLUGINS.md) and a theme can reorder,
@@ -28,16 +28,16 @@ extern const char * const home_layout_tile_keys[HOME_LAYOUT_TILE_COUNT];
  * below and gui_home.c's Home builder static item arrays.
  *
  * This is a HARD structural ceiling, not a generous round number:
- * build_icon_grid_screen() (screen_builders.c) allocates its row_dsc array
+ * build_icon_grid_screen() (screen_builders_menus.c) allocates its row_dsc array
  * at exactly ICON_GRID_MAX_ROWS+1 (6+1) entries and its tile-placement loop
  * computes row = i / 2 with NO bounds check against item_count -- exceeding
  * ICON_GRID_MAX_ROWS*2 tiles in tile mode without also resizing that row_dsc
  * array corrupts adjacent grid state, not just overflows visually (see
- * screen_builders.c's own row_dsc/col_dsc comment for a prior bug in this
+ * screen_builders_menus.c's own row_dsc/col_dsc comment for a prior bug in this
  * exact class). Never raise this constant without also updating
  * build_icon_grid_screen(). List mode (build_pill_list_screen()) has no such
  * ceiling -- it genuinely scrolls -- but shares this same bound for
- * simplicity; plugin_manager.c's l_plugin_set_home_layout() separately
+ * simplicity; plugin_ui_bindings.c's l_plugin_set_home_layout() separately
  * rejects a tile-mode config whose order exceeds 6 items (build_icon_grid_
  * screen() cannot scroll at all), well below this array-sizing limit. */
 #define HOME_LAYOUT_MAX_TILES 12
@@ -73,11 +73,11 @@ typedef struct {
 typedef struct {
     bool configured;
     bool list_mode;   /* false = tile mode (today's icon grid), true = pill-list rows */
-    int32_t tile_gap; /* tile mode only -- build_icon_grid_screen() clamps this to 0-64 */
-    int32_t row_gap;  /* list mode only, 0 = keep build_pill_list_screen()'s native default of 6 -- clamped there to 0-84 */
+    int32_t tile_gap; /* tile mode only -- build_icon_grid_screen() clamps this to 16-64 */
+    int32_t row_gap;  /* list mode only, 0 = keep the native default row gap -- home_list_row_gap() caps it at 84, build_pill_list_screen() at LIST_ROW_HEIGHT */
 
     /* options.background_image (PLUGINS.md) -- theme-override-relative path
-     * (e.g. "home/background.png") that plugin_manager.c's
+     * (e.g. "home/background.png") that plugin_ui_bindings.c's
      * l_plugin_set_home_layout() already copied the plugin's source image
      * to, extension preserved so the right LVGL decoder (lodepng/tjpgd)
      * picks it up. Empty/has_background_image==false means "no override,

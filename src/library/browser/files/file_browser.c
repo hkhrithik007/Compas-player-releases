@@ -45,6 +45,9 @@ struct file_browser_index {
     bool memory_backed;
     unsigned count;
     unsigned playable_count;
+    unsigned directory_count;
+    bool reverse;
+    file_browser_sort_mode_t sort_mode;
     char directory[PATH_MAX];
 };
 
@@ -119,6 +122,7 @@ struct file_browser {
 static file_browser_t * browsers;
 static pthread_mutex_t index_worker_mu = PTHREAD_MUTEX_INITIALIZER;
 static atomic_int current_sort_mode;
+static atomic_bool current_sort_reverse;
 
 static bool is_cue_file(const char * name);
 static bool index_entry_at(const file_browser_index_t *index, unsigned ordinal, dir_entry_t *out);
@@ -191,6 +195,7 @@ enum {
 };
 
 static bool skip_name(const char * name, unsigned flags) {
+    if (strncmp(name, ".compas-download-", 17) == 0) return true;
     if (name[0] != '.') return false;
     if (!(flags & LIST_HIDDEN)) return true;
     return strcmp(name, ".") == 0 || strcmp(name, "..") == 0;
@@ -349,6 +354,16 @@ static int index_merge_runs(int left, int right, int directory_fd, atomic_bool *
     close(left); close(right); lseek(out, 0, SEEK_SET); return out;
 }
 
+static bool index_push_run(int levels[32], int fd, int dfd, atomic_bool *cancel, file_browser_sort_mode_t mode) {
+    for (unsigned level = 0; level < 32; level++) {
+        if (levels[level] < 0) { levels[level] = fd; return true; }
+        int prior = levels[level]; levels[level] = -1;
+        fd = index_merge_runs(prior, fd, dfd, cancel, mode);
+        if (fd < 0) return false;
+    }
+    close(fd); return false;
+}
+
 static bool index_cancelled(atomic_bool *cancel) {
     return cancel && atomic_load_explicit(cancel, memory_order_acquire);
 }
@@ -356,7 +371,7 @@ static bool index_cancelled(atomic_bool *cancel) {
 static bool index_open_memory(const char *directory, DIR *dir, int dfd,
                               file_browser_index_t **out,
                               unsigned *out_count, unsigned flags,
-                              atomic_bool *cancel, file_browser_sort_mode_t mode) {
+                              atomic_bool *cancel, file_browser_sort_mode_t mode, bool reverse) {
     dir_entry_t *rows = malloc(sizeof(*rows) * INDEX_MEMORY_MAX_ROWS);
     if (!rows) { close(dfd); closedir(dir); return false; }
     unsigned count = 0;
@@ -386,10 +401,12 @@ static bool index_open_memory(const char *directory, DIR *dir, int dfd,
     idx->memory_rows = rows;
     idx->memory_playable_rows = count ? malloc(sizeof(*rows) * count) : NULL;
     idx->memory_backed = true; idx->count = count;
+    idx->reverse = reverse; idx->sort_mode = mode;
     if (count && !idx->memory_playable_rows) {
         free(idx->memory_rows); free(idx); close(dfd); return false;
     }
     for (unsigned i = 0; i < count; i++) {
+        if (idx->memory_rows[i].is_dir) idx->directory_count++;
         idx->memory_rows[i].playable_ordinal = -1;
         if (index_row_playable(&idx->memory_rows[i])) {
             idx->memory_rows[i].playable_ordinal = (int32_t)idx->playable_count;
@@ -403,20 +420,20 @@ static bool index_open_memory(const char *directory, DIR *dir, int dfd,
 
 static bool file_browser_index_open_ex(const char *directory, file_browser_index_t **out,
                                        unsigned *out_count, unsigned flags,
-                                       atomic_bool *cancel, file_browser_sort_mode_t mode) {
+                                       atomic_bool *cancel, file_browser_sort_mode_t mode, bool reverse) {
     if (!directory || !out) return false;
     *out = NULL; if (out_count) *out_count = 0;
     DIR *dir = opendir(directory); if (!dir) return false;
     int dfd = dup(dirfd(dir)), levels[32];
     if (dfd < 0) { closedir(dir); return false; }
 #ifdef FILE_BROWSER_TEST_FORCE_MEMORY_INDEX
-    return index_open_memory(directory, dir, dfd, out, out_count, flags, cancel, mode);
+    return index_open_memory(directory, dir, dfd, out, out_count, flags, cancel, mode, reverse);
 #endif
     memset(levels, -1, sizeof(levels));
     errno = 0;
     int probe = index_temp_fd(dfd);
     if (probe < 0 && (errno == EROFS || errno == EACCES || errno == EPERM)) {
-        return index_open_memory(directory, dir, dfd, out, out_count, flags, cancel, mode);
+        return index_open_memory(directory, dir, dfd, out, out_count, flags, cancel, mode, reverse);
     }
     if (probe < 0) goto fail;
     close(probe);
@@ -432,29 +449,35 @@ static bool file_browser_index_open_ex(const char *directory, file_browser_index
         if (entry_status < 0) goto fail;
         if (entry_status == 0) continue;
         if (++row_count == INDEX_RUN_SIZE) {
-            int fd = index_write_run(dfd, rows, row_count, mode); if (fd < 0) goto fail;
+            int fd = index_write_run(dfd, rows, row_count, mode);
+            if (fd < 0 || !index_push_run(levels, fd, dfd, cancel, mode)) goto fail;
             total += (unsigned)row_count; row_count = 0;
-            for (unsigned level = 0; ; level++) { if (level >= 32) { close(fd); goto fail; } if (levels[level] < 0) { levels[level] = fd; break; } int prior = levels[level]; levels[level] = -1; fd = index_merge_runs(prior, fd, dfd, cancel, mode); if (fd < 0) goto fail; }
         }
     }
-    if (row_count) { int fd = index_write_run(dfd, rows, row_count, mode); if (fd < 0) goto fail; total += (unsigned)row_count; for (unsigned level = 0; ; level++) { if (level >= 32) { close(fd); goto fail; } if (levels[level] < 0) { levels[level] = fd; break; } int prior = levels[level]; levels[level] = -1; fd = index_merge_runs(prior, fd, dfd, cancel, mode); if (fd < 0) goto fail; } }
+    if (row_count) {
+        int fd = index_write_run(dfd, rows, row_count, mode);
+        if (fd < 0 || !index_push_run(levels, fd, dfd, cancel, mode)) goto fail;
+        total += (unsigned)row_count;
+    }
     closedir(dir);
     int final = -1; for (unsigned level = 0; level < 32; level++) if (levels[level] >= 0) { int prior = levels[level]; levels[level] = -1; if (final < 0) final = prior; else { final = index_merge_runs(prior, final, dfd, cancel, mode); if (final < 0) goto fail_closed; } }
     file_browser_index_t *idx = calloc(1, sizeof(*idx)); if (!idx) { if (final >= 0) close(final); goto fail_closed; }
     idx->fd = final >= 0 ? final : index_temp_fd(dfd); idx->count = total; idx->playable_fd = index_temp_fd(dfd); idx->directory_fd = dup(dfd); idx->playable_count = 0;
-    if (idx->fd < 0 || idx->playable_fd < 0 || idx->directory_fd < 0) { if (idx->fd >= 0) close(idx->fd); if (idx->playable_fd >= 0) close(idx->playable_fd); if (idx->directory_fd >= 0) close(idx->directory_fd); free(idx); goto fail_closed; }
+    if (idx->fd < 0 || idx->playable_fd < 0 || idx->directory_fd < 0) { file_browser_index_close(idx); goto fail_closed; }
+    idx->reverse = reverse; idx->sort_mode = mode;
     dir_entry_t row;
     for (unsigned i = 0; i < idx->count; i++) {
         if (index_cancelled(cancel)) {
             file_browser_index_close(idx);
             goto fail_closed;
         }
-        if (pread(idx->fd, &row, sizeof(row), (off_t)i * sizeof(row)) != (ssize_t)sizeof(row)) { close(idx->fd); close(idx->playable_fd); close(idx->directory_fd); free(idx); goto fail_closed; }
+        if (pread(idx->fd, &row, sizeof(row), (off_t)i * sizeof(row)) != (ssize_t)sizeof(row)) { file_browser_index_close(idx); goto fail_closed; }
+        if (row.is_dir) idx->directory_count++;
         row.playable_ordinal = -1;
         if (index_row_playable(&row)) {
             row.playable_ordinal = (int32_t)idx->playable_count;
             if (pwrite(idx->fd, &row, sizeof(row), (off_t)i * sizeof(row)) != (ssize_t)sizeof(row) ||
-                !index_write_full(idx->playable_fd, &row, sizeof(row))) { close(idx->fd); close(idx->playable_fd); close(idx->directory_fd); free(idx); goto fail_closed; }
+                !index_write_full(idx->playable_fd, &row, sizeof(row))) { file_browser_index_close(idx); goto fail_closed; }
             idx->playable_count++;
         }
     }
@@ -472,18 +495,24 @@ fail_closed:
 }
 
 bool file_browser_index_open(const char *directory, file_browser_index_t **out, unsigned *out_count) {
-    return file_browser_index_open_ex(directory, out, out_count, 0, NULL, sort_mode_snapshot());
+    return file_browser_index_open_ex(directory, out, out_count, 0, NULL, sort_mode_snapshot(), file_browser_get_sort_reverse());
+}
+
+bool file_browser_index_open_all(const char *directory, file_browser_index_t **out, unsigned *out_count) {
+    return file_browser_index_open_ex(directory, out, out_count, LIST_ALL_FILES, NULL, sort_mode_snapshot(), file_browser_get_sort_reverse());
 }
 
 bool file_browser_index_open_cancelable(const char *directory, file_browser_index_t **out,
                                         unsigned *out_count, atomic_bool *cancel) {
-    return file_browser_index_open_ex(directory, out, out_count, 0, cancel, sort_mode_snapshot());
+    return file_browser_index_open_ex(directory, out, out_count, 0, cancel, sort_mode_snapshot(), file_browser_get_sort_reverse());
 }
 
 bool file_browser_index_retain(const file_browser_index_t *source, file_browser_index_t **out) {
     if (!source || !out) return false;
     file_browser_index_t *copy = calloc(1, sizeof(*copy));
     if (!copy) return false;
+    copy->reverse = source->reverse; copy->sort_mode = source->sort_mode;
+    copy->directory_count = source->directory_count;
     if (source->memory_backed) {
         copy->fd = -1; copy->playable_fd = -1;
         copy->directory_fd = dup(source->directory_fd);
@@ -503,15 +532,14 @@ bool file_browser_index_retain(const file_browser_index_t *source, file_browser_
         *out = copy; return true;
     }
     copy->fd = dup(source->fd); copy->playable_fd = dup(source->playable_fd); copy->directory_fd = dup(source->directory_fd);
-    if (copy->fd < 0 || copy->playable_fd < 0 || copy->directory_fd < 0) { if (copy->fd >= 0) close(copy->fd); if (copy->playable_fd >= 0) close(copy->playable_fd); if (copy->directory_fd >= 0) close(copy->directory_fd); free(copy); return false; }
+    if (copy->fd < 0 || copy->playable_fd < 0 || copy->directory_fd < 0) { file_browser_index_close(copy); return false; }
     copy->count = source->count; copy->playable_count = source->playable_count; snprintf(copy->directory, sizeof(copy->directory), "%s", source->directory); *out = copy; return true;
 }
 
 bool file_browser_index_path_at(const file_browser_index_t *index, unsigned ordinal, char *out_path, size_t out_size) {
     if (!index || ordinal >= index->count || !out_path || !out_size) return false;
     dir_entry_t row;
-    if (index->memory_backed) row = index->memory_rows[ordinal];
-    else if (pread(index->fd, &row, sizeof(row), (off_t)ordinal * sizeof(row)) != (ssize_t)sizeof(row)) return false;
+    if (!index_entry_at(index, ordinal, &row)) return false;
     return snprintf(out_path, out_size, "%s/%s", index->directory, row.name) < (int)out_size;
 }
 
@@ -528,6 +556,7 @@ bool file_browser_index_playable_path_at(const file_browser_index_t *index, unsi
                                          char *out_path, size_t out_size) {
     if (!index || !out_path || !out_size) return false;
     if (ordinal >= index->playable_count) return false;
+    if (index->reverse) ordinal = index->playable_count - 1 - ordinal;
     dir_entry_t row;
     if (index->memory_backed) row = index->memory_playable_rows[ordinal];
     else if (pread(index->playable_fd, &row, sizeof(row), (off_t)ordinal * sizeof(row)) != (ssize_t)sizeof(row)) return false;
@@ -550,10 +579,26 @@ void file_browser_index_close(file_browser_index_t *index) {
     free(index->memory_rows); free(index->memory_playable_rows); free(index);
 }
 
+/* Reverse within each partition so folders stay first. */
+static unsigned reverse_row(unsigned count, unsigned dirs, unsigned row, bool reverse) {
+    if (!reverse) return row;
+    return row < dirs ? dirs - 1 - row : dirs + count - 1 - row;
+}
+
+static unsigned scan_directory_count(const dir_entry_t *rows, unsigned count) {
+    unsigned dirs = 0;
+    while (dirs < count && rows[dirs].is_dir) dirs++;
+    return dirs;
+}
+
 static bool index_entry_at(const file_browser_index_t *index, unsigned ordinal, dir_entry_t *out) {
     if (!index || ordinal >= index->count || !out) return false;
-    if (index->memory_backed) { *out = index->memory_rows[ordinal]; return true; }
-    return pread(index->fd, out, sizeof(*out), (off_t)ordinal * sizeof(*out)) == (ssize_t)sizeof(*out);
+    ordinal = reverse_row(index->count, index->directory_count, ordinal, index->reverse);
+    if (index->memory_backed) *out = index->memory_rows[ordinal];
+    else if (pread(index->fd, out, sizeof(*out), (off_t)ordinal * sizeof(*out)) != (ssize_t)sizeof(*out)) return false;
+    if (index->reverse && out->playable_ordinal >= 0)
+        out->playable_ordinal = (int32_t)(index->playable_count - 1 - (unsigned)out->playable_ordinal);
+    return true;
 }
 
 bool file_browser_index_entry_name(const file_browser_index_t *index, unsigned ordinal,
@@ -688,6 +733,7 @@ typedef struct {
     char directory[PATH_MAX];
     unsigned list_flags;
     file_browser_sort_mode_t sort_mode;
+    bool reverse;
 } index_worker_request_t;
 
 static void *index_worker_main(void *arg) {
@@ -697,7 +743,7 @@ static void *index_worker_main(void *arg) {
     unsigned generation = request.generation;
     file_browser_index_t *built = NULL; unsigned count = 0;
     bool ok = file_browser_index_open_ex(request.directory, &built, &count, request.list_flags,
-                                         &fb->index_worker_cancel, request.sort_mode);
+                                         &fb->index_worker_cancel, request.sort_mode, request.reverse);
     bool oversized = !ok && errno == EFBIG;
     pthread_mutex_lock(&index_worker_mu);
     if (fb->deleted) {
@@ -732,6 +778,7 @@ static bool index_worker_launch_locked(file_browser_t * fb, unsigned generation)
     snprintf(request->directory, sizeof(request->directory), "%s", fb->current_dir);
     request->list_flags = fb->list_flags;
     request->sort_mode = sort_mode_snapshot();
+    request->reverse = file_browser_get_sort_reverse();
     atomic_store(&fb->index_worker_cancel, false);
     atomic_store(&fb->index_worker_running, true);
     pthread_t thread;
@@ -860,14 +907,16 @@ static void build_playlist_and_select(file_browser_t * fb, int file_display_inde
         return;
     }
     dir_entry_t *all = NULL;
-    int all_count = scan_directory(fb->current_dir, &all, sort_mode_snapshot(), fb->list_flags & LIST_CUE);
+    int all_count = scan_directory(fb->current_dir, &all, fb->current_index->sort_mode, fb->list_flags & LIST_CUE);
     if (all_count <= 0) { free(all); return; }
     char ** playlist = malloc(sizeof(char *) * (size_t) all_count);
     if (!playlist) { free(all); return; }
     int count = 0;
     int selected = -1;
 
-    for (int i = 0; i < all_count; i++) {
+    unsigned dirs = scan_directory_count(all, (unsigned)all_count);
+    for (int r = 0; r < all_count; r++) {
+        unsigned i = reverse_row((unsigned)all_count, dirs, (unsigned)r, fb->current_index->reverse);
         if (all[i].is_dir || all[i].is_playlist || all[i].is_cue) continue;
 
         char full_path[PATH_MAX];
@@ -892,11 +941,7 @@ file_browser_sort_mode_t file_browser_get_sort_mode(void) {
     return sort_mode_snapshot();
 }
 
-void file_browser_set_sort_mode(file_browser_sort_mode_t mode) {
-    if (mode != FILE_BROWSER_SORT_NEWEST) mode = FILE_BROWSER_SORT_NAME;
-    file_browser_sort_mode_t previous = sort_mode_snapshot();
-    if (previous == mode) return;
-    atomic_store_explicit(&current_sort_mode, mode, memory_order_release);
+static void refresh_browser_order(void) {
     last_selected_row = -1;
     /* Ordering changed, so previously saved row and scroll offsets no longer
      * identify the same entries. Keep the current path and restart there. */
@@ -909,6 +954,23 @@ void file_browser_set_sort_mode(file_browser_sort_mode_t mode) {
         scan_current_dir(fb);
         rebuild_list(fb);
     }
+}
+
+void file_browser_set_sort_mode(file_browser_sort_mode_t mode) {
+    if (mode != FILE_BROWSER_SORT_NEWEST) mode = FILE_BROWSER_SORT_NAME;
+    if (sort_mode_snapshot() == mode) return;
+    atomic_store_explicit(&current_sort_mode, mode, memory_order_release);
+    refresh_browser_order();
+}
+
+bool file_browser_get_sort_reverse(void) {
+    return atomic_load_explicit(&current_sort_reverse, memory_order_acquire);
+}
+
+void file_browser_set_sort_reverse(bool reverse) {
+    if (file_browser_get_sort_reverse() == reverse) return;
+    atomic_store_explicit(&current_sort_reverse, reverse, memory_order_release);
+    refresh_browser_order();
 }
 
 bool file_browser_build_playlist_from_m3u(const char * m3u_path, char *** out_playlist, int * out_count) {
@@ -1231,11 +1293,39 @@ static void set_selected(file_browser_t * fb, unsigned ordinal, bool on) {
     else fb->selected_count--;
 }
 
-/* Full rebuild for a mode change, at the same scroll offset. */
-static void rebuild_list_in_place(file_browser_t * fb) {
+/* Full rebuild for a mode change. Names wrap differently with and without
+ * the check box, so row heights change: keep an anchor row (the pressed
+ * entry's ordinal, or -1 for the first visible row) at the same screen y
+ * instead of the same pixel offset. */
+static void rebuild_list_in_place(file_browser_t * fb, int anchor_ordinal) {
+    lv_area_t list_area;
+    lv_obj_update_layout(fb->list);
+    lv_obj_get_coords(fb->list, &list_area);
+    int32_t anchor = anchor_ordinal >= 0 ? anchor_ordinal - fb->page_start : -1;
+    int32_t count = (int32_t) lv_obj_get_child_count(fb->list);
+    if (anchor < 0 || anchor >= count) {
+        anchor = -1;
+        for (int32_t i = 0; i < count; i++) {
+            lv_area_t a;
+            lv_obj_get_coords(lv_obj_get_child(fb->list, i), &a);
+            if (a.y2 >= list_area.y1) { anchor = i; break; }
+        }
+    }
+    int32_t old_offset = 0;
+    if (anchor >= 0) {
+        lv_area_t a;
+        lv_obj_get_coords(lv_obj_get_child(fb->list, anchor), &a);
+        old_offset = a.y1 - list_area.y1;
+    }
     int32_t scroll_y = lv_obj_get_scroll_y(fb->list);
     rebuild_list(fb);
     lv_obj_update_layout(fb->list);
+    if (anchor >= 0 && anchor < (int32_t) lv_obj_get_child_count(fb->list)) {
+        lv_area_t a;
+        lv_obj_get_coords(lv_obj_get_child(fb->list, anchor), &a);
+        scroll_y = lv_obj_get_scroll_y(fb->list) + (a.y1 - list_area.y1) - old_offset;
+        if (scroll_y < 0) scroll_y = 0;
+    }
     lv_obj_scroll_to_y(fb->list, scroll_y, LV_ANIM_OFF);
 }
 
@@ -1250,8 +1340,9 @@ static void entry_click_cb(lv_event_t * e) {
         /* The check box is the row's last child. */
         lv_obj_t * row = lv_event_get_current_target_obj(e);
         lv_obj_delete(lv_obj_get_child(row, -1));
-        lv_obj_align(build_check_box(row, is_selected(fb, (unsigned) index)), LV_ALIGN_RIGHT_MID,
-                     -LIST_ROW_LABEL_INSET, 0);
+        lv_obj_t * box = build_check_box(row, is_selected(fb, (unsigned) index));
+        lv_obj_add_flag(box, LV_OBJ_FLAG_FLOATING);
+        lv_obj_align(box, LV_ALIGN_RIGHT_MID, -LIST_ROW_LABEL_INSET, 0);
         notify_selection(fb);
         return;
     }
@@ -1316,7 +1407,7 @@ static void entry_long_press_cb(lv_event_t * e) {
         /* The rebuild deletes the pressed row; its release must not click
          * whatever row takes its place. */
         lv_indev_wait_release(lv_indev_active());
-        rebuild_list_in_place(fb);
+        rebuild_list_in_place(fb, (int) ordinal);
         notify_selection(fb);
         return;
     }
@@ -1353,34 +1444,67 @@ static lv_obj_t * add_file_row(file_browser_t * fb, const char * label_text, con
                                lv_event_cb_t cb, void * user_data, bool check_box, bool checked) {
     lv_obj_t * row = lv_obj_create(fb->list);
     /* Files uses the same font-aware ordinary row height as other native
-     * lists, including the music browser. */
-    lv_obj_set_size(row, LIST_ROW_WIDTH_WIDE, ui_list_row_height());
+     * lists, including the music browser, as a minimum. */
     lv_obj_add_style(row, &native_row_min_style, 0);
     lv_obj_add_style(row, &pill_row_bg_style, 0);
     lv_obj_add_style(row, &list_row_pressed_style, LV_STATE_PRESSED);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* Label x is measured from the row's content box, which starts inside the
+     * border and padding, so both come off the width or the text would reach
+     * the right edge. The usual right margin is the pill rows' (screen_builders_menus.c),
+     * measured from the row edge; in selection mode the label instead stops
+     * a gap short of the check box. */
+    const int32_t border = lv_obj_get_style_border_width(row, LV_PART_MAIN);
+    const int32_t pad_right = lv_obj_get_style_pad_right(row, LV_PART_MAIN);
+    const bool has_icon = icon_asset && icon_asset->src;
+    const int32_t label_x = has_icon ? 72 : LIST_ROW_LABEL_INSET;
+    const int32_t right_space = check_box
+        ? border + pad_right + LIST_ROW_LABEL_INSET + BOARD_SCALE_PX(24) + BOARD_SCALE_PX(8)
+        : (has_icon ? BOARD_SCALE_PX(24) : LIST_ROW_LABEL_INSET);
+    const int32_t label_w = ui_row_label_width(row, LIST_ROW_WIDTH_WIDE, label_x, right_space);
+
     lv_obj_t * label = lv_label_create(row);
-    lv_label_set_text(label, label_text);
     lv_obj_add_style(label, &style_theme_text_primary, 0);
     lv_obj_set_style_text_font(label, &LIST_ROW_FONT, 0);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(label, label_w);
+    lv_label_set_text(label, label_text);
 
-    int32_t check_space = check_box ? BOARD_SCALE_PX(40) : 0;
-    if (icon_asset && icon_asset->src) {
-        lv_obj_t * icon = lv_image_create(row);
+    lv_obj_t * icon = NULL;
+    if (has_icon) {
+        icon = lv_image_create(row);
         lv_image_set_src(icon, icon_asset->src);
         if (icon_asset->text_color) lv_obj_add_style(icon, &style_theme_text_primary, 0);
-        /* Glyph lines up with the category menus' row icons. */
-        lv_obj_align(icon, LV_ALIGN_LEFT_MID, 7, 0);
-        lv_obj_align(label, LV_ALIGN_LEFT_MID, 72, 0);
-        lv_obj_set_width(label, LIST_ROW_WIDTH_WIDE - BOARD_SCALE_PX(88) - check_space);
-    } else {
-        lv_obj_align(label, LV_ALIGN_LEFT_MID, LIST_ROW_LABEL_INSET, 0);
-        lv_obj_set_width(label, LIST_ROW_WIDTH_WIDE - 2 * LIST_ROW_LABEL_INSET - check_space);
     }
-    if (check_box)
-        lv_obj_align(build_check_box(row, checked), LV_ALIGN_RIGHT_MID, -LIST_ROW_LABEL_INSET, 0);
+    /* A name that fits on one line keeps the fixed-height, centred row; a
+     * longer one wraps and the row grows (ui_row_fit_label). */
+    const bool tall = ui_row_fit_label(row, label, &LIST_ROW_FONT, LIST_ROW_WIDTH_WIDE, label_x, label_w);
+    if (!tall) {
+        /* Glyph lines up with the category menus' row icons. */
+        if (icon) lv_obj_align(icon, LV_ALIGN_LEFT_MID, 7, 0);
+    } else if (icon) {
+        const int32_t row_h = ui_list_row_height();
+        const int32_t pad_ver = lv_obj_get_style_pad_top(row, LV_PART_MAIN);
+        /* The icon sits on the first line: it is centred in an invisible
+         * minimum-height cell at the row's top, exactly where a one-line
+         * row centres it. The cell floats, so it never sizes the row. */
+        lv_obj_t * cell = lv_obj_create(row);
+        lv_obj_set_size(cell, label_x, row_h);
+        lv_obj_set_style_bg_opa(cell, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(cell, 0, 0);
+        lv_obj_set_style_pad_all(cell, 0, 0);
+        lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(cell, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_align(cell, LV_ALIGN_TOP_LEFT, 0, -(pad_ver + border));
+        lv_obj_set_parent(icon, cell);
+        lv_obj_align(icon, LV_ALIGN_LEFT_MID, 7, 0);
+    }
+    /* Stays vertically centred on the whole row, whatever its height. */
+    if (check_box) {
+        lv_obj_t * box = build_check_box(row, checked);
+        if (tall) lv_obj_add_flag(box, LV_OBJ_FLAG_FLOATING);
+        lv_obj_align(box, LV_ALIGN_RIGHT_MID, -LIST_ROW_LABEL_INSET, 0);
+    }
 
     if (cb) {
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
@@ -1586,7 +1710,7 @@ void file_browser_set_selecting(file_browser_t * fb, bool selecting) {
     }
     if (fb->selecting == selecting) return;
     fb->selecting = selecting;
-    rebuild_list_in_place(fb);
+    rebuild_list_in_place(fb, -1);
     notify_selection(fb);
 }
 
@@ -1594,7 +1718,7 @@ void file_browser_select_all(file_browser_t * fb) {
     if (!fb->selected) return;
     for (unsigned i = 0; i < listed_count(fb); i++) set_selected(fb, i, true);
     fb->selecting = true;
-    rebuild_list_in_place(fb);
+    rebuild_list_in_place(fb, -1);
     notify_selection(fb);
 }
 
@@ -1656,7 +1780,10 @@ bool file_browser_build_playlist_for_path(const char * path, char *** out_playli
     int count = 0;
     int selected = -1;
 
-    for (int i = 0; i < scanned_count; i++) {
+    bool reverse = file_browser_get_sort_reverse();
+    unsigned dirs = scan_directory_count(scanned, (unsigned)scanned_count);
+    for (int r = 0; r < scanned_count; r++) {
+        unsigned i = reverse_row((unsigned)scanned_count, dirs, (unsigned)r, reverse);
         if (scanned[i].is_dir || scanned[i].is_playlist || scanned[i].is_cue) continue;
 
         char full_path[PATH_MAX];

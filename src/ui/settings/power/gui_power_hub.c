@@ -227,11 +227,6 @@ static void power_action_backdrop_cb(lv_event_t * e) {
     power_action_hide();
 }
 
-static void power_restart_selector_press_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) == LV_EVENT_PRESSED)
-        power_restart_selector_long_press_fired = false;
-}
-
 static void power_restart_selector_long_press_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED) return;
     power_restart_selector_long_press_fired = true;
@@ -262,6 +257,7 @@ static void power_action_clicked_cb(lv_event_t * e) {
             return;
         }
         power_action_hide();
+        (void) gui_shell_bt_dac_shutdown(false);
         if (action == 0) idle_shutdown_now();
         else idle_shutdown_reboot_now();
         return;
@@ -323,7 +319,7 @@ void start_power_off_countdown(void) {
 
 void build_power_off_countdown_popup(void) {
     /* lv_layer_sys(), not lv_layer_top() -- the status bar band lives on
-     * lv_layer_top() and several places in gui_shell.c explicitly
+     * lv_layer_top() and several places in gui_shell_drawer_motion.c explicitly
      * re-foreground it above every other lv_layer_top() sibling (quick
      * drawer, drag motion, etc: "the status bar stays above THAT"), which
      * fought back against this popup's own one-time move-to-foreground and
@@ -371,7 +367,7 @@ void build_power_off_countdown_popup(void) {
     power_action_overlay.popup = build_power_hub_panel(power_action_overlay.backdrop,
         power_action_clicked_cb, &power_action_status, actions);
     if (actions[1]) {
-        lv_obj_add_event_cb(actions[1], power_restart_selector_press_cb, LV_EVENT_PRESSED, NULL);
+        lv_obj_add_event_cb(actions[1], ui_clear_flag_on_press_cb, LV_EVENT_PRESSED, &power_restart_selector_long_press_fired);
         lv_obj_add_event_cb(actions[1], power_restart_selector_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
     }
 }

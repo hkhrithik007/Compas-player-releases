@@ -11,7 +11,9 @@
  * metadata_db queries. Returned arrays and strings belong to the caller;
  * release them with gui_plugin_free_string_array(). Missing matches return
  * NULL/0. get_album_tracks() also rejects ambiguous album names within an
- * artist's albums. Results follow database ordering; get_next_album_tracks()
+ * artist's albums. Album tracks expand embedded CUE sheets into virtual
+ * references. Results follow database ordering, except
+ * get_next_album_tracks(), which follows the artist page's album sort and
  * stops at the last album without wrapping. */
 char ** gui_plugin_get_artist_albums(const char * artist, int * out_count);
 char ** gui_plugin_get_album_tracks(const char * artist, const char * album, int * out_count);

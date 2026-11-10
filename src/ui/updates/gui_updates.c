@@ -73,7 +73,7 @@ static void firmware_update_from_sd(void) {
 
     const char * filename = strrchr(firmware_update_selected_path, '/');
     filename = filename ? filename + 1 : firmware_update_selected_path;
-    lv_label_set_text_fmt(firmware_update_popup_title, TR("Update using %s?\nDevice will reboot into recovery mode."),
+    lv_label_set_text_fmt(firmware_update_popup_title, TR("Update using this file?\n%s\n\nDevice will reboot into recovery mode."),
                            filename);
 
     gui_popup_show(&firmware_update_popup);
@@ -272,7 +272,7 @@ static void poll_player_update(void) {
     player_update_ui_active = false;
     if (status.state == PLAYER_UPDATE_CHECKED) {
         lv_label_set_text_fmt(player_update_offer_title,
-                              TR("Available player release: %s.\nInstalled: %s\n\nDownload and install? This updates the player and restarts the device. Firmware, fonts, and artwork are unchanged."),
+                              TR("Available player release:\n%s\nInstalled:\n%s\n\nDownload and install? This updates the player and restarts the device. Firmware, fonts, and artwork are unchanged."),
                               status.release.label, app_version_label());
         gui_popup_show(&player_update_offer_popup);
         return;
@@ -304,8 +304,7 @@ static void firmware_source_backdrop_cb(lv_event_t * e) {
 
 static void show_ota_install_popup(const char * release_label) {
     lv_label_set_text_fmt(ota_install_title,
-                          TR("Firmware release %s is downloaded and verified.\n\nInstall now? The device reboots into "
-                          "recovery to flash it. Do not turn it off until it restarts."),
+                          TR("Downloaded and verified firmware release:\n%s\n\nInstall now? The device reboots into recovery to flash it. Do not turn it off until it restarts."),
                           release_label);
     gui_popup_show(&ota_install_popup);
 }
@@ -328,8 +327,27 @@ static void firmware_source_sd_cb(lv_event_t * e) {
     firmware_ota_release_t pending;
     firmware_ota_pending_t state = firmware_ota_pending(&pending);
     if (state == FIRMWARE_OTA_PENDING_VALID) show_ota_install_popup(pending.label);
-    else if (state == FIRMWARE_OTA_PENDING_REJECTED)
-        show_error_toast(TR("The downloaded update record is invalid. Download the update again."));
+    else if (state == FIRMWARE_OTA_PENDING_REJECTED) {
+        /* A stale record from an earlier online attempt says nothing about
+         * a file the user put on the card: clear it and take the manual
+         * path (the image's contents are then checked by recovery). Only
+         * a marker for a failed image still at the root keeps refusing. */
+        firmware_ota_discard_t discard = firmware_ota_discard_stale_pending();
+        if (discard == FIRMWARE_OTA_DISCARD_REMOVED) firmware_update_from_sd();
+        else if (discard == FIRMWARE_OTA_DISCARD_BUSY) show_error_toast(TR("An update is already in progress"));
+        else if (discard == FIRMWARE_OTA_DISCARD_IO_ERROR)
+            show_error_toast(TR("Cannot read the update record on the SD card. Check the card and try again."));
+        else if (discard == FIRMWARE_OTA_DISCARD_NOT_STALE) {
+            /* The record changed state since the query: dispatch afresh. */
+            state = firmware_ota_pending(&pending);
+            if (state == FIRMWARE_OTA_PENDING_VALID) show_ota_install_popup(pending.label);
+            else if (state == FIRMWARE_OTA_PENDING_NONE) firmware_update_from_sd();
+            else if (state == FIRMWARE_OTA_PENDING_UNREADABLE)
+                show_error_toast(TR("Cannot read the update record on the SD card. Check the card and try again."));
+            else show_error_toast(TR("The previous download is incomplete or invalid. Remove the update file from the SD card, tap Install from SD card, then copy the new file and try again."));
+        }
+        else show_error_toast(TR("The previous download is incomplete or invalid. Remove the update file from the SD card, tap Install from SD card, then copy the new file and try again."));
+    }
     else if (state == FIRMWARE_OTA_PENDING_UNREADABLE)
         show_error_toast(TR("Cannot read the update record on the SD card. Check the card and try again."));
     else firmware_update_from_sd();
@@ -460,13 +478,11 @@ void poll_firmware_ota(void) {
             ota_ui_active = false;
             if (status.newer)
                 lv_label_set_text_fmt(ota_offer_title,
-                                      TR("Firmware release %s is available.\nInstalled: %s\n\nDownload it now? This may "
-                                      "take a while."),
+                                      TR("Available firmware release:\n%s\nInstalled:\n%s\n\nDownload it now? This may take a while."),
                                       status.release.label, status.installed);
             else
                 lv_label_set_text_fmt(ota_offer_title,
-                                      TR("Installed version: %s\nAvailable release: %s\n\nDownload and reinstall it anyway? "
-                                      "This may take a while."),
+                                      TR("Installed version:\n%s\nAvailable release:\n%s\n\nDownload and reinstall it anyway? This may take a while."),
                                       status.installed, status.release.label);
             gui_popup_show(&ota_offer_popup);
             return;

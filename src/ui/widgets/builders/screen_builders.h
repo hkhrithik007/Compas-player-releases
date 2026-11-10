@@ -28,11 +28,27 @@
  * The largest status glyph (battery) is rendered at 38px, leaving 1px
  * margin above/below it. Consumers derive positions algebraically from this
  * constant. */
+/* Scales a literal on the V1 only; the other boards keep the literal as is. */
+#if defined(BOARD_TEMPOTEC_V1)
+#define V1_SCALE_PX(px) BOARD_SCALE_PX(px)
+#else
+#define V1_SCALE_PX(px) (px)
+#endif
+#if defined(BOARD_TEMPOTEC_V1)
+/* The V1 uses the same compact 30px top chrome band as its physical
+ * 240x320 stock UI. Other boards retain the established 1:1/board-scaled
+ * dimensions below. */
+#define STATUS_BAR_CLEARANCE 30
+#define TITLE_ROW_HEIGHT 30
+#define HEADER_BUTTON_WIDTH 30
+#else
 #define STATUS_BAR_CLEARANCE BOARD_SCALE_PX(40)
 #define TITLE_ROW_HEIGHT BOARD_SCALE_PX(80)
 #define HEADER_BUTTON_WIDTH BOARD_SCALE_PX(64)
+#endif
 #define HOME_INDICATOR_BAND_HEIGHT BOARD_SCALE_PX(24)
 #define HOME_INDICATOR_CONTENT_INSET (HOME_INDICATOR_BAND_HEIGHT + BOARD_SCALE_PX(8))
+#define HOME_INDICATOR_PILL_HEIGHT BOARD_SCALE_PX(4)
 
 /* Shared touch-list row geometry -- every tappable row-of-text list
  * (Artists/Albums/Album Artist/Genres/All Songs/group-songs drill-down,
@@ -41,11 +57,10 @@
  * (LIST_ROW_BG_COLOR/LIST_ROW_RADIUS) with colors from the charcoal palette
  * and support live plugin overrides. */
 int32_t ui_list_row_width(void);
-int32_t ui_list_row_width_wide(void);
 #define LIST_ROW_WIDTH (ui_list_row_width())
-/* Compatibility name used by roomier library lists. Both row-width helpers
- * follow the active display width and intentionally add no outer gutter. */
-#define LIST_ROW_WIDTH_WIDE (ui_list_row_width_wide())
+/* Compatibility name used by roomier library lists; the same width as
+ * LIST_ROW_WIDTH (the active display width minus the list side margins). */
+#define LIST_ROW_WIDTH_WIDE (ui_list_row_width())
 #define LIST_ROW_HEIGHT GUI_ROW_HEIGHT
 #define MUSIC_LIST_ROW_HEIGHT GUI_MUSIC_ROW_HEIGHT
 #define LIST_ROW_RADIUS BOARD_SCALE_PX(16)
@@ -92,13 +107,19 @@ extern lv_style_t icon_press_style;
 
 /* Enables the shared constant-speed row marquee with a 2-second pause. */
 void row_label_enable_marquee(lv_obj_t * label);
+/* Restarts every circular-scroll label under root from offset 0 with its
+ * pause, so a screen that was built before it became visible does not show
+ * marquees already mid-scroll. */
+void ui_restart_marquees(lv_obj_t * root);
+/* Makes every newly loaded screen restart its marquees. Call once at UI init. */
+void ui_marquee_init(void);
 /* A secondary label belongs to its row, never intercepts taps, and is
  * reused with the row pool. Legacy title\nmetadata strings remain valid. */
 lv_obj_t * row_label_create_subtitle(lv_obj_t * row);
 void row_label_set_identity(lv_obj_t * row, lv_obj_t * subtitle_label,
                             const char * title, const char * subtitle, int32_t height);
-int32_t ui_music_row_height(void);
 int32_t ui_list_row_height(void);
+static inline int32_t ui_music_row_height(void) { return ui_list_row_height(); }
 /* Container rows shared by bounded playlist/queue pages. */
 lv_obj_t * build_music_list_row(lv_obj_t * parent, const char * title, const char * subtitle,
                                int32_t trailing_space);
@@ -121,6 +142,8 @@ lv_obj_t * build_list_message(lv_obj_t * parent, const char * title, const char 
  * going through that. */
 void row_label_apply_bounded_height(lv_obj_t * label, const lv_font_t * font);
 int32_t row_label_bounded_height(const lv_font_t * font);
+/* Space a bounded row label keeps above and below its line. */
+int32_t row_label_descender_margin(const lv_font_t * font);
 /* Theming: shared, mutable bg_color styles for the app's other two
  * "background categories" -- attach with lv_obj_add_style(x, &style_theme_screen_bg, 0)
  * on every screen root, or &style_theme_card_bg on every popup/EQ-card/
@@ -194,45 +217,22 @@ typedef struct {
     const char * text_align; /* non-NULL overrides layout's own align */
     bool has_icon; bool icon; /* whether THIS item's icon_asset should render at all */
 
-    /* Optional per-tile/category-row background image (theme2-relative,
-     * e.g. "launcher/bg_music.png"). NULL reproduces the plain row/tile.
-     * Drawn via bg_image_src rather than bg_color -- the asset itself
-     * already bakes in the rounded-rect card shape (as alpha) and the
-     * accent-tinted radial glow, so no separate radius/clip_corner styling
-     * is needed here. */
-    const char * bg_image;
-    /* Optional compact, transparent glow centered on the icon (0 = none).
-     * Unlike bg_image this has no card surface or visible tile boundary. */
-    uint32_t icon_glow_color;
     /* Category menus only: plugin icon path (absolute or relative to .plugins),
      * resolved with the same rules as register_list_item options.icon. */
     const char * plugin_icon;
 } icon_grid_item_t;
 
-/* Titled screen: real back-arrow button (top-left, invokes back_btn_cb) and
- * a flex-wrap grid of icon tiles below, each swapping to its "_s" asset
- * while pressed for visual feedback. Caller owns navigation wiring
- * (nav_pop/nav_push, swipe gestures) via finalize_screen_navigation() after
- * this returns. icon_scale_percent scales ICON_GRID_TARGET_ICON_PX for this
- * screen only (100 = the shared default every other icon-grid screen uses;
- * pass a value above/below 100 to make just this screen's icons bigger or
- * smaller without affecting the others).
+/* Home's tile grid: a screen with no header holding a 2-column grid of card
+ * tiles, each swapping to its "_s" asset while pressed. Caller owns navigation
+ * wiring (nav_pop/nav_push, swipe gestures) via finalize_screen_navigation()
+ * after this returns. icon_scale_percent scales ICON_GRID_TARGET_ICON_PX for
+ * this screen only (100 = the shared default).
  *
- * label_inside_icon: false draws the caption below the icon in its own
- * reserved row (used for plain glyph-on-transparent assets). true (used for
- * Wireless cards) draws the caption inside the icon's own image near its bottom,
- * as those card assets have a built-in caption band at the bottom. */
-/* tile_gap: px of visible space between adjacent tiles (0 = today's exact
- * flush-cell look with its thin divider lines -- every native caller passes
- * 0). A positive value insets each tile within its own already-computed grid
- * cell via a real LVGL margin (tile_gap/2 on every side) rather than
- * touching the row-height grid math at all, and suppresses the flush-cell
- * divider lines (redundant, and visually conflicting, once real gaps exist).
- * Only plugin.set_home_layout()'s options.tile_gap (PLUGINS.md, tile mode)
- * ever passes a nonzero value. */
-lv_obj_t * build_icon_grid_screen(const char * title, lv_event_cb_t back_btn_cb,
-                                   const icon_grid_item_t * items, int item_count,
-                                   int32_t icon_scale_percent, bool label_inside_icon, int32_t tile_gap);
+ * tile_gap: px of visible space between adjacent tiles, clamped to
+ * BOARD_SCALE_PX(16)..BOARD_SCALE_PX(64). Each tile is inset within its grid
+ * cell by a real LVGL margin (tile_gap/2 on every side). */
+lv_obj_t * build_icon_grid_screen(const icon_grid_item_t * items, int item_count,
+                                   int32_t icon_scale_percent, int32_t tile_gap);
 
 /* Top-right counterpart to build_header_back_button() --
  * same 64x64 transparent hitbox, centered within the title band,
@@ -256,6 +256,8 @@ const char * text_glyph_asset(const char * relative);
 /* breeze_rows/<folder>_<name>.png for a stock row icon, when present and the
  * active theme does not supply the stock image itself. */
 bool breeze_row_icon(const char * stock, char * out, size_t out_size);
+/* `stock` when a row icon exists for it (Breeze art or a file), else `fallback`. */
+const char * row_icon_or(const char * stock, const char * fallback);
 /* Shared back control for screens that retain its handle to toggle visibility. */
 lv_obj_t * build_header_back_button(lv_obj_t * scr, lv_event_cb_t cb);
 /* Align existing text actions/switches by their actual height, not an
@@ -268,6 +270,8 @@ void set_header_refresh_action_busy(lv_obj_t * button, bool busy);
 /* Fits a header title built by build_screen_header() to its single line
  * (smaller font, then ellipsis). Call again after changing its width. */
 void screen_title_fit(lv_obj_t * label);
+/* The title label build_screen_header() created on `scr`, or NULL. */
+lv_obj_t * screen_header_title(lv_obj_t * scr);
 /* Reserve the title width up to a trailing action and fit it on one line. */
 void reserve_title_width_before(lv_obj_t * title, lv_obj_t * right_icon);
 
@@ -306,7 +310,7 @@ typedef struct {
      * build_pill_list_screen() caller leaves these NULL/0 (a plain compound
      * literal without designators for trailing fields already defaults them
      * that way), selecting native rounded surfaces, font-aware 96px
-     * minimum rows and app_font_20 labels. Only a
+     * minimum rows and BODY role font labels. Only a
      * plugin-appended row (gui.c's build_settings_*_screen() plugin-row
      * loops) ever sets these. ---- */
 
@@ -324,24 +328,21 @@ typedef struct {
      * plugin-safe range below and keep the row centered in its list. */
     int32_t row_width;
 
-    /* NULL = this call site's own default (native rows: app_font_20,
-     * unchanged; plugin rows: gui.c always supplies a non-NULL default
-     * before this reaches here -- see pill_row_resolve_text_size()'s own
-     * comment). "small"/"medium"/"large" -> app_font_16/22/28
-     * (fallback_font.h) -- the fallback-capable family, since plugin row
-     * text (unlike native chrome) may be non-Latin. Validated by the Lua
-     * boundary in plugin_manager.c; this layer trusts it's already one of
-     * the three recognized values or NULL. */
+    /* NULL = this call site's own default (native rows: the BODY role font;
+     * plugin rows: gui.c always supplies a non-NULL default before this
+     * reaches here -- see pill_row_resolve_text_size()'s own comment).
+     * "small"/"medium"/"large" -> app_font_16/22/28 and "mono" -> the 8x16
+     * monospace font (ASCII-only); the first three are the fallback-capable
+     * family, since plugin row text (unlike native chrome) may be non-Latin.
+     * Validated by the Lua boundary in plugin_registries.c; this layer trusts
+     * it's already one of the recognized values or NULL. */
     const char * text_size;
 
     /* ---- Optional per-tile style overrides, same fields/meaning as
      * icon_grid_item_t's own (plugin.set_home_layout()'s per-tile config
      * table, PLUGINS.md) -- every existing row leaves these false/0,
-     * reproducing today's exact rendering. When has_bg_color/has_radius is
-     * set, the row is forced onto the same plain rounded-rect fill path
-     * row_height/row_width already use instead of the PNG pill sprite (a
-     * raster asset can't be recolored), using these values in place of
-     * LIST_ROW_BG_COLOR/LIST_ROW_RADIUS. ---- */
+     * reproducing today's exact rendering. When set, these values replace
+     * LIST_ROW_BG_COLOR/LIST_ROW_RADIUS on the row's rounded rect. ---- */
     bool has_bg_color;   uint32_t bg_color;
     bool has_text_color; uint32_t text_color;
     bool has_radius;     int32_t radius;
@@ -369,10 +370,10 @@ typedef struct {
 #define PILL_ROW_HEIGHT_MIN 48
 #define PILL_ROW_HEIGHT_MAX 220
 #define PILL_ROW_WIDTH_MIN 240
-#define PILL_ROW_WIDTH_MAX (ui_list_row_width_wide())
+#define PILL_ROW_WIDTH_MAX (ui_list_row_width())
 
 /* Native width derived from the active display. */
-int32_t pill_row_default_width(void);
+static inline int32_t pill_row_default_width(void) { return ui_list_row_width(); }
 
 /* On-screen icon footprint (longest edge, in px) a plugin row's icon targets
  * -- same scaling formula as build_icon_grid_screen()'s own
@@ -401,34 +402,31 @@ void pill_row_apply_icon(lv_obj_t * row, lv_obj_t * label, const char * icon_pat
                           lv_align_t align, int32_t x, int32_t y);
 
 /* Resolves a plugin's chosen text-size tier to the correspondingly-sized
- * fallback-capable font -- NULL returns app_font_20 (build_pill_list_screen()'s
- * own native-row default; every plugin call site is responsible for
- * supplying its OWN non-NULL default -- e.g. "medium" -- before calling
- * this, precisely so NULL unambiguously means "a genuine native row" here,
- * never "a plugin row that happened not to set text_size"). "small"/
- * "medium"/"large" -> &app_font_16/22/28 (fallback_font.h). Any other
- * string (shouldn't happen -- plugin_manager.c validates at the Lua
- * boundary) falls back to app_font_20 rather than dereferencing garbage. */
+ * font -- NULL returns the BODY role font (build_pill_list_screen()'s own
+ * native-row default; every plugin call site is responsible for supplying its
+ * OWN non-NULL default -- e.g. "medium" -- before calling this, precisely so
+ * NULL unambiguously means "a genuine native row" here, never "a plugin row
+ * that happened not to set text_size"). "small"/"medium"/"large" ->
+ * &app_font_16/22/28 (fallback_font.h), "mono" -> &lv_font_unscii_16. Any
+ * other string (shouldn't happen -- plugin_registries.c validates at the Lua
+ * boundary) falls back to the BODY role font rather than dereferencing
+ * garbage. */
 const lv_font_t * pill_row_resolve_text_size(const char * text_size);
 
 /* Titled screen: real back-arrow button and a vertically scrollable list of
- * touch_list/item_bg.png pill rows, each with a label and an optional
- * right-side chevron or toggle. toggle_accent_style is applied (via
+ * pill rows, each with a label and an optional right-side chevron or toggle. toggle_accent_style is applied (via
  * lv_obj_add_style(), not read as a plain value) to every PILL_ACCESSORY_
  * TOGGLE row's own lv_switch (LV_PART_INDICATOR|LV_STATE_CHECKED). The
  * caller owns the style object's lifetime; screen_builders.c only attaches
  * the style and never reads its properties directly. */
-/* row_gap: vertical spacing between rows, in px (every existing caller
- * passes 6, today's exact hardcoded value -- see build_pill_list_screen()'s
- * own history). Only plugin.set_home_layout()'s options.row_gap
- * (PLUGINS.md, list mode) ever passes anything else. */
+/* row_gap: vertical spacing between rows, in px. Native screens pass
+ * GUI_ROW_GAP (or the launcher style's row_gap); Home list mode passes the
+ * value from home_list_row_gap(). Clamped to 0-LIST_ROW_HEIGHT here. */
 /* icon_scale_pct: scales every row's own icon (item->icon_asset) the same
  * way build_icon_grid_screen()'s icon_scale_percent scales a tile's icon --
  * 100 = PILL_ROW_ICON_PX_DEFAULT (64px), unchanged from before this
- * parameter existed. Every native call site passes 100. Only build_launcher_
- * menu_screen()'s list-mode branch (plugin.set_home_layout(), PLUGINS.md)
- * ever passes anything else, so its own icon_scale_pct argument no longer
- * gets silently dropped when list_mode is set. */
+ * parameter existed. Callers pass 100 except Books, which passes a smaller
+ * percent so plugin row icons match its category art. */
 lv_obj_t * build_pill_list_screen(const char * title, lv_event_cb_t back_btn_cb,
                                    const pill_list_item_t * items, int item_count,
                                    lv_style_t * toggle_accent_style, int32_t row_gap,
@@ -451,16 +449,16 @@ int append_plugin_list_rows(pill_list_item_t * items, int count, int max_items,
                             plugin_list_item_options_cb_t get_options_fn,
                             lv_event_cb_t click_cb);
 
-lv_obj_t * build_launcher_menu_screen(const char * title, lv_event_cb_t back_btn_cb,
-                                      const icon_grid_item_t * items, int item_count,
-                                      int icon_scale_pct, bool label_inside_icon,
+/* Home's list mode: a header-less pill list built from items and the non-NULL
+ * layout. */
+lv_obj_t * build_launcher_menu_screen(const icon_grid_item_t * items, int item_count,
                                       const launcher_menu_layout_t * layout);
 
-/* Adds the Settings-style 44px icon and stretched pill background to an
- * already-built native pill row. Both paths are theme-relative. Identical
+/* Adds the Settings-style 44px icon to an already-built native pill row;
+ * icon_asset is theme-relative (NULL leaves the row untouched). Identical
  * paths share one retained decoded buffer across rows/screens; it is released
  * when the last referencing image is deleted. */
-void decorate_category_row(lv_obj_t * row, const char * icon_asset, const char * bg_asset);
+void decorate_category_row(lv_obj_t * row, const char * icon_asset);
 /* Same native category look for a plugin-supplied icon: absolute path or
  * relative to <SD>/.plugins/ (pill_row_apply_icon()). NULL or a path that
  * cannot be used leaves the row as a plain decorated row without icon. */
@@ -471,7 +469,7 @@ lv_obj_t * decorate_play_all_row(lv_obj_t * row);
 
 /* Builds a Settings-style vertical category menu with the shared font-aware
  * native row height. Explicit item/layout overrides remain authoritative.
- * icon_asset/bg_image paths are theme-relative. */
+ * icon_asset paths are theme-relative. */
 lv_obj_t * build_category_menu_screen(const char * title, lv_event_cb_t back_btn_cb,
                                       const icon_grid_item_t * items, int item_count,
                                       const launcher_menu_layout_t * layout);
@@ -490,6 +488,8 @@ void screen_builders_refresh_font_geometry(lv_obj_t * root);
  * previous tier unless this runs; LV_LABEL_LONG_SCROLL_CIRCULAR then rolls
  * those titles vertically when the submenu is first opened. */
 void screen_builders_refresh_all_font_geometry(void);
+/* Shared song-list geometry; callers configure padding, scrollbars and events. */
+lv_obj_t * build_song_list_body(lv_obj_t * screen);
 lv_obj_t * build_subsonic_list_screen(const char * default_title, lv_obj_t ** out_title_label, lv_obj_t ** out_list);
 /* Shared cover cards for plugin supplied grids and the plugin store. The
  * caller resolves image paths to an LVGL source (for example, "S:/path"). */
@@ -547,41 +547,90 @@ lv_obj_t * add_pill_chevron_row(lv_obj_t * parent, const char * label_text, lv_e
 lv_obj_t * add_pill_option_row(lv_obj_t * parent, const char * label_text, bool selected,
                               lv_event_cb_t on_click, void * user_data);
 lv_obj_t * add_section_header(lv_obj_t * parent, const char * text);
+/* add_section_header() that always wraps at the full list width. */
+lv_obj_t * add_wrapped_section_header(lv_obj_t * parent, const char * text);
 /* Accent-bordered 24 px square, filled with a check mark when checked; not clickable. */
 lv_obj_t * build_check_box(lv_obj_t * parent, bool checked);
 
-/* Radial accent glow behind an icon -- same technique the Home screen's
- * tiles use (add_icon_glow's own doc comment there has the full mechanics):
- * bakes a small ARGB8888 blob once and draws it centered on `wrapper`
- * during `tile`'s own LV_EVENT_DRAW_MAIN, so it composites correctly with
- * screen transitions like an ordinary image. `color` is 0xRRGGBB (0 is a
- * no-op); `diameter` is the glow bitmap's own size in pixels, not the
- * icon's -- make it comfortably larger than the icon for it to read as a
- * glow rather than a tight outline. `tile` owns the glow's lifetime (freed
- * on the tile's own LV_EVENT_DELETE), so it doesn't need a separate
- * teardown call as long as `tile` itself gets deleted normally. */
-void add_icon_glow(lv_obj_t * tile, lv_obj_t * wrapper, uint32_t color, int32_t diameter);
-
 int find_nearest_step_index(const int * steps, int count, int value);
 
-/* Builds the shared "rounded card + slider + centered value label" widget
- * tree used by several settings screens (screen timeout, screen dimming,
- * startup volume, sleep timer, idle shutdown), including the gesture-bubble
- * removal and swipe dead zone registration every one of them repeats.
- * track_top_offset lets a caller that adds its own caption label above the
- * slider (idle shutdown) push the slider down within the card. Does NOT set
- * the value label's initial text (callers use different formats) or the
- * card's hidden flag (callers use different enabled conditions) -- set both
- * via the returned card / *out_value_label after the call. */
-lv_obj_t * build_setting_slider_card(lv_obj_t * parent, lv_obj_t * align_target, int32_t card_height,
-                                      int32_t track_top_offset, int32_t min_range, int32_t max_range,
-                                      int32_t initial_val, lv_event_cb_t slider_cb,
-                                      lv_obj_t ** out_slider, lv_obj_t ** out_value_label);
+/* Prints the text for one setting value (seconds, minutes, percent...). */
+typedef void (*setting_value_fmt_t)(char * buf, size_t size, int value);
+
+typedef struct {
+    const char * toggle_label;  /* NULL: no toggle row, only the control area */
+    bool checked;               /* initial toggle state */
+    lv_event_cb_t switch_cb;    /* VALUE_CHANGED on the switch */
+    const char * caption;       /* muted text left of the value */
+    int32_t min_index, max_index, index;  /* slider range and position */
+    const int * steps;          /* value of each index; NULL: the index is the value */
+    setting_value_fmt_t fmt;    /* formats the value, the range ends and the readout */
+    lv_event_cb_t slider_cb;    /* all events of the slider */
+    bool control_always_on;     /* do not grey the control while the toggle is off */
+} setting_slider_cfg_t;
+
+typedef struct {
+    lv_obj_t * card;
+    lv_obj_t * toggle;          /* the switch; NULL without a toggle row */
+    lv_obj_t * control;         /* caption, slider and range ends */
+    lv_obj_t * slider;
+    lv_obj_t * value_label;
+    lv_obj_t * min_label;
+    lv_obj_t * max_label;
+    const int * steps;
+    setting_value_fmt_t fmt;
+} setting_slider_t;
+
+/* One row-style card for a single-slider setting: optional toggle row, a
+ * divider, then caption and value, the slider and its range ends. The control
+ * greys out (and the slider disables) while the toggle is off; it never hides.
+ * Includes the gesture-bubble removal and swipe dead zone. The caller places
+ * s.card. */
+setting_slider_t build_setting_slider(lv_obj_t * parent, const setting_slider_cfg_t * cfg);
+/* Vertical scrolling column below the header for settings pages that stack
+ * cards and notes, so layout follows content-size changes (font refresh). */
+lv_obj_t * build_settings_body(lv_obj_t * scr);
+/* Card with only a toggle row. A non-NULL `hint` is added as muted subtext
+ * below the card, inset like the card's text. Returns the card. */
+lv_obj_t * build_setting_toggle_card(lv_obj_t * parent, const char * label, const char * hint, bool checked,
+                                     lv_event_cb_t switch_cb, lv_obj_t ** out_switch);
+/* Muted wrapped note, inset like the text inside a settings card. */
+lv_obj_t * build_setting_hint(lv_obj_t * parent, const char * text);
+/* Card with a label row and nothing else. *out_row is the row to add the
+ * control to (it sits at the right end). Returns the card. */
+lv_obj_t * build_setting_label_card(lv_obj_t * parent, const char * label, lv_obj_t ** out_row);
+/* Dims `obj` to 40% and disables it and its children, or restores it. */
+void ui_set_greyed(lv_obj_t * obj, bool greyed);
+/* Greys out and disables the control, or restores it. */
+void setting_slider_set_enabled(const setting_slider_t * s, bool enabled);
+/* Updates the value text for slider position `index`. */
+void setting_slider_set_index(const setting_slider_t * s, int32_t index);
+/* Lowers or raises the slider's top end, and the right range-end text. */
+void setting_slider_set_max_index(const setting_slider_t * s, int32_t max_index);
 
 lv_obj_t * build_font_change_mask(int target);
 
 
+/* Label width inside a row of width `row_w`: the row's border and left padding
+ * come off first, then the label's x offset and the space kept free on the
+ * right (the usual margin, a chevron or a button). */
+int32_t ui_row_label_width(lv_obj_t * row, int32_t row_w, int32_t label_x, int32_t right_space);
+/* Lays out a native text row around its label. The label must already have its
+ * font, width (`label_w`) and text. A name that fits on one line keeps the
+ * fixed-height, centred row (LEFT_MID, LONG_DOT). A longer one wraps and the
+ * row grows to show every line, never below the minimum height, with the first
+ * line where a one-line row centres it. Returns true for the tall form; the
+ * caller must then make any other child that is aligned to the row's right or
+ * centre floating so that it does not size the row. */
+bool ui_row_fit_label(lv_obj_t * row, lv_obj_t * label, const lv_font_t * font,
+                      int32_t row_w, int32_t label_x, int32_t label_w);
+
 /* Plain native wide row; chevron is used by saved-list navigation rows. */
 lv_obj_t * build_wide_list_row(lv_obj_t * parent, const char * label_text, bool chevron);
+
+/* PRESSED callback (user data: a bool *) that clears a "long press fired"
+ * flag. A long press whose release scrolled or slid off never sends CLICKED,
+ * so without this the stale flag would swallow the next tap. */
+void ui_clear_flag_on_press_cb(lv_event_t * e);
 
 #endif /* SCREEN_BUILDERS_H */

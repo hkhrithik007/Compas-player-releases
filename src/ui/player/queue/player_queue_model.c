@@ -1,6 +1,7 @@
 #include "player_queue_model.h"
 
 #include "../../../audio/engine/audio_helpers.h"
+#include "../../../library/browser/paths/library_paths.h"
 #include "../../../library/playlists/playback_order.h"
 #include "player_queue_storage.h"
 #include "../../../library/remote/remote_track.h"
@@ -12,8 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#define QUEUE_STREAM_CACHE_DIR "/tmp/subsonic_stream_cache"
 
 static char **queue_paths;
 static int queue_count;
@@ -196,6 +195,7 @@ void player_queue_model_clear_finish(void) {
     for (int i = 0; i < queue_count; i++) free(queue_paths[i]);
     free(queue_paths);
     queue_paths = NULL;
+    queue_revision++;
     queue_count = 0;
     queue_current = -1;
     if (queue_sd_dirfd >= 0) close(queue_sd_dirfd);
@@ -215,6 +215,7 @@ void player_queue_model_install_take(player_queue_install_t owned) {
     assert(queue_sd_dirfd == -1);
     assert(owned.queue_sd_dirfd >= -1);
     queue_paths = owned.paths;
+    queue_revision++;
     queue_count = owned.count;
     queue_current = owned.current;
     queue_lazy_ranks = owned.lazy_ranks;
@@ -260,7 +261,7 @@ const char *player_queue_model_path_at(int physical_index) {
 bool player_queue_model_has_lazy_order(void) { return queue_lazy_ranks != NULL; }
 
 bool player_queue_model_is_stream_cache_path(const char *path) {
-    return path && strncmp(path, QUEUE_STREAM_CACHE_DIR, strlen(QUEUE_STREAM_CACHE_DIR)) == 0;
+    return path && strncmp(path, SUBSONIC_STREAM_CACHE_DIR, strlen(SUBSONIC_STREAM_CACHE_DIR)) == 0;
 }
 
 bool player_queue_model_has_resolved_sd_path(const char *music_root) {
@@ -362,6 +363,7 @@ bool player_queue_model_try_add_many(const char *const *new_paths, int count,
         if (queue_lazy_ranks) queue_lazy_ranks[pos + i] = -1;
     }
     free(copies);
+    queue_revision++;
     queue_count += count;
     queue_pending_count += count;
     queue_next_insert_index = pos + count;
@@ -370,25 +372,10 @@ bool player_queue_model_try_add_many(const char *const *new_paths, int count,
     return true;
 }
 
-bool player_queue_model_remove_pending(int offset) {
-    if (offset < 0 || offset >= queue_pending_count || queue_current < 0) return false;
-    int pos = queue_current + 1 + offset;
-    queue_shuffle_remove(pos);
-    free(queue_paths[pos]);
-    memmove(&queue_paths[pos], &queue_paths[pos + 1],
-            sizeof(char *) * (size_t)(queue_count - pos - 1));
-    if (queue_lazy_ranks)
-        memmove(&queue_lazy_ranks[pos], &queue_lazy_ranks[pos + 1],
-                sizeof(int) * (size_t)(queue_count - pos - 1));
-    queue_count--;
-    queue_pending_count--;
-    queue_next_insert_index = queue_pending_count > 0 ? queue_current + 1 + queue_pending_count : -1;
-    return true;
-}
-
 static bool materialize_display_order(int mode) {
     player_queue_display_snapshot_t snapshot = {0};
     if (!player_queue_model_display_snapshot(mode, &snapshot)) return false;
+    queue_revision++;  /* every order/path mutation bumps, not only the arming caller */
     int *order = snapshot.display_order;
     int count = snapshot.count;
     int current = snapshot.current;
@@ -472,6 +459,7 @@ player_queue_edit_result_t player_queue_model_edit_displayed(
             queue_shuffle_remove(from_display);
             memmove(&queue_lazy_ranks[from_display], &queue_lazy_ranks[from_display + 1],
                     (size_t)(queue_count - from_display - 1) * sizeof(*queue_lazy_ranks));
+            queue_revision++;
             queue_count--;
             free(queue_paths[from_display]);
             memmove(&queue_paths[from_display], &queue_paths[from_display + 1],
@@ -513,6 +501,7 @@ player_queue_edit_result_t player_queue_model_edit_displayed(
         memmove(queue_paths + from_display, queue_paths + from_display + 1,
                 (size_t)(queue_count - from_display - 1) * sizeof(*queue_paths));
         free(path);
+        queue_revision++;
         queue_count--;
         if (from_display <= pending_end) queue_pending_count--;
     } else {
@@ -567,6 +556,7 @@ bool player_queue_model_clear_to_current(int mode) {
         queue_snapshot = NULL;
         if (queue_file_index) file_browser_index_close(queue_file_index);
         queue_file_index = NULL;
+        queue_revision++;
         queue_count = 1;
         queue_current = 0;
         free(queue_shuffle_order);
@@ -583,6 +573,7 @@ bool player_queue_model_clear_to_current(int mode) {
         if (i != queue_current) free(queue_paths[i]);
     }
     queue_paths[0] = queue_paths[queue_current];
+    queue_revision++;
     queue_count = 1;
     queue_current = 0;
     if (queue_shuffle_order) {
@@ -613,6 +604,7 @@ bool player_queue_model_restart_displayed(int display_index, int mode, int *phys
     free(snapshot.display_order);
     free(queue_paths);
     free(queue_lazy_ranks);
+    queue_revision++;
     queue_paths = next_paths;
     queue_lazy_ranks = next_ranks;
     queue_current = display_index;
@@ -636,6 +628,7 @@ bool player_queue_model_delete_current(int *next_physical_out) {
     if (queue_lazy_ranks) {
         for (int i = deleted; i < queue_count - 1; i++) queue_lazy_ranks[i] = queue_lazy_ranks[i + 1];
     }
+    queue_revision++;
     queue_count--;
     if (queue_count == 0) {
         /* The GUI still performs audio stop and synchronous plugin notification
@@ -854,6 +847,36 @@ bool player_queue_model_checkpoint_snapshot(int mode, double position, queue_res
         return false;
     }
     *out = snapshot;
+    return true;
+}
+
+static uint64_t layout_hash_ints(uint64_t h, const int *values, int count) {
+    for (int i = 0; values && i < count; i++) h = (h ^ (uint32_t)values[i]) * 1099511628211ULL;
+    return h;
+}
+
+bool player_queue_model_checkpoint_header(int mode, double position,
+                                          queue_resume_header_t *out, uint64_t *layout_hash) {
+    if (!out || !layout_hash || queue_count <= 0) return false;
+    queue_resume_header_t header = {
+        .count = queue_count, .current = queue_current, .pending = queue_pending_count,
+        .mode = mode, .shuffle_pos = queue_shuffle_pos, .position = position
+    };
+    uint64_t hash = 14695981039346656037ULL;
+    if (mode_uses_shuffle_bag(mode)) {
+        ensure_shuffle_order_current();
+        header.shuffle_pos = queue_shuffle_pos;
+        header.has_order = queue_shuffle_order != NULL;
+        if (!header.has_order) return false;
+        header.has_continuation = mode == PLAY_MODE_SHUFFLE && queue_shuffle_continuation;
+        hash = layout_hash_ints(hash, queue_shuffle_order, queue_count);
+        if (header.has_continuation) hash = layout_hash_ints(hash, queue_shuffle_continuation, queue_count);
+    }
+    hash = layout_hash_ints(hash, &(int){queue_count}, 1);
+    hash = layout_hash_ints(hash, &(int){mode}, 1);
+    hash = layout_hash_ints(hash, &(int){header.has_order * 2 + header.has_continuation}, 1);
+    *out = header;
+    *layout_hash = hash;
     return true;
 }
 

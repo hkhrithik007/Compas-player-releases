@@ -38,6 +38,10 @@ typedef enum {
 typedef struct {
     library_thumbnail_cover_scope_t scope;
     int64_t target_song_id;
+    /* LIBRARY_THUMB_COVER_ALBUM: the album whose cached cover failures the worker forgets before
+     * it reloads (copied at start; NULL leaves the failure cache alone). */
+    const char *album;
+    const char *album_artist;
 } library_thumbnail_cover_request_t;
 
 typedef struct {
@@ -59,7 +63,8 @@ typedef void (*library_thumbnail_refresh_group_cb_t)(void);
 typedef void (*library_thumbnail_show_busy_cb_t)(library_thumbnail_cover_scope_t scope);
 
 /* All public methods and callbacks run on the LVGL thread unless explicitly
- * noted. Callbacks are synchronous. List/screen/overlay pointers are borrowed
+ * noted; the policy callback is the exception: the warmer thread also calls it,
+ * so it must be thread-safe. Callbacks are synchronous. List/screen/overlay pointers are borrowed
  * and must be registered before use. forget_list() is safe after deletion:
  * it compares pointer identities only and never dereferences the object. */
 void library_thumbnails_init(bool artist_images_enabled,
@@ -74,6 +79,37 @@ void library_thumbnails_decorate_group_row(lv_obj_t *list, lv_obj_t *row,
                                            lv_obj_t *image, int logical_index,
                                            int pool_slot, int64_t song_id,
                                            uint64_t artwork_key);
+/* Like the group-row decorator, for a lone cover image that is not a list row
+ * (the album page's hero): picture, placeholder and queueing only. The row's
+ * padding is not touched, and nothing is written that already holds the value. */
+void library_thumbnails_decorate_cover_image(lv_obj_t *list, lv_obj_t *row, lv_obj_t *image,
+                                             int64_t song_id, uint64_t artwork_key);
+/* Main loop, after a worker published: make the hand-off poll run now. */
+/* One row's leading image: `cover`, or the placeholder when NULL (see the definition). */
+void library_thumbnails_show_row_image(lv_obj_t *list, lv_obj_t *row, lv_obj_t *image, const lv_image_dsc_t *cover);
+void library_thumbnails_dispatch_ready(void);
+/* A visible-row decode is running or queued. */
+bool library_thumbnails_busy(void);
+/* Grows whenever a thumbnail (or a confirmed lack of one) lands in the cache. */
+uint32_t library_thumbnails_commit_count(void);
+/* Copies a cached album thumbnail (ALBUM_THUMBNAIL_PX square RGB565) for a page
+ * that draws its own tiles. False when it is not cached yet, or *out_no_art
+ * when the album is known to have no cover. */
+bool library_thumbnails_copy_artist_photo(uint64_t key, uint16_t * dst, bool * no_art);
+void library_thumbnails_request_artist_photo(lv_obj_t * list, int64_t song_id, uint64_t key,
+                                             metadata_db_group_kind_t kind, const char * name);
+bool library_thumbnails_copy_album(uint64_t artwork_key, uint16_t *dst, bool *out_no_art);
+/* Asks the shared pipeline to decode an album's thumbnail for `list` (the
+ * visible, bound list); a no-op when cached, queued or the list is not shown. */
+void library_thumbnails_request_album(lv_obj_t *list, int64_t song_id, uint64_t artwork_key);
+/* Music-menu press on Artists / Album Artists: start decoding the thumbnails of `rows` rows from
+ * `first_row` (the first row the list will show when it opens) on a background thread, so most are in the cache when the list is built. A no-op when
+ * the cache already holds them, other artwork work is running, or artist images are off.
+ * _collect() (the tap, just before the list is built) commits what has been staged by then. */
+void library_thumbnails_prewarm_artists(bool album_artists, int first_row, int rows);
+/* Stops a running or waiting prewarm without waiting for it (a drag, a cancelled press). */
+void library_thumbnails_prewarm_cancel(void);
+void library_thumbnails_prewarm_collect(void);
 void library_thumbnails_begin_view(lv_obj_t *list);
 void library_thumbnails_end_view(lv_obj_t *list);
 void library_thumbnails_group_rows_rebuilt(lv_obj_t *list);

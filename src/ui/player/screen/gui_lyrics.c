@@ -93,6 +93,7 @@ static int lyrics_load_generation = 0;
 
 typedef struct {
     uint8_t * cover_copy;
+    int cover_edge;
     int for_index;
     int lyrics_generation;
 } lyrics_backdrop_request_t;
@@ -282,9 +283,9 @@ static int current_lyrics_backdrop_for_index = -1;
 static int current_lyrics_backdrop_generation = -1;
 /* Blur the square cover to the display's fullscreen backdrop via the shared
  * frosted glass pipeline. Pure pixel math: safe on the backdrop worker thread. */
-static uint8_t * compute_lyrics_backdrop_bytes(const uint8_t * cover_bytes) {
+static uint8_t * compute_lyrics_backdrop_bytes(const uint8_t * cover_bytes, int edge) {
     return frosted_glass_blur_rgb565((const uint16_t *) cover_bytes,
-                                     COVER_ART_WIDTH, COVER_ART_HEIGHT,
+                                     edge, edge,
                                      LYRICS_BACKDROP_WIDTH, LYRICS_BACKDROP_HEIGHT,
                                      LYRICS_BACKDROP_BLUR_RADIUS, LYRICS_BACKDROP_BLUR_PASSES,
                                      LYRICS_BACKDROP_DARKEN_NUM, LYRICS_BACKDROP_DARKEN_DEN,
@@ -293,7 +294,7 @@ static uint8_t * compute_lyrics_backdrop_bytes(const uint8_t * cover_bytes) {
 static void * lyrics_backdrop_thread_func(void * arg) {
     lyrics_backdrop_request_t * req = (lyrics_backdrop_request_t *) arg;
     uint64_t t0 = db_log_now_ms();
-    lyrics_backdrop_result_bytes = compute_lyrics_backdrop_bytes(req->cover_copy);
+    lyrics_backdrop_result_bytes = compute_lyrics_backdrop_bytes(req->cover_copy, req->cover_edge);
     DB_LOG("LYRICS", "backdrop_compute_ms=%llu", (unsigned long long) (db_log_now_ms() - t0));
     lyrics_backdrop_result_for_index = req->for_index;
     lyrics_backdrop_result_generation = req->lyrics_generation;
@@ -333,15 +334,9 @@ static void launch_lyrics_backdrop_decode(void) {
     }
     lyrics_backdrop_request_t * req = malloc(sizeof(*req));
     if (!req) return;
-    req->cover_copy = malloc((size_t) COVER_ART_WIDTH * COVER_ART_HEIGHT * 2);
-    if (!req->cover_copy) { free(req); return; }
     req->for_index = gui_player_get_playlist_index();
-    if (!gui_player_copy_cover_rgb565(req->for_index, req->cover_copy,
-                                     (size_t) COVER_ART_WIDTH * COVER_ART_HEIGHT * 2)) {
-        free(req->cover_copy);
-        free(req);
-        return;
-    }
+    req->cover_copy = gui_player_copy_cover_rgb565(req->for_index, &req->cover_edge);
+    if (!req->cover_copy) { free(req); return; }
     req->lyrics_generation = lyrics_load_generation;
 
     atomic_store_explicit(&lyrics_backdrop_done_flag, false, memory_order_relaxed);
@@ -679,7 +674,7 @@ static void close_lyrics_screen(void) {
 
 /* The auto-close-on-track-change-with-no-lyrics path (lyrics_timer_cb())
  * still calls close_lyrics_screen() directly. A user's own right-swipe now
- * goes through gui_shell.c's live back-swipe instead (reveal-style, exiting
+ * goes through gui_shell_gestures.c's live back-swipe instead (reveal-style, exiting
  * to Player) once that candidate claims the press -- see gui_shell_back_
  * swipe_owns_press()'s own comment for why standing down here, not just
  * wait_release() at gesture-recognition time, is what actually prevents
@@ -745,7 +740,7 @@ static void lyrics_timer_update(bool animate_scroll) {
              * Real bug caught in cross-check: close_lyrics_screen() calls
              * nav_pop(), which does a REAL stack decrement and its own
              * screen_transition_slide(). A user's live back-swipe (still
-             * being dragged, gui_shell.c's back_swipe_tracking) already has
+             * being dragged, gui_shell_gestures.c's back_swipe_tracking) already has
              * slide_transition_active set, so that nested transition would
              * return NULL and fall back to an immediate lv_screen_load()
              * out from under the still-live-dragged overlay -- and the
@@ -1206,6 +1201,24 @@ void gui_lyrics_teardown(void) {
 
 lv_obj_t * gui_lyrics_get_screen(void) {
     return lyrics_screen;
+}
+
+bool gui_lyrics_is_visible(void) {
+    /* Teardown deletes the owned screen before the child globals are reset;
+     * do not inspect those possibly stale child pointers in that interval. */
+    if (!lyrics_screen) return false;
+    if (!lyrics_embedded) return lv_screen_active() == lyrics_screen;
+
+    /* An embedded pane can be prepared while its player/layout is hidden.
+     * Require both the active screen and LVGL's effective visibility, which
+     * includes hidden flags on the pane and all of its ancestors. */
+    if (lyrics_embedded_prepared_hidden) return false;
+    if (lyrics_list && lv_obj_is_valid(lyrics_list) &&
+        lv_obj_get_screen(lyrics_list) == lv_screen_active() &&
+        lv_obj_is_visible(lyrics_list)) return true;
+    return lyrics_empty_label && lv_obj_is_valid(lyrics_empty_label) &&
+        lv_obj_get_screen(lyrics_empty_label) == lv_screen_active() &&
+        lv_obj_is_visible(lyrics_empty_label);
 }
 
 void gui_lyrics_poll_load(void) {

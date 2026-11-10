@@ -32,6 +32,15 @@ typedef struct {
     int queue_sd_dirfd;
 } player_queue_install_t;
 
+/* The usual install: no current track, no shuffle state, no pinned queue fd. */
+static inline player_queue_install_t player_queue_install_new(char **paths, int count) {
+    player_queue_install_t install = {
+        .paths = paths, .count = count, .current = -1, .shuffle_pos = -1,
+        .next_insert_index = -1, .queue_sd_dirfd = -1
+    };
+    return install;
+}
+
 typedef enum {
     PLAYER_QUEUE_EDIT_OK,
     PLAYER_QUEUE_EDIT_STALE,
@@ -77,7 +86,6 @@ void player_queue_model_display_snapshot_free(player_queue_display_snapshot_t *s
  * a preflighted install transaction with its existing UI/audio effects. */
 bool player_queue_model_try_add_many(const char *const *paths, int count,
                                      int mode, int *added_out);
-bool player_queue_model_remove_pending(int offset);
 player_queue_edit_result_t player_queue_model_edit_displayed(
     uint64_t expected_revision, int from_display, int to_display, int mode);
 bool player_queue_model_select_displayed(uint64_t expected_revision,
@@ -122,6 +130,12 @@ int player_queue_model_advance_past_failed(int mode,
 /* Produces an owned physical-order queue_resume_t; caller frees/transfers it. */
 bool player_queue_model_checkpoint_snapshot(int mode, double position,
                                              queue_resume_t *out);
+/* The same header the snapshot above would carry, without copying any path,
+ * plus a hash of everything else in the file apart from the paths (queue size,
+ * play mode and the shuffle arrays). With an unchanged revision and hash, a
+ * rewrite of the header alone leaves the stored file equal to a full write. */
+bool player_queue_model_checkpoint_header(int mode, double position,
+                                          queue_resume_header_t *out, uint64_t *layout_hash);
 bool player_queue_model_save_as(const char *name, int mode, bool has_sd);
 
 #endif

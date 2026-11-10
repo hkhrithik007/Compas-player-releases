@@ -1,5 +1,4 @@
 #include "assets.h"
-#include "../effects/frosted_glass.h"
 #include "../appearance/gui_themes.h"
 
 #include "lvgl.h"
@@ -52,13 +51,20 @@ static const char * asset_path_intern(const char * value) {
     return e->value;
 }
 
-/* Resolves relative_path into host absolute path (or plain path) buffer,
+/* Resolves relative_path (or an absolute path, kept as is) into host absolute path (or plain path) buffer,
  * checking non-excluded plugin override first, then active native theme layer,
  * then stock fallback. On HOST_BUILD, any relative result is absolutized against
  * the process CWD so callers expecting absolute paths (like pill_row_apply_icon)
  * receive genuine absolute paths for all layers. */
 static bool asset_resolve_plain(const char * relative_path, char * out, size_t out_size) {
     if (!relative_path || !out || out_size == 0) return false;
+
+    /* An absolute path (e.g. a plugin's own image) is used verbatim; stock
+     * theme paths are always relative. */
+    if (relative_path[0] == '/') {
+        int n = snprintf(out, out_size, "%s", relative_path);
+        return (n > 0 && (size_t) n < out_size);
+    }
 
     char resolved[GUI_THEMES_MAX_PATH + 64];
     bool found = false;
@@ -100,19 +106,85 @@ static bool asset_resolve_plain(const char * relative_path, char * out, size_t o
     return (n > 0 && (size_t) n < out_size);
 }
 
+/* Resolving an asset probes the override and theme layers with access() and
+ * walks the intern list; list rows ask for the same few assets on every bind.
+ * The answer is remembered per relative path. It is dropped when the theme or
+ * its overrides change (assets_invalidate_path_cache()), and in any case after
+ * ASSET_MEMO_TTL_MS, so a file added or removed behind the player's back is
+ * still picked up. UI thread only, like the intern list itself. */
+#define ASSET_MEMO_SIZE 64
+#define ASSET_MEMO_TTL_MS 1000
+typedef struct {
+    char * relative;
+    const char * value;
+    uint32_t tick;
+    bool plain;
+} asset_memo_t;
+static asset_memo_t asset_memo[ASSET_MEMO_SIZE];
+
+static uint32_t asset_path_cache_epoch;
+
+uint32_t assets_path_cache_epoch(void) { return asset_path_cache_epoch; }
+
+void assets_invalidate_path_cache(void) {
+    asset_path_cache_epoch++;
+    for (int i = 0; i < ASSET_MEMO_SIZE; i++) {
+        free(asset_memo[i].relative);
+        asset_memo[i].relative = NULL;
+        asset_memo[i].value = NULL;
+    }
+    /* Header probes of file images are cached by path too. */
+    lv_image_header_cache_drop(NULL);
+}
+
+static asset_memo_t * asset_memo_slot(const char * relative_path, bool plain) {
+    uint32_t h = 2166136261u;
+    for (const char * c = relative_path; *c; c++) h = (h ^ (uint8_t) *c) * 16777619u;
+    return &asset_memo[(h ^ (plain ? 0x9e3779b9u : 0u)) % ASSET_MEMO_SIZE];
+}
+
+static const char * asset_memo_get(const char * relative_path, bool plain) {
+    asset_memo_t * slot = asset_memo_slot(relative_path, plain);
+    if (slot->relative && slot->value && slot->plain == plain && !strcmp(slot->relative, relative_path) &&
+        lv_tick_elaps(slot->tick) < ASSET_MEMO_TTL_MS)
+        return slot->value;
+    return NULL;
+}
+
+static const char * asset_memo_put(const char * relative_path, bool plain, const char * value) {
+    asset_memo_t * slot = asset_memo_slot(relative_path, plain);
+    if (!value) return NULL;
+    if (!slot->relative || strcmp(slot->relative, relative_path)) {
+        char * copy = strdup(relative_path);
+        if (!copy) return value;
+        free(slot->relative);
+        slot->relative = copy;
+    }
+    slot->value = value;
+    slot->plain = plain;
+    slot->tick = lv_tick_get();
+    return value;
+}
+
 const char * asset_path(const char * relative_path) {
+    if (!relative_path) return NULL;
+    const char * memo = asset_memo_get(relative_path, false);
+    if (memo) return memo;
     char plain[GUI_THEMES_MAX_PATH + 320];
     if (!asset_resolve_plain(relative_path, plain, sizeof(plain))) return NULL;
     char s_buf[GUI_THEMES_MAX_PATH + 350];
     int n = snprintf(s_buf, sizeof(s_buf), "S:%s", plain);
     if (n <= 0 || (size_t) n >= sizeof(s_buf)) return NULL;
-    return asset_path_intern(s_buf);
+    return asset_memo_put(relative_path, false, asset_path_intern(s_buf));
 }
 
 const char * asset_path_plain(const char * relative_path) {
+    if (!relative_path) return NULL;
+    const char * memo = asset_memo_get(relative_path, true);
+    if (memo) return memo;
     char plain[GUI_THEMES_MAX_PATH + 320];
     if (!asset_resolve_plain(relative_path, plain, sizeof(plain))) return NULL;
-    return asset_path_intern(plain);
+    return asset_memo_put(relative_path, true, asset_path_intern(plain));
 }
 
 const char * asset_stock_root(void) {
@@ -237,26 +309,6 @@ void asset_decoded_image_close(asset_decoded_image_t * image) {
     free(image->path);
     free(image->pristine_pixels);
     memset(image, 0, sizeof(*image));
-}
-
-bool asset_decoded_gradient_open(asset_decoded_image_t * image, const char * relative_path) {
-    if (!asset_decoded_image_open(image, relative_path)) return false;
-    const lv_draw_buf_t * buffer = image->decoder.decoded;
-    if (buffer->header.cf != LV_COLOR_FORMAT_ARGB8888) return true;
-    /* Keep the decoder's owned ARGB buffer and its alpha plane. Expanding
-     * the dithered 565 result back to 888 makes the eventual framebuffer
-     * conversion exact without changing LVGL's image/decoder ownership. */
-    for (uint32_t y = 0; y < buffer->header.h; ++y) {
-        lv_color32_t * row = (lv_color32_t *) (buffer->data + y * buffer->header.stride);
-        for (uint32_t x = 0; x < buffer->header.w; ++x) {
-            uint16_t pixel = rgb888_to_565_dithered(row[x].red, row[x].green, row[x].blue, x, y);
-            uint8_t r = (pixel >> 11) & 31, g = (pixel >> 5) & 63, b = pixel & 31;
-            row[x].red = (r << 3) | (r >> 2);
-            row[x].green = (g << 2) | (g >> 4);
-            row[x].blue = (b << 3) | (b >> 2);
-        }
-    }
-    return true;
 }
 
 const void * asset_decoded_image_source(const asset_decoded_image_t * image) {

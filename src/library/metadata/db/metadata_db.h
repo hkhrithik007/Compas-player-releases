@@ -1,6 +1,7 @@
 #ifndef METADATA_DB_H
 #define METADATA_DB_H
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -35,7 +36,8 @@ typedef enum {
     METADATA_DB_ALBUM_SORT_NAME = 0,
     METADATA_DB_ALBUM_SORT_RECENT = 1,
     METADATA_DB_ALBUM_SORT_YEAR = 2,
-    METADATA_DB_ALBUM_SORT_ALBUM_ARTIST_YEAR = 3
+    METADATA_DB_ALBUM_SORT_ALBUM_ARTIST_YEAR = 3,
+    METADATA_DB_ALBUM_SORT_REVERSE = 4
 } metadata_db_album_sort_t;
 
 typedef enum {
@@ -62,7 +64,6 @@ int metadata_db_snapshot_dup_directory_fd(const metadata_db_snapshot_t *snapshot
 /* True while the currently open database still belongs to the mounted
  * directory captured at open time. */
 bool metadata_db_storage_current(void);
-int metadata_db_dup_directory_fd(void);
 bool metadata_db_numeric_write_failed(void);
 void metadata_db_close(void);
 
@@ -151,7 +152,6 @@ bool metadata_db_catalog_get_revision(char *out_revision, size_t out_size);
 /* Nonblocking revision validation for UI polling. Returns BUSY if another
  * metadata operation currently owns the lock. */
 metadata_db_catalog_result_t metadata_db_try_catalog_revision_check(const char *expected_revision);
-bool metadata_db_try_catalog_revision_matches(const char *expected_revision);
 
 /* Opens a pinned catalog snapshot and resolves a full collection into title
  * ranks. Album results are ordered by disc, track (unknown last), then path,
@@ -204,6 +204,8 @@ int64_t metadata_db_get_song_count(void);
  * own paging math (total row count) without materializing the groups
  * themselves. */
 void metadata_db_get_group_counts(int * out_artist_count, int * out_album_artist_count, int * out_album_count);
+/* Number of distinct genres (case-insensitive, capped), served from the cached genre list; 0 when no database. */
+int metadata_db_get_genre_count(void);
 
 /* Offset-paginated page of songs ordered by first_seen DESC (path
  * case-insensitive tiebreak) -- backs the Recently Added screen's compact_list_set_paged_
@@ -243,8 +245,38 @@ int metadata_db_get_album_artist_songs(const char * album_artist, int offset, so
 int metadata_db_get_album_songs(const char * album, const char * album_artist, int offset, song_row_t * out_rows,
                                  int max_rows);
 
+/* mtime and size of a song's database row (the identity the tagcache and the
+ * duration cache key a file by). False when the path is not in the library. */
+bool metadata_db_get_song_identity(const char * path, int32_t * out_mtime, int32_t * out_size);
+/* Visit every song once, taking the database lock in short windows, so
+ * workers can aggregate a whole library or one artist without holding it.
+ * Stops early (false) when `visit` returns false, the database closes, or the
+ * generation changes underneath a library walk. */
+bool metadata_db_walk_song_identities(bool (*visit)(const char * path, int32_t mtime, int32_t size, void * user),
+                                      void * user);
+/* The same for every song of one ARTIST or ALBUM_ARTIST group, in index order.
+ * Copies a bounded batch under the lock and calls `visit` after releasing it;
+ * only path, album, album_artist, genre and release_year of `song` are filled
+ * (the rest is empty). Aborts (false) when the database closes or its
+ * generation changes between batches, like the library walk above. */
+bool metadata_db_walk_group_songs(metadata_db_group_kind_t kind, const char * name,
+                                  bool (*visit)(const song_row_t * song, int32_t mtime, int32_t size, void * user),
+                                  void * user);
+
+/* Calls visit for each song whose genre matches (case-insensitively), in title
+ * order, at most max_songs of them, from one pass over the song list. Safe from
+ * a worker thread: the database lock is not held while visit runs, nor across the
+ * whole scan. Returns false when visit stopped it, the database was replaced
+ * mid-walk, cancel (optional) was set, or memory ran out; the matches seen so
+ * far were still visited. */
+bool metadata_db_walk_genre_songs(const char * genre, int max_songs,
+                                  bool (*visit)(const song_row_t * song, void * user), void * user,
+                                  const atomic_bool * cancel);
+
 bool metadata_db_get_song_by_id(int64_t id, song_row_t * out_row);
 bool metadata_db_get_song_by_path(const char * path, song_row_t * out_row);
+/* Same row with the stored album artist; the scanner compares tags with this. */
+bool metadata_db_get_song_by_path_raw(const char * path, song_row_t * out_row);
 /* Nonblocking display hint backed only by rows already copied from the
  * database. Returns false on a miss or when the small cache is busy. This is
  * not authoritative for fresh ReplayGain or other playback metadata. */
@@ -281,6 +313,7 @@ typedef enum {
     METADATA_DB_AZ_ALBUM,
     METADATA_DB_AZ_ALL_SONGS
 } metadata_db_az_kind_t;
+void metadata_db_get_album_az_table_sorted(metadata_db_album_sort_t sort, int out_table[27]);
 void metadata_db_get_az_table(metadata_db_az_kind_t kind, int out_table[27]);
 
 typedef struct {
@@ -362,12 +395,17 @@ int metadata_db_get_songs_filtered_page(const char * query, const char * artist_
  * out_rows[i].album_artist carries the album artist identity. Offset-paginated. */
 int metadata_db_get_albums_page_filtered(const char * artist_or_album_artist_filter, int offset, int max_rows,
                                          group_row_t * out_rows);
+/* Walks a whole group list (artists, album artists, genres, or albums when
+ * by_albums, optionally filtered as above) page by page. Zero-initialize the
+ * walk, call until walk->done. Returns rows written, or -1 when the db is not
+ * ready, a record is unreadable, or the db was reloaded/changed since the
+ * first page; the list is then incomplete and must not be presented as whole. */
+typedef struct { int next; bool started, done; int32_t generation; uint32_t incarnation; } metadata_db_group_walk_t;
+int metadata_db_group_walk_page(metadata_db_group_walk_t * walk, bool by_albums, metadata_db_group_kind_t kind,
+                                const char * album_filter, int max_rows, group_row_t * out_rows);
 int metadata_db_get_albums_page_sorted(const char * artist_filter, metadata_db_album_sort_t sort,
                                       int offset, int max_rows, group_row_t * out_rows);
-int metadata_db_get_album_sorted_offset(metadata_db_album_sort_t sort, const char * album,
-                                        const char * album_artist);
 int metadata_db_album_canonical_to_sorted(metadata_db_album_sort_t sort, int canonical_rank);
-int metadata_db_album_sorted_to_canonical(metadata_db_album_sort_t sort, int sorted_rank);
 bool metadata_db_album_sort_available(metadata_db_album_sort_t sort);
 
 /* Exact Artist/Album-Artist drill-down variants. Unlike the legacy remote

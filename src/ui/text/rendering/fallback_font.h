@@ -23,11 +23,25 @@ extern lv_font_t app_font_player_meta;
 /* Large fixed-size clock/display text, independent of the Font Size tier. */
 extern lv_font_t app_font_display;
 
+/* Fixed-size captions that cannot use the tiered handles (12 px). Follows the
+ * custom font like fallback_font_fixed(), with the multilingual fallbacks
+ * attached once fallback_font_load_now() has run. */
+const lv_font_t * fallback_font_ui_12(void);
+
+/* Fixed-size handles for 12, 16, 18 and 28 px, independent of the Font Size
+ * tier. They have stable addresses and are rebuilt with every font change, so
+ * they follow the custom font (Montserrat copy and fallbacks behind it). Any
+ * other size returns the plain compiled Montserrat. Valid after
+ * fallback_font_init_early(). */
+const lv_font_t * fallback_font_fixed(int px);
+
 /* Initializes the font stack metrics early at startup (before screens are built) */
 void fallback_font_init_early(int font_size_tier, int lyrics_font_size_tier);
 
 /* Completes the fallback chain after startup screens are built; also used for live switch. */
 void fallback_font_load_now(void);
+/* True once startup multilingual font loading has begun on the UI thread. */
+bool fallback_font_is_loaded(void);
 
 /* Transactionally rebuilds only the four general-UI font handles for a
  * Settings -> Display -> Font Size tier.  The active custom face and, once

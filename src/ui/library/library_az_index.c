@@ -9,7 +9,7 @@
 #include "../text/rendering/fallback_font.h"
 #include "../widgets/builders/screen_builders.h"
 
-#define AZ_INDEX_BINDING_COUNT 4
+#define AZ_INDEX_BINDING_COUNT 7 /* 4 library lists, 2 Subsonic lists, 1 spare */
 #define AZ_INDEX_HIDE_DELAY_MS 900
 
 typedef struct {
@@ -19,6 +19,8 @@ typedef struct {
     lv_obj_t * popup;
     lv_obj_t * popup_label;
     metadata_db_az_kind_t db_kind;
+    library_az_index_table_t table; /* set for an in-memory list, which has no db_kind */
+    library_az_index_allowed_t allowed; /* optional, for a table list */
 } az_index_binding_t;
 
 static az_index_binding_t az_index_bindings[AZ_INDEX_BINDING_COUNT];
@@ -54,6 +56,16 @@ static void az_index_visibility_timeout_cb(lv_timer_t * timer) {
     lv_timer_pause(az_index_visibility_timer);
 }
 
+static bool az_binding_allowed(const az_index_binding_t * b) {
+    return b->allowed ? b->allowed() : (!strip_allowed || strip_allowed(b->list));
+}
+
+bool library_az_index_list_allowed(lv_obj_t * list) {
+    for (int i = 0; i < az_index_registered_count; i++)
+        if (az_index_bindings[i].list == list) return az_binding_allowed(&az_index_bindings[i]);
+    return true;
+}
+
 static void az_index_scroll_visibility_cb(lv_event_t * e) {
     lv_obj_t * list = lv_event_get_target(e);
     az_index_binding_t * binding = NULL;
@@ -61,7 +73,7 @@ static void az_index_scroll_visibility_cb(lv_event_t * e) {
         if (az_index_bindings[i].list == list) { binding = &az_index_bindings[i]; break; }
     }
     if (!binding) return;
-    if (strip_allowed && !strip_allowed(binding->list)) {
+    if (!az_binding_allowed(binding)) {
         lv_obj_add_flag(binding->strip, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -78,17 +90,62 @@ static void az_index_scroll_visibility_cb(lv_event_t * e) {
     lv_timer_resume(az_index_visibility_timer);
 }
 
+/* Ends a drag whose binding is going away. Its popup may already be deleted,
+ * so only the state is cleared. */
+static void cancel_drag_state(void) {
+    az_index_dragging = false;
+    az_index_press_judged = false;
+    az_index_active_binding = NULL;
+    if (az_index_drag_timer) lv_timer_pause(az_index_drag_timer);
+}
+
+/* Drops the bindings of `screen`, or the library's own (db-backed) ones when
+ * `screen` is NULL. The others move down; a dragged one keeps its pointer. */
+static void drop_bindings(lv_obj_t * screen) {
+    int kept = 0;
+    for (int i = 0; i < az_index_registered_count; i++) {
+        az_index_binding_t * b = &az_index_bindings[i];
+        if (screen ? b->screen == screen : !b->table) {
+            if (b == az_index_active_binding) cancel_drag_state();
+            continue;
+        }
+        if (b == az_index_active_binding) az_index_active_binding = &az_index_bindings[kept];
+        lv_obj_add_flag(b->strip, LV_OBJ_FLAG_HIDDEN);
+        az_index_bindings[kept++] = *b;
+    }
+    az_index_registered_count = kept;
+    az_index_visibility_binding = NULL;
+}
+
 void library_az_index_reset_bindings(void) {
     if (az_index_visibility_timer) {
         lv_timer_delete(az_index_visibility_timer);
         az_index_visibility_timer = NULL;
     }
-    az_index_visibility_binding = NULL;
-    az_index_registered_count = 0;
+    drop_bindings(NULL);
 }
 
-void library_az_index_register(lv_obj_t * screen, lv_obj_t * list,
-                               metadata_db_az_kind_t db_kind) {
+void library_az_index_unregister(lv_obj_t * screen) {
+    if (!screen) return;
+    if (az_index_active_binding && az_index_active_binding->screen == screen) library_az_index_reset_drag();
+    drop_bindings(screen);
+}
+
+lv_obj_t * library_az_index_bubble_create(lv_obj_t * parent, lv_obj_t ** label) {
+    lv_obj_t * bubble = lv_image_create(parent);
+    lv_image_set_src(bubble, asset_path("touch_list/a_z_result_bg.png"));
+    lv_obj_center(bubble);
+    lv_obj_add_flag(bubble, LV_OBJ_FLAG_HIDDEN);
+    *label = lv_label_create(bubble);
+    lv_obj_set_style_text_font(*label, &app_font_28, 0);
+    lv_obj_add_style(*label, &style_theme_text_primary, 0);
+    lv_obj_center(*label);
+    return bubble;
+}
+
+static bool register_strip(lv_obj_t * screen, lv_obj_t * list, metadata_db_az_kind_t db_kind,
+                           library_az_index_table_t table, library_az_index_allowed_t allowed) {
+    if (az_index_registered_count >= AZ_INDEX_BINDING_COUNT) return false;
     /* Not touch_list/a_z.png -- confirmed via pixel sampling that stock
      * asset is a fully opaque solid-black rectangle with the letters
      * painted in (alpha=255 everywhere, RGB (0,0,0) in the "empty" areas),
@@ -105,7 +162,9 @@ void library_az_index_register(lv_obj_t * screen, lv_obj_t * list,
     int32_t top = STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT;
     int32_t display_h = lv_display_get_vertical_resolution(lv_display_get_default());
     int32_t available_h = display_h - top - HOME_INDICATOR_CONTENT_INSET;
-#if defined(BOARD_R3II_2025)
+#if defined(BOARD_TEMPOTEC_V1)
+    const lv_font_t * strip_font = &lv_font_montserrat_12;
+#elif defined(BOARD_R3II_2025)
     const lv_font_t * strip_font = &lv_font_montserrat_14;
 #else
     const lv_font_t * strip_font = &lv_font_montserrat_20;
@@ -113,9 +172,9 @@ void library_az_index_register(lv_obj_t * screen, lv_obj_t * list,
     int32_t line_h = lv_font_get_line_height(strip_font);
     lv_obj_set_style_text_font(strip, strip_font, 0);
     lv_obj_set_width(strip, BOARD_SCALE_PX(30));
-    lv_obj_set_style_pad_right(strip, BOARD_SCALE_PX(4), 0);
     lv_obj_add_style(strip, &style_theme_text_primary, 0);
-    lv_obj_set_style_text_align(strip, LV_TEXT_ALIGN_RIGHT, 0);
+    /* Centred: right-aligned glyphs of different widths make a ragged column. */
+    lv_obj_set_style_text_align(strip, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_bg_opa(strip, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(strip, 0, 0);
     lv_obj_remove_flag(strip, LV_OBJ_FLAG_SCROLLABLE);
@@ -128,7 +187,11 @@ void library_az_index_register(lv_obj_t * screen, lv_obj_t * list,
     if (line_h * 27 + line_space * 26 > available_h) line_space--;
     /* Compress spacing on shorter panels while keeping board-sized glyphs.
      * Touches map to the column's final measured bounds. */
+#if defined(BOARD_TEMPOTEC_V1)
+    if (line_space < -9) line_space = -9;
+#else
     if (line_space < -6) line_space = -6;
+#endif
     if (line_space > 3) line_space = 3;
     lv_obj_set_style_text_line_space(strip, line_space, 0);
     /* Top edge (the "A") lines up with the list's own top edge; the
@@ -139,22 +202,28 @@ void library_az_index_register(lv_obj_t * screen, lv_obj_t * list,
      * compact-list siblings. */
     lv_obj_align(strip, LV_ALIGN_TOP_RIGHT, 0, top);
     lv_obj_add_flag(strip, LV_OBJ_FLAG_HIDDEN);
+    /* The strip sits over the list's right edge while it scrolls: the scroll blit copies only what
+     * lies left of it and redraws this column each step. */
+    lv_obj_set_scroll_blit_fixed_column(list, strip);
 
-    lv_obj_t * popup = lv_image_create(screen);
-    lv_image_set_src(popup, asset_path("touch_list/a_z_result_bg.png"));
-    lv_obj_center(popup);
-    lv_obj_add_flag(popup, LV_OBJ_FLAG_HIDDEN);
-
-    lv_obj_t * popup_label = lv_label_create(popup);
-    lv_obj_set_style_text_font(popup_label, &app_font_28, 0);
-    lv_obj_add_style(popup_label, &style_theme_text_primary, 0);
-    lv_obj_center(popup_label);
+    lv_obj_t * popup_label;
+    lv_obj_t * popup = library_az_index_bubble_create(screen, &popup_label);
 
     az_index_bindings[az_index_registered_count++] =
-        (az_index_binding_t){ screen, list, strip, popup, popup_label, db_kind };
+        (az_index_binding_t){ screen, list, strip, popup, popup_label, db_kind, table, allowed };
     lv_obj_add_event_cb(list, az_index_scroll_visibility_cb, LV_EVENT_SCROLL_BEGIN, NULL);
     lv_obj_add_event_cb(list, az_index_scroll_visibility_cb, LV_EVENT_SCROLL, NULL);
     lv_obj_add_event_cb(list, az_index_scroll_visibility_cb, LV_EVENT_SCROLL_END, NULL);
+    return true;
+}
+
+void library_az_index_register(lv_obj_t * screen, lv_obj_t * list, metadata_db_az_kind_t db_kind) {
+    register_strip(screen, list, db_kind, NULL, NULL);
+}
+
+bool library_az_index_register_table(lv_obj_t * screen, lv_obj_t * list, library_az_index_table_t table,
+                                     library_az_index_allowed_t allowed) {
+    return register_strip(screen, list, METADATA_DB_AZ_ALL_SONGS, table, allowed);
 }
 
 lv_obj_t * library_az_index_strip_for_screen(lv_obj_t * screen) {
@@ -194,7 +263,7 @@ void library_az_index_poll(lv_timer_t * timer) {
          * upward list swipe that drifts rightward lands in the strip near
          * the end of its travel, silently changes owner, and jumps the list
          * to a letter. Deciding at press-down is the same latching
-         * drag_adjust_press_owned (gui_shell.c) already uses for sliders,
+         * drag_adjust_press_owned (gui_shell_gestures.c) already uses for sliders,
          * and it is what the report itself asked for. The press-begun-
          * before-the-strip-appeared case is given up deliberately: the
          * strip is not on screen to aim at then anyway, so nothing is lost
@@ -205,6 +274,7 @@ void library_az_index_poll(lv_timer_t * timer) {
         az_index_binding_t * b = find_az_binding_for_screen(lv_screen_active());
         if (!b) return;
         if (lv_obj_has_flag(b->strip, LV_OBJ_FLAG_HIDDEN)) return;
+        if (b->allowed && !b->allowed()) return; /* a stale strip after search */
 
         lv_area_t area;
         lv_obj_get_coords(b->strip, &area);
@@ -218,7 +288,8 @@ void library_az_index_poll(lv_timer_t * timer) {
          * has no entries ("jump forward to nearest match"). Computed fresh
          * on every touch-down from the already-sorted in-memory index
          * (metadata_db_get_az_table()). */
-        metadata_db_get_az_table(b->db_kind, az_index_jump_table);
+        if (b->table) b->table(az_index_jump_table);
+        else metadata_db_get_az_table(b->db_kind, az_index_jump_table);
         lv_obj_remove_flag(b->popup, LV_OBJ_FLAG_HIDDEN);
     } else if (!pressed) {
         lv_obj_add_flag(az_index_active_binding->popup, LV_OBJ_FLAG_HIDDEN);
@@ -240,7 +311,6 @@ void library_az_index_poll(lv_timer_t * timer) {
     if (letter_idx > 26) letter_idx = 26;
 
     int target = az_index_jump_table[letter_idx];
-    if (target >= 0 && b->db_kind == METADATA_DB_AZ_ALL_SONGS) target++; /* All Songs' Play All row */
     if (target >= 0) compact_list_scroll_to_index(b->list, target);
 
     char letter = (letter_idx < 26) ? (char) ('A' + letter_idx) : '#';
@@ -270,7 +340,7 @@ void library_az_index_reset_drag(void) {
     }
     az_index_dragging = false;
     /* Safe to clear even mid-press: this pauses the timer below, and it is
-     * only ever resumed on a raw press-DOWN edge (gui_shell.c's indev
+     * only ever resumed on a raw press-DOWN edge (gui_shell_gestures.c's indev
      * hooks), so the remainder of an in-flight press cannot be re-judged at
      * a drifted position. Leaving it set would instead disable the strip
      * for the whole of the NEXT press. */
