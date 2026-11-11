@@ -1,54 +1,11 @@
-
-name: Build Compass Player Firmware
-
-on:
-  push:
-    branches:
-      - main
-    tags:
-      - "v*"
-
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-concurrency:
-  group: compass-player-firmware-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  build:
-    name: Build Compass Player
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-
-    steps:
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 1
-
-      # ============================================================
-      # INSTALL MIPS TOOLCHAIN
-      # ============================================================
-
-      - name: Install MIPS musl toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ ! -x scripts/install_mips_toolchain.sh ]]; then
-            echo "::error::Missing scripts/install_mips_toolchain.sh"
+            echo "::error::Missing or non-executable $TOOLCHAIN_INSTALLER"
+            echo "Repository root: $(pwd)"
+            echo "Available toolchain scripts:"
+            find scripts -maxdepth 4 -type f -name '*toolchain*.sh' -print 2>/dev/null || true
             exit 1
           fi
 
-          toolchain_dir="$(scripts/install_mips_toolchain.sh "$RUNNER_TEMP")"
+          toolchain_dir="$("$TOOLCHAIN_INSTALLER" "$RUNNER_TEMP")"
 
           if [[ ! -x "$toolchain_dir/bin/mipsel-linux-musl-gcc" ]]; then
             echo "::error::MIPS GCC was not installed correctly"
