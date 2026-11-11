@@ -1,3 +1,51 @@
+
+name: Build Compass Player Firmware
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: compass-player-firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Compass Player
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      # ============================================================
+      # INSTALL MIPS TOOLCHAIN
+      # ============================================================
+
+      - name: Install MIPS musl toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TOOLCHAIN_INSTALLER="scripts/tools/toolchain/install_mips_toolchain.sh"
+
+          if [[ ! -f "$TOOLCHAIN_INSTALLER" || ! -x "$TOOLCHAIN_INSTALLER" ]]; then
             echo "::error::Missing or non-executable $TOOLCHAIN_INSTALLER"
             echo "Repository root: $(pwd)"
             echo "Available toolchain scripts:"
