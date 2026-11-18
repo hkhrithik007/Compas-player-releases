@@ -15,8 +15,10 @@
 #include "../../../core/persistence/settings.h"
 #include "../../../library/metadata/parsing/metadata.h"
 #include <limits.h>
+#include "../../../core/process/worker_thread.h"
 
 #include "../../../library/text/lyrics/lyrics.h"
+#include "../../../library/remote/subsonic/subsonic_cache.h"
 #include "../lyrics/lyrics_layout.h"
 #include "../../effects/frosted_glass.h"
 #include "../../text/rendering/fallback_font.h"
@@ -105,6 +107,8 @@ typedef struct {
     int generation;
     int for_index;
     char track_path[PATH_MAX];
+    subsonic_server_t server;
+    char song_id[64], artist[128], title[128];
 } lyrics_load_request_t;
 extern player_settings_t current_settings;
 extern lv_font_t app_font_22;
@@ -119,6 +123,7 @@ static lv_obj_t * lyrics_empty_label;
 static lv_obj_t * lyrics_plain_label; /* current_lyrics_plain_mode's own display -- see its own comment */
 static lv_obj_t * lyrics_active_marker;
 static lv_timer_t * lyrics_timer;
+static bool lyrics_follow_scroll_frame;
 static bool lyrics_embedded = false;
 /* Row width of the embedded pane (a layout's lyrics_area may be narrower than
  * the screen), reset when it is hidden, and the layout's look. */
@@ -144,6 +149,46 @@ static int lyrics_load_result_generation;
 static int lyrics_load_result_for_index;
 static bool lyrics_load_result_ok;
 static lyrics_doc_t lyrics_load_result_doc;
+static void lyrics_follow_scroll_exec_cb(void * var, int32_t value) {
+    lv_obj_t * list = var;
+    if (!list) return;
+    lyrics_follow_scroll_frame = true;
+    lv_obj_scroll_to_y(list, value, LV_ANIM_OFF);
+    lyrics_follow_scroll_frame = false;
+}
+
+static void lyrics_cancel_follow_scroll(void) {
+    if (lyrics_list) lv_anim_delete(lyrics_list, lyrics_follow_scroll_exec_cb);
+}
+
+static void lyrics_scroll_follow_to(int32_t target, bool animate) {
+    if (!lyrics_list) return;
+    lyrics_cancel_follow_scroll();
+    int32_t start = lv_obj_get_scroll_y(lyrics_list);
+    /* Adjacent lyric lines animate briefly; larger jumps go directly to the target. */
+    if (!animate || gui_anims_off() || start == target) {
+        lv_obj_scroll_to_y(lyrics_list, target, LV_ANIM_OFF);
+        return;
+    }
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, lyrics_list);
+    lv_anim_set_values(&anim, start, target);
+    lv_anim_set_duration(&anim, gui_anim_ms(120));
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_set_exec_cb(&anim, lyrics_follow_scroll_exec_cb);
+    lv_anim_start(&anim);
+}
+
+static void lyrics_scroll_lifecycle_event_cb(lv_event_t * e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_DELETE) {
+        lv_anim_delete(lv_event_get_current_target(e), lyrics_follow_scroll_exec_cb);
+    } else if (code == LV_EVENT_PRESSED) {
+        lyrics_cancel_follow_scroll();
+    }
+}
+
 /* Set alongside lyrics_load_result_ok when a source (sidecar or embedded
  * tag) had text but no [mm:ss.xx] timestamps to parse into lyrics_load_
  * result_doc -- see lyrics_load_thread_func()'s own comment. Mutually
@@ -162,12 +207,85 @@ static char * lyrics_load_result_plain_text; /* malloc'd, only meaningful when l
  * wrongly accept the stale result for it. A strictly increasing counter
  * has no such collision. */
 static bool lyrics_load_pending_valid = false;
-static int lyrics_load_pending_for_index;
-static char lyrics_load_pending_path[PATH_MAX];
+static lyrics_load_request_t lyrics_load_pending;
+static lyrics_load_request_t lyrics_remote_deferred;
+/* Server lyrics wait until the view is visible. A failure retries once the view is
+ * hidden and shown again; LOADING_* only records which of the two the failure lands in. */
+typedef enum {
+    REMOTE_LYRICS_NONE,
+    REMOTE_LYRICS_WAITING,
+    REMOTE_LYRICS_LOADING_VISIBLE,
+    REMOTE_LYRICS_LOADING_HIDDEN,
+    REMOTE_LYRICS_FAILED
+} remote_lyrics_state_t;
+static remote_lyrics_state_t lyrics_remote_state;
+static bool lyrics_load_result_failed;
+static http_cancel_token_t lyrics_cancel;
+static bool lyrics_cancel_live;
+
+/* Two bounded song results survive reopening the view and a quick back/next. */
+static struct {
+    char server_key[SUBSONIC_CACHE_KEY_SIZE];
+    char song_id[64];
+    char * text;
+    bool valid, synced;
+} remote_lyrics_cache[2];
+static unsigned remote_lyrics_cache_next;
+
+static void cancel_lyrics_request(void) {
+    if (lyrics_cancel_live) http_cancel_token_cancel(&lyrics_cancel);
+}
+
+static void destroy_lyrics_cancel(void) {
+    http_cancel_token_destroy(&lyrics_cancel);
+    lyrics_cancel_live = false;
+}
+
+static char * load_remote_lyrics(const lyrics_load_request_t * req, bool * synced) {
+    char key[SUBSONIC_CACHE_KEY_SIZE];
+    subsonic_cache_server_key(&req->server, key);
+    for (int i = 0; i < 2; ++i) {
+        if (!remote_lyrics_cache[i].valid || strcmp(remote_lyrics_cache[i].song_id, req->song_id) ||
+            strcmp(remote_lyrics_cache[i].server_key, key)) continue;
+        *synced = remote_lyrics_cache[i].synced;
+        return remote_lyrics_cache[i].text ? strdup(remote_lyrics_cache[i].text) : NULL;
+    }
+    char * text = NULL;
+    if (!subsonic_get_lyrics(&req->server, req->song_id, req->artist, req->title,
+                             &text, synced, &lyrics_cancel)) {
+        lyrics_load_result_failed = true;
+        return NULL;
+    }
+    if (http_cancel_token_is_cancelled(&lyrics_cancel)) { free(text); return NULL; }
+    if (text && strnlen(text, LYRICS_MAX_FILE_BYTES + 1U) > LYRICS_MAX_FILE_BYTES) {
+        free(text);
+        return NULL;
+    }
+    unsigned slot = remote_lyrics_cache_next++ % 2;
+    free(remote_lyrics_cache[slot].text);
+    remote_lyrics_cache[slot].text = text ? strdup(text) : NULL;
+    remote_lyrics_cache[slot].valid = !text || remote_lyrics_cache[slot].text;
+    remote_lyrics_cache[slot].synced = *synced;
+    snprintf(remote_lyrics_cache[slot].server_key, sizeof(remote_lyrics_cache[slot].server_key), "%s", key);
+    snprintf(remote_lyrics_cache[slot].song_id, sizeof(remote_lyrics_cache[slot].song_id), "%s", req->song_id);
+    return text;
+}
+static void lyrics_update_empty_text(void) {
+    if (!lyrics_empty_label) return;
+    bool loading = (lyrics_load_active || lyrics_load_pending_valid) &&
+                   current_lyrics_doc_generation != lyrics_load_generation;
+    const char * text = loading ? TR("Loading lyrics") : TR("No lyrics for this song");
+    if (strcmp(lv_label_get_text(lyrics_empty_label), text) != 0)
+        lv_label_set_text(lyrics_empty_label, text);
+}
+
 static void * lyrics_load_thread_func(void * arg) {
     lyrics_load_request_t * req = (lyrics_load_request_t *) arg;
     lyrics_doc_t doc;
-    bool ok = lyrics_load_sidecar(req->track_path, &doc);
+    worker_lower_priority(WORKER_NICE_BACKGROUND);
+    lyrics_load_result_failed = false;
+    bool remote = req->song_id[0] != 0;
+    bool ok = !remote && lyrics_load_sidecar(req->track_path, &doc);
     bool plain_mode = false;
     char * plain_text = NULL;
 
@@ -176,8 +294,10 @@ static void * lyrics_load_thread_func(void * arg) {
      * Parses LRC timestamps if present; otherwise falls back to plain_mode
      * (static unsynced text). */
     if (!ok) {
-        track_metadata_t meta;
-        metadata_read_lyrics_without_artwork(req->track_path, &meta);
+        track_metadata_t meta = {0};
+        bool synced = true;
+        if (remote) meta.lyrics = load_remote_lyrics(req, &synced);
+        else metadata_read_lyrics_without_artwork(req->track_path, &meta);
         if (meta.lyrics) {
             /* Keep embedded lyrics under the same byte limit as sidecars.
              * Apart from avoiding a large parser/UI allocation, bounded
@@ -187,7 +307,7 @@ static void * lyrics_load_thread_func(void * arg) {
              * below. */
             size_t lyrics_len = strnlen(meta.lyrics, LYRICS_MAX_FILE_BYTES + 1U);
             if (lyrics_len > 0 && lyrics_len <= LYRICS_MAX_FILE_BYTES) {
-                if (lyrics_parse_buffer(meta.lyrics, lyrics_len, &doc)) {
+                if (synced && lyrics_parse_buffer(meta.lyrics, lyrics_len, &doc)) {
                     ok = true;
                 } else {
                     /* Only the unsynchronized/plain fallback is sanitized.
@@ -213,26 +333,32 @@ static void * lyrics_load_thread_func(void * arg) {
     atomic_store_explicit(&lyrics_load_done_flag, true, memory_order_release); /* written last -- poll_lyrics_load() only checks this flag */
     return NULL;
 }
-static void launch_lyrics_load(int for_index, const char * track_path) {
+static void launch_lyrics_request(const lyrics_load_request_t * request) {
     lyrics_load_generation++;
     if (lyrics_load_active) {
-        lyrics_load_pending_for_index = for_index;
-        snprintf(lyrics_load_pending_path, sizeof(lyrics_load_pending_path), "%s", track_path);
+        cancel_lyrics_request();
+        lyrics_load_pending = *request;
         lyrics_load_pending_valid = true;
         return;
     }
-
     lyrics_load_request_t * req = malloc(sizeof(*req));
     if (!req) return;
+    *req = *request;
     req->generation = lyrics_load_generation;
-    req->for_index = for_index;
-    snprintf(req->track_path, sizeof(req->track_path), "%s", track_path);
+    http_cancel_token_init(&lyrics_cancel);
+    lyrics_cancel_live = true;
     atomic_store_explicit(&lyrics_load_done_flag, false, memory_order_relaxed);
     lyrics_load_active = true;
-    if (pthread_create(&lyrics_load_thread, NULL, lyrics_load_thread_func, req) != 0) {
+    if (worker_thread_create(&lyrics_load_thread, 192 * 1024, lyrics_load_thread_func, req) != 0) {
         free(req);
         lyrics_load_active = false;
+        destroy_lyrics_cancel();
     }
+}
+static void launch_lyrics_load(int for_index, const char * path) {
+    lyrics_load_request_t req = { .for_index = for_index };
+    snprintf(req.track_path, sizeof(req.track_path), "%s", path);
+    launch_lyrics_request(&req);
 }
 /* Called every tick from update_timer_cb, same as poll_cover_decode() --
  * regardless of whether the lyrics screen is actually open, so a load
@@ -247,8 +373,15 @@ static void poll_lyrics_load(void) {
     if (!lyrics_load_active || !atomic_load_explicit(&lyrics_load_done_flag, memory_order_acquire)) return;
     lyrics_load_active = false;
     pthread_join(lyrics_load_thread, NULL);
+    destroy_lyrics_cancel();
 
     if (lyrics_load_result_generation == lyrics_load_generation) {
+        if (lyrics_load_result_failed) {
+            lyrics_remote_state = lyrics_remote_state == REMOTE_LYRICS_LOADING_HIDDEN
+                ? REMOTE_LYRICS_WAITING : REMOTE_LYRICS_FAILED;
+        } else {
+            lyrics_remote_state = REMOTE_LYRICS_NONE;
+        }
         if (current_lyrics_doc_valid) lyrics_doc_free(&current_lyrics_doc);
         current_lyrics_doc_valid = lyrics_load_result_ok;
         if (lyrics_load_result_ok) current_lyrics_doc = lyrics_load_result_doc;
@@ -268,7 +401,7 @@ static void poll_lyrics_load(void) {
 
     if (lyrics_load_pending_valid) {
         lyrics_load_pending_valid = false;
-        launch_lyrics_load(lyrics_load_pending_for_index, lyrics_load_pending_path);
+        launch_lyrics_request(&lyrics_load_pending);
     }
 }
 static pthread_t lyrics_backdrop_thread;
@@ -500,6 +633,8 @@ static void lyrics_ensure_layout(bool force_layout_rebuild) {
  * force_layout_rebuild: gui_lyrics_refresh_layout() (font size / custom font
  * changed) must pass true -- see lyrics_ensure_layout() for the cache key. */
 static void lyrics_reset_pool(bool force_layout_rebuild) {
+    lyrics_cancel_follow_scroll();
+    lyrics_update_empty_text();
     if (lyrics_active_marker) lv_obj_add_flag(lyrics_active_marker, LV_OBJ_FLAG_HIDDEN);
     int count = current_lyrics_doc_valid ? current_lyrics_doc.count : 0;
     lyrics_ensure_layout(force_layout_rebuild);
@@ -647,6 +782,7 @@ static void lyrics_list_click_cb(lv_event_t * e) {
  * costs nothing new on re-entry beyond that already-accepted, already-
  * documented gap. */
 void gui_lyrics_prepare_exit(void) {
+    lyrics_cancel_follow_scroll();
     lv_timer_pause(lyrics_timer);
     lv_obj_add_flag(lyrics_backdrop_img, LV_OBJ_FLAG_HIDDEN);
 }
@@ -698,7 +834,8 @@ static void lyrics_gesture_event_cb(lv_event_t * e) {
 static void lyrics_scroll_event_cb(lv_event_t * e) {
     (void) e;
     lv_indev_t * indev = lv_indev_active();
-    if (indev && lv_indev_get_state(indev) == LV_INDEV_STATE_PRESSED) {
+    if (!lyrics_follow_scroll_frame && indev && lv_indev_get_state(indev) == LV_INDEV_STATE_PRESSED) {
+        lyrics_cancel_follow_scroll();
         lyrics_auto_follow = false;
         clock_gettime(CLOCK_MONOTONIC, &lyrics_last_manual_scroll_at);
     }
@@ -787,7 +924,10 @@ static void lyrics_timer_update(bool animate_scroll) {
     if (lyrics_auto_follow && active_index >= 0 && active_index != lyrics_last_centered_index) {
         int32_t target = lyrics_line_y(active_index) - LYRICS_ACTIVE_LINE_ANCHOR_Y;
         if (target < 0) target = 0;
-        lv_obj_scroll_to_y(lyrics_list, target, animate_scroll ? LV_ANIM_ON : LV_ANIM_OFF);
+        int previous = lyrics_last_centered_index;
+        int step = active_index - previous;
+        bool animate = animate_scroll && previous >= 0 && (step == 1 || step == -1);
+        lyrics_scroll_follow_to(target, animate);
         lyrics_last_centered_index = active_index;
     }
 
@@ -948,6 +1088,7 @@ void gui_lyrics_prepare_embedded(lv_obj_t * parent, int32_t x, int32_t y,
 
 void gui_lyrics_hide_embedded(void) {
     if (!lyrics_embedded) return;
+    lyrics_cancel_follow_scroll();
     lyrics_embedded_prepared_hidden = false;
     lyrics_prepared_parent = NULL;
     lyrics_prepared_width = 0;
@@ -999,7 +1140,7 @@ static lv_obj_t * build_lyrics_screen(void) {
     lv_obj_remove_flag(dark_overlay, LV_OBJ_FLAG_CLICKABLE);
 
     lyrics_empty_label = lv_label_create(scr);
-    lv_label_set_text(lyrics_empty_label, TR("No synchronized lyrics found"));
+    lyrics_update_empty_text();
     lv_obj_set_style_text_font(lyrics_empty_label, &app_font_22, 0);
     lv_obj_set_style_text_color(lyrics_empty_label, lv_color_make(200, 200, 200), 0);
     /* app_font_22 is one of the size-tier-swappable app_font_* handles (see
@@ -1082,6 +1223,8 @@ static lv_obj_t * build_lyrics_screen(void) {
     lv_obj_set_pos(lyrics_spacer, 0, 0);
 
     lv_obj_add_event_cb(lyrics_list, lyrics_scroll_event_cb, LV_EVENT_SCROLL, NULL);
+    lv_obj_add_event_cb(lyrics_list, lyrics_scroll_lifecycle_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(lyrics_list, lyrics_scroll_lifecycle_event_cb, LV_EVENT_DELETE, NULL);
     lv_obj_add_event_cb(lyrics_list, lyrics_list_click_cb, LV_EVENT_CLICKED, NULL);
 
     /* Right-swipe-to-exit -- see lyrics_gesture_event_cb()'s own doc
@@ -1190,11 +1333,13 @@ void gui_lyrics_init(void) {
  * without leaking the old objects. */
 void gui_lyrics_teardown(void) {
     gui_lyrics_hide_embedded();
+    lyrics_cancel_follow_scroll();
     /* Unguarded lv_timer_create() at this screen's own build site -- same
      * leaked-old-timer hazard as gui_player_teardown()'s volume_popup_hide_
      * timer, see its own comment. */
     if (lyrics_timer) { lv_timer_del(lyrics_timer); lyrics_timer = NULL; }
     if (lyrics_screen) { lv_obj_delete(lyrics_screen); lyrics_screen = NULL; }
+    lyrics_empty_label = NULL;
     lyrics_active_marker = NULL;
     if (lyrics_font_size_screen) { lv_obj_delete(lyrics_font_size_screen); lyrics_font_size_screen = NULL; }
 }
@@ -1224,6 +1369,18 @@ bool gui_lyrics_is_visible(void) {
 void gui_lyrics_poll_load(void) {
     if (gui_player_lyrics_animation_in_progress()) return;
     poll_lyrics_load();
+    bool visible = gui_lyrics_is_visible();
+    if (!visible && lyrics_remote_state == REMOTE_LYRICS_FAILED)
+        lyrics_remote_state = REMOTE_LYRICS_WAITING;
+    if (lyrics_remote_state == REMOTE_LYRICS_WAITING && visible) {
+        lyrics_remote_state = REMOTE_LYRICS_LOADING_VISIBLE;
+        launch_lyrics_request(&lyrics_remote_deferred);
+    }
+    /* Remember visibility while loading so a late failure can retry on reopening. */
+    if (lyrics_remote_state == REMOTE_LYRICS_LOADING_VISIBLE ||
+        lyrics_remote_state == REMOTE_LYRICS_LOADING_HIDDEN)
+        lyrics_remote_state = visible ? REMOTE_LYRICS_LOADING_VISIBLE : REMOTE_LYRICS_LOADING_HIDDEN;
+    lyrics_update_empty_text();
 }
 
 void gui_lyrics_poll_backdrop(void) {
@@ -1240,6 +1397,8 @@ void gui_lyrics_on_cover_changed(int current_playlist_index) {
 }
 
 void gui_lyrics_load_track(int index, const char * path) {
+    lyrics_remote_state = REMOTE_LYRICS_NONE;
+    cancel_lyrics_request();
     if (current_lyrics_doc_valid) {
         lyrics_doc_free(&current_lyrics_doc);
         current_lyrics_doc_valid = false;
@@ -1257,7 +1416,19 @@ void gui_lyrics_load_track(int index, const char * path) {
         lyrics_load_pending_valid = false;
         current_lyrics_doc_generation = ++lyrics_load_generation;
     }
+    lyrics_update_empty_text();
     if (lyrics_embedded) lyrics_reset_pool(true);
+}
+
+void gui_lyrics_load_subsonic(int index, const subsonic_server_t * server,
+                             const char * song_id, const char * artist, const char * title) {
+    gui_lyrics_load_track(index, NULL);
+    if (!server || !song_id || !song_id[0] || strlen(song_id) >= sizeof(lyrics_remote_deferred.song_id)) return;
+    lyrics_remote_deferred = (lyrics_load_request_t){ .for_index = index, .server = *server };
+    snprintf(lyrics_remote_deferred.song_id, sizeof(lyrics_remote_deferred.song_id), "%s", song_id);
+    snprintf(lyrics_remote_deferred.artist, sizeof(lyrics_remote_deferred.artist), "%s", artist ? artist : "");
+    snprintf(lyrics_remote_deferred.title, sizeof(lyrics_remote_deferred.title), "%s", title ? title : "");
+    lyrics_remote_state = REMOTE_LYRICS_WAITING;
 }
 
 void gui_lyrics_open_screen(void) {
@@ -1270,9 +1441,17 @@ bool gui_lyrics_has_background_work(void) {
 
 void gui_lyrics_cancel_background_work(void) {
     lyrics_load_generation++;
+    lyrics_load_pending_valid = false;
+    lyrics_remote_state = REMOTE_LYRICS_NONE;
+    cancel_lyrics_request();
     if (lyrics_load_active) {
         pthread_join(lyrics_load_thread, NULL);
         lyrics_load_active = false;
+        destroy_lyrics_cancel();
+        if (lyrics_load_result_ok) lyrics_doc_free(&lyrics_load_result_doc);
+        free(lyrics_load_result_plain_text);
+        lyrics_load_result_plain_text = NULL;
+        lyrics_load_result_ok = false;
     }
     if (lyrics_backdrop_active) {
         pthread_join(lyrics_backdrop_thread, NULL);

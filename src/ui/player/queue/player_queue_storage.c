@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/prctl.h>
 #include "../../../library/playlists/playlist_files.h"
 #include "../../../library/browser/paths/library_paths.h"
 #include "../../../library/remote/remote_track.h"
@@ -36,6 +37,7 @@ void player_queue_storage_remove_checkpoint_at(int dirfd, const char * name) {
 }
 
 static void * queue_checkpoint_worker(void * arg) {
+    (void) prctl(PR_SET_NAME, "queue_ckpt");
     checkpoint_worker_ctx_t * ctx = (checkpoint_worker_ctx_t *) arg;
     bool wrote = ctx->header_only ?
         queue_resume_rewrite_header_at(ctx->target_dirfd, ctx->target_name, &ctx->header) :
@@ -69,6 +71,7 @@ bool player_queue_storage_checkpoint_start(queue_resume_t queue, int target_dirf
     checkpoint_running = pthread_create(&checkpoint_thread, NULL, queue_checkpoint_worker,
                                         &checkpoint_ctx) == 0;
     if (!checkpoint_running) {
+        player_queue_storage_checkpoint_mark_failed();
         queue_resume_free(&checkpoint_ctx.queue);
         close(target_dirfd);
         checkpoint_ctx.target_dirfd = -1;
@@ -87,6 +90,7 @@ bool player_queue_storage_checkpoint_start_header(queue_resume_header_t header, 
     checkpoint_running = pthread_create(&checkpoint_thread, NULL, queue_checkpoint_worker,
                                         &checkpoint_ctx) == 0;
     if (!checkpoint_running) {
+        player_queue_storage_checkpoint_mark_failed();
         close(target_dirfd);
         checkpoint_ctx.target_dirfd = -1;
     }
@@ -113,11 +117,6 @@ bool player_queue_storage_checkpoint_reap_if_done(bool * completed, bool * faile
     return true;
 }
 
-void player_queue_storage_checkpoint_join(void) {
-    if (!checkpoint_running) return;
-    pthread_join(checkpoint_thread, NULL);
-    checkpoint_running = false;
-}
 
 bool player_queue_storage_checkpoint_failed(void) {
     return atomic_load(&checkpoint_failure_pending);

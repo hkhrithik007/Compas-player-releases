@@ -4,6 +4,8 @@
 #include "../../plugins/gui_plugins.h"
 #include "../../shell/gui_shell.h"
 
+#include "lvgl/src/widgets/switch/lv_switch_private.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -161,6 +163,8 @@ static lv_obj_t * native_text_row(lv_obj_t * parent, const char * text, const lv
     lv_obj_set_size(row, ui_list_row_width(), ui_list_row_height());
     lv_obj_add_style(row, &native_row_min_style, 0);
     lv_obj_add_style(row, &pill_row_bg_style, 0);
+    lv_obj_set_style_opa(row, LV_OPA_40, LV_STATE_DISABLED);
+    lv_obj_set_style_border_opa(row, LV_OPA_30, LV_STATE_DISABLED);
     lv_obj_add_style(row, &list_row_pressed_style, LV_STATE_PRESSED);
     lv_obj_set_style_pad_all(row, 0, 0);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
@@ -182,7 +186,7 @@ static lv_obj_t * pill_row_clickable(lv_obj_t * row, lv_event_cb_t on_click, voi
 
 lv_obj_t * add_pill_row_base(lv_obj_t * parent, const char * label_text) {
     lv_obj_t * row = native_text_row(parent, label_text, gui_theme_font(GUI_FONT_ROLE_BODY),
-                                     ui_list_row_width() - 136);
+                                     ui_list_row_width() - BOARD_SCALE_PX(136));
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
     return row;
 }
@@ -203,6 +207,45 @@ lv_obj_t * add_pill_summary_label(lv_obj_t * row) {
     return label;
 }
 
+/* Reserve the real switch width, widening narrow plugin rows when needed. */
+int32_t pill_row_toggle_label_width(lv_obj_t * row, lv_obj_t * label, lv_obj_t * toggle) {
+    lv_obj_update_layout(row);
+    int32_t reserved = lv_obj_get_x(label) + lv_obj_get_width(toggle) + 2 * BOARD_SCALE_PX(20);
+    int32_t width = LV_MIN(ui_list_row_width(),
+                           LV_MAX(lv_obj_get_width(row), reserved + BOARD_SCALE_PX(40)));
+    lv_obj_set_width(row, width);
+    return width - reserved;
+}
+
+int32_t set_wrapped_label_two_line_height(lv_obj_t * label) {
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(label, LV_SIZE_CONTENT);
+    lv_obj_update_layout(label);
+    int32_t natural_height = lv_obj_get_height(label);
+    const lv_font_t * font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    int32_t max_height = 2 * lv_font_get_line_height(font) +
+                         lv_obj_get_style_text_line_space(label, LV_PART_MAIN);
+    int32_t height = LV_MIN(natural_height, max_height);
+    lv_obj_set_height(label, height);
+    lv_obj_update_layout(label);
+    return height;
+}
+
+int32_t configure_pill_toggle_row_wrap(lv_obj_t * row, lv_obj_t * label, lv_obj_t * toggle) {
+    lv_obj_update_layout(row);
+    int32_t label_left = lv_obj_get_x(label);
+    lv_obj_add_flag(label, LV_OBJ_FLAG_USER_2);
+    lv_obj_set_user_data(row, (void *)(intptr_t)lv_obj_get_height(row));
+    lv_obj_remove_flag(label, LV_OBJ_FLAG_USER_3);
+    lv_obj_set_style_pad_top(label, 0, 0);
+    lv_obj_set_width(label, pill_row_toggle_label_width(row, label, toggle));
+    int32_t label_height = set_wrapped_label_two_line_height(label);
+    int32_t row_height = LV_MAX(lv_obj_get_height(row), label_height + BOARD_SCALE_PX(32));
+    lv_obj_set_height(row, row_height);
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, label_left, 0);
+    return row_height;
+}
+
 lv_obj_t * add_pill_toggle_row(lv_obj_t * parent, const char * label_text, bool checked, lv_event_cb_t on_click) {
     lv_obj_t * row = add_pill_row_base(parent, label_text);
 
@@ -211,9 +254,56 @@ lv_obj_t * add_pill_toggle_row(lv_obj_t * parent, const char * label_text, bool 
     lv_obj_remove_flag(toggle_sw, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_style(toggle_sw, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
     if (checked) lv_obj_add_state(toggle_sw, LV_STATE_CHECKED);
-    lv_obj_align(toggle_sw, LV_ALIGN_RIGHT_MID, -20, 0);
+    lv_obj_align(toggle_sw, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(20), 0);
+    lv_obj_t * label = lv_obj_get_child(row, 0);
+    configure_pill_toggle_row_wrap(row, label, toggle_sw);
 
     return pill_row_clickable(row, on_click, NULL);
+}
+
+/* Read LVGL's knob progress so lettering follows the actual animation, including
+ * reversals. Keep the knob geometry in sync with lv_switch.c. No second animator. */
+static void switch_knob_letter_draw(lv_event_t * e) {
+    lv_obj_t * sw = lv_event_get_current_target(e);
+    const char * letters = lv_event_get_user_data(e);
+    bool high = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    int32_t progress = ((lv_switch_t *)sw)->anim_state;
+    if (progress < 0) progress = high ? 256 : 0;
+    lv_area_t area;
+    lv_obj_get_coords(sw, &area);
+    int32_t size = lv_area_get_height(&area);
+    int32_t offset = (lv_area_get_width(&area) - size) * progress / 256;
+    area.x1 += offset;
+    area.x2 = area.x1 + size - 1;
+    area.x1 -= lv_obj_get_style_pad_left(sw, LV_PART_KNOB);
+    area.x2 += lv_obj_get_style_pad_right(sw, LV_PART_KNOB);
+    area.y1 -= lv_obj_get_style_pad_top(sw, LV_PART_KNOB);
+    area.y2 += lv_obj_get_style_pad_bottom(sw, LV_PART_KNOB);
+    char text[] = { letters[high ? 1 : 0], '\0' };
+    lv_draw_label_dsc_t dsc;
+    lv_draw_label_dsc_init(&dsc);
+    dsc.font = gui_theme_font(GUI_FONT_ROLE_SUBTEXT);
+    dsc.color = lv_obj_get_style_bg_color(sw, high ? LV_PART_INDICATOR : LV_PART_MAIN);
+    dsc.opa = lv_obj_get_style_opa_recursive(sw, LV_PART_MAIN);
+    dsc.text = text;
+    dsc.text_local = 1;
+    dsc.align = LV_TEXT_ALIGN_CENTER;
+    int32_t height = lv_font_get_line_height(dsc.font);
+    area.y1 += (lv_area_get_height(&area) - height) / 2;
+    area.y2 = area.y1 + height - 1;
+    lv_draw_label(lv_event_get_layer(e), &dsc, &area);
+}
+
+/* letters is a persistent two-character string: off, on. Returns the row.
+ * The non-interactive switch passes pointer taps through to the row handler. */
+lv_obj_t * add_pill_letter_toggle_row(lv_obj_t * parent, const char * label_text,
+                                     bool checked, const char * letters, lv_event_cb_t on_click) {
+    lv_obj_t * row = add_pill_toggle_row(parent, label_text, checked, on_click);
+    lv_obj_t * sw = lv_obj_get_child(row, -1);
+    lv_switch_set_orientation(sw, LV_SWITCH_ORIENTATION_HORIZONTAL);
+    lv_obj_set_style_base_dir(sw, LV_BASE_DIR_LTR, 0);
+    lv_obj_add_event_cb(sw, switch_knob_letter_draw, LV_EVENT_DRAW_MAIN_END, (void *)letters);
+    return row;
 }
 
 lv_obj_t * add_pill_chevron_row(lv_obj_t * parent, const char * label_text, lv_event_cb_t on_click) {
@@ -223,22 +313,66 @@ lv_obj_t * add_pill_chevron_row(lv_obj_t * parent, const char * label_text, lv_e
     return pill_row_clickable(row, on_click, NULL);
 }
 
-lv_obj_t * add_pill_option_row(lv_obj_t * parent, const char * label_text, bool selected,
-                              lv_event_cb_t on_click, void * user_data) {
-    lv_obj_t * row = add_pill_row_base(parent, label_text);
+/* Keep option rows alive while moving the checkmark, preserving scroll and focus. */
+void gui_pill_option_row_set_selected(lv_obj_t * row, bool selected) {
+    if (!row || !lv_obj_has_flag(row, LV_OBJ_FLAG_USER_2)) return;
+    lv_obj_t * text = lv_obj_get_child(row, 0);
+    lv_obj_t * check = lv_obj_get_child(row, 1);
+    if (!text || !check) return;
+    if (lv_obj_has_flag(check, LV_OBJ_FLAG_HIDDEN) == !selected) return;
+    /* Wrapped labels keep their custom width when selection changes. */
+    bool standard_row_label = lv_label_get_long_mode(text) == LV_LABEL_LONG_SCROLL_CIRCULAR;
     if (selected) {
         lv_obj_add_style(row, gui_theme_accent_outline_style(), 0);
         lv_obj_set_style_border_width(row, BOARD_SCALE_PX(3), 0);
         lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-        lv_obj_t * text = lv_obj_get_child(row, 0);
-        configure_scrolling_row_label(text, pill_row_default_width() - GUI_TEXT_INSET - BOARD_SCALE_PX(64));
-        lv_obj_t * check = lv_label_create(row);
-        lv_label_set_text(check, LV_SYMBOL_OK);
-        lv_obj_add_style(check, gui_theme_accent_style(), 0);
-        lv_obj_set_style_text_font(check, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
-        lv_obj_align(check, LV_ALIGN_RIGHT_MID, BOARD_SCALE_PX(-20), 0);
-        lv_obj_remove_flag(check, LV_OBJ_FLAG_CLICKABLE);
+        if (standard_row_label)
+            lv_obj_set_width(text, pill_row_default_width() - GUI_TEXT_INSET - BOARD_SCALE_PX(64));
+        lv_obj_remove_flag(check, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_remove_style(row, gui_theme_accent_outline_style(), 0);
+        lv_obj_remove_local_style_prop(row, LV_STYLE_BORDER_WIDTH, 0);
+        lv_obj_remove_local_style_prop(row, LV_STYLE_BG_OPA, 0);
+        if (standard_row_label) lv_obj_set_width(text, pill_row_default_width() - BOARD_SCALE_PX(136));
+        lv_obj_add_flag(check, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+void gui_pill_option_list_set_selected(lv_obj_t * list, lv_obj_t * selected_row) {
+    if (!list || !selected_row || lv_obj_get_parent(selected_row) != list ||
+        !lv_obj_has_flag(selected_row, LV_OBJ_FLAG_USER_2)) return;
+    uint32_t count = lv_obj_get_child_count(list);
+    for (uint32_t i = 0; i < count; ++i) {
+        lv_obj_t * row = lv_obj_get_child(list, i);
+        if (!lv_obj_has_flag(row, LV_OBJ_FLAG_USER_2)) continue;
+        gui_pill_option_row_set_selected(row, row == selected_row);
+    }
+}
+
+void gui_pill_toggle_row_set_checked(lv_obj_t * row, bool checked) {
+    if (!row) return;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(row); ++i) {
+        lv_obj_t * child = lv_obj_get_child(row, i);
+        if (!lv_obj_check_type(child, &lv_switch_class)) continue;
+        if (checked) lv_obj_add_state(child, LV_STATE_CHECKED);
+        else lv_obj_remove_state(child, LV_STATE_CHECKED);
+        return;
+    }
+}
+
+lv_obj_t * add_pill_option_row(lv_obj_t * parent, const char * label_text, bool selected,
+                              lv_event_cb_t on_click, void * user_data) {
+    lv_obj_t * row = add_pill_row_base(parent, label_text);
+    /* Mark option rows so section headers are skipped by selection updates. */
+    lv_obj_add_flag(row, LV_OBJ_FLAG_USER_2);
+    lv_obj_t * check = lv_label_create(row);
+    lv_label_set_text(check, LV_SYMBOL_OK);
+    lv_obj_add_style(check, gui_theme_accent_style(), 0);
+    lv_obj_set_style_text_font(check, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
+    lv_obj_align(check, LV_ALIGN_RIGHT_MID, BOARD_SCALE_PX(-20), 0);
+    lv_obj_remove_flag(check, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(check, LV_OBJ_FLAG_HIDDEN);
+    gui_pill_option_row_set_selected(row, selected);
     return pill_row_clickable(row, on_click, user_data);
 }
 
@@ -280,7 +414,7 @@ lv_obj_t * add_section_header(lv_obj_t * parent, const char * text) {
     lv_obj_set_style_pad_right(label, BOARD_SCALE_PX(24), 0);
 #else
     lv_obj_set_style_pad_top(label, 12, 0);
-    lv_obj_set_style_pad_left(label, 24, 0);
+    lv_obj_set_style_pad_left(label, BOARD_SCALE_PX(24), 0);
 #endif
     return label;
 }

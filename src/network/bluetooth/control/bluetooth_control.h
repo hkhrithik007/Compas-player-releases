@@ -12,6 +12,7 @@ typedef struct {
     char name[64];
     bool paired;
     bool connected;
+    bool audio_sink;
 } bt_device_t;
 
 /* Negotiated Bluetooth transport/decoded PCM information. This describes
@@ -135,13 +136,15 @@ bool bt_control_get_connected_device_mac(char * out, size_t out_size);
  * left untouched) if nothing's connected. */
 bool bt_control_get_connected_device_stream(char * out, size_t out_size, unsigned int * out_sample_rate);
 
-/* Known devices only, no inquiry: safe to call while audio is streaming. */
+/* Known devices only, no inquiry: safe to call while audio is streaming.
+ * Returns the device count, or -1 when the snapshot could not be read. */
 int bt_control_list_devices(bt_device_t * out, int max_count);
 
 /* Blocking: scans for `seconds` through a persistent bluetoothctl client on
  * stdin, then reads back the combined paired+discovered device list via
  * `info` on each one for Paired/Connected state. Call off the UI thread.
- * Returns how many devices were written into out[] (capped at max_count). */
+ * Returns how many devices were written into out[] (capped at max_count),
+ * or -1 when the snapshot could not be read. */
 int bt_control_scan(int seconds, bt_device_t * out, int max_count);
 
 /* Pair (if not already) + trust + connect, in that order -- trusting first
@@ -158,6 +161,8 @@ bool bt_control_connect_with_rate(const char * mac, unsigned int rate);
  * disconnects it first if currently connected, as part of the same
  * command. Blocking; call off the UI thread. */
 bool bt_control_forget(const char * mac);
+/* Blocking; call off the UI thread. */
+bool bt_control_disconnect(const char * mac);
 
 /* Bounded, cancellation-aware reconnect of an already-paired trusted A2DP
  * headset. Never pairs or trusts. Call only from the reconnect worker; all

@@ -133,7 +133,7 @@ void handle_playlist_songs_request(int cfd, const char * path) {
     bool loaded = false;
     bool user_playlist = false;
     if (strcmp(name, "@favorites") == 0 || strcmp(name, "Favorites") == 0) {
-        metadata_db_load_favorite_songs(&paths, &count);
+        metadata_db_load_favorite_songs(&paths, &count, NULL);
         loaded = true; /* an empty built-in playlist is valid */
     } else if (strcmp(name, "@most_played") == 0 || strcmp(name, "Most Played") == 0) {
         metadata_db_load_top_played_songs(20, &paths, &count);
@@ -417,27 +417,8 @@ static ssize_t body_read(void * context, void * buffer, size_t size) {
     }
 }
 
-/* Upper bounds for reading the rest of a rejected upload after replying. */
-#define IMPORT_LINGER_MAX_BYTES (8u * 1024u * 1024u)
-#define IMPORT_LINGER_MAX_SECONDS 10
-
-/* Error reply for an upload whose body was not fully read. Closing a TCP
- * socket with unread data can reset the connection and discard the reply,
- * so send it, half-close, and read what is left of the body (at most
- * `remaining` bytes, bounded in bytes and time) before the caller closes. */
 static void import_send_error(int cfd, const char * status, const char * code, size_t remaining) {
-    send_api_error(cfd, status, "playlist_error", code);
-    if (remaining == 0) return;
-    shutdown(cfd, SHUT_WR);
-    if (remaining > IMPORT_LINGER_MAX_BYTES) remaining = IMPORT_LINGER_MAX_BYTES;
-    time_t give_up = time(NULL) + IMPORT_LINGER_MAX_SECONDS;
-    body_reader_t body = { cfd, 0 };
-    char buffer[1024];
-    while (remaining > 0 && time(NULL) < give_up) {
-        ssize_t n = body_read(&body, buffer, remaining < sizeof(buffer) ? remaining : sizeof(buffer));
-        if (n <= 0) return;
-        remaining -= (size_t) n;
-    }
+    send_api_error_drain(cfd, status, "playlist_error", code, remaining);
 }
 
 /* POST /api/playlists/import?name=NAME with the playlist file as the body
@@ -447,10 +428,10 @@ static void import_send_error(int cfd, const char * status, const char * code, s
 void handle_playlist_import_request(int cfd, const char * path, long long content_length) {
     if (content_length < 0) {
         /* No length (or chunked): drain whatever follows, bounded. */
-        import_send_error(cfd, "411 Length Required", "length_required", IMPORT_LINGER_MAX_BYTES);
+        import_send_error(cfd, "411 Length Required", "length_required", REPLY_DRAIN_MAX_BYTES);
         return;
     }
-    size_t length = (unsigned long long) content_length > IMPORT_LINGER_MAX_BYTES ? IMPORT_LINGER_MAX_BYTES
+    size_t length = (unsigned long long) content_length > REPLY_DRAIN_MAX_BYTES ? REPLY_DRAIN_MAX_BYTES
                                                                                    : (size_t) content_length;
     if ((unsigned long long) content_length > PLAYLIST_IMPORT_MAX_BYTES) {
         import_send_error(cfd, "413 Content Too Large", "playlist_too_large", length);
@@ -560,12 +541,11 @@ void handle_legacy_playlist_post(int cfd, const char * path_only, const char * p
         char m3u_path[512];
         if (!playlist_m3u_path(name, m3u_path, sizeof(m3u_path))) {
             send_response(cfd, "400 Bad Request", "text/plain", "Bad Request");
-        } else if (playlist_files_contains(m3u_path, song_path)) {
-            send_response(cfd, "200 OK", "text/plain", "Song already in playlist");
         } else {
-            bool added = playlist_files_append(m3u_path, song_path);
+            bool duplicate = false;
+            bool added = playlist_files_add_if_absent(m3u_path, song_path, &duplicate);
             send_response(cfd, added ? "200 OK" : "500 Internal Server Error", "text/plain",
-                           added ? "OK" : "Failed to add to playlist");
+                           added ? (duplicate ? "Song already in playlist" : "OK") : "Failed to add to playlist");
         }
     }
 }

@@ -1,6 +1,7 @@
 #include "gui.h"
 #include "../settings/controls/gui_external_controls.h"
 #include "../text/i18n/i18n.h"
+#include "../widgets/builders/screen_builders.h"
 #include "../../core/ui/display/ui_wake.h"
 #include "../updates/gui_updates.h"
 #include "../network/gui_network.h"
@@ -8,6 +9,7 @@
 #include "../network/subsonic/gui_subsonic_covers.h"
 #include "../player/screen/gui_lyrics.h"
 #include "../player/screen/gui_track_info.h"
+#include "../player/screen/gui_player.h"
 #include "../../hardware/indicators/backlight.h"
 #include "../../network/services/dlna_control.h"
 #include "../../hardware/power/battery.h"
@@ -171,12 +173,15 @@ static void player_ui_timer_cb(lv_timer_t * timer) {
     consume_playback_events();
 
     gui_player_poll_track_metadata();
+    gui_player_poll_stream_metadata();
     poll_cover_decode();
     gui_lyrics_poll_load();
     gui_lyrics_poll_backdrop();
     gui_player_poll_confirmed_playback();
     gui_player_poll_waveform();
 
+    /* Keep playback completion work running behind the frozen popup. */
+    if (gui_player_sync_popup_pause()) return;
     if (!backlight_screen_is_on()) return;
     if (gui_navigation_transition_in_progress() || gui_player_lyrics_animation_in_progress()) return;
     if (!gui_player_has_active_track() || gui_player_is_seeking()) return;
@@ -258,11 +263,13 @@ static void poll_network_jobs(void) {
 
 static void poll_storage_jobs(void) {
     poll_usb_mode_switch();
+    poll_usb_dac_session();
     PERF_MARK("usb_mode");
     poll_usb_storage_hotplug();
     PERF_MARK("usb_hotplug");
     poll_sd_card_hotplug();
     PERF_MARK("sd_hotplug");
+    poll_usb_drive_hotplug();
     gui_library_poll_playlists();
     gui_library_poll_track_probes();
     PERF_MARK("storage_jobs");
@@ -293,6 +300,7 @@ static void notify_persistence_failures(void) {
 }
 
 static void poll_queue_and_info_jobs(void) {
+    idle_shutdown_poll_recovery();
     gui_queue_poll();
     gui_network_poll_airplay_overlay();
     gui_track_info_poll();
@@ -375,7 +383,7 @@ static void poll_output_connection(void) {
         DBG_LOG("gui: output disconnected while playing -- pausing playback\n");
         audio_toggle_pause();
         set_play_button_state(false);
-        show_error_toast(TR("Paused: headphones disconnected"));
+        show_info_toast(TR("Paused: headphones disconnected"));
     }
     last_output_connected = output_connected;
 
@@ -439,15 +447,9 @@ static void car_mode_sample_power(car_mode_state_t *s,
 
 static void car_mode_shutdown_if_pending(const car_mode_state_t *s) {
     if (s->car_shutdown_pending && !shutdown_background_work_active()) {
-        /* Stopped audio has no live position; keep the saved one. */
-        if (audio_is_playing() || audio_is_paused())
-            current_settings.last_position = audio_get_resume_position_seconds();
-        /* This save is intentionally synchronous: idle_shutdown_now() is
-         * imminent, so the final playback checkpoint must reach storage
-         * before power is removed. */
-        settings_save(&current_settings);
+        if (!gui_network_usb_dac_shutdown()) return;
         (void) gui_shell_bt_dac_shutdown(false);
-        idle_shutdown_now(); /* full poweroff -- does not return, see idle_shutdown.h */
+        idle_shutdown_now(); /* asynchronous persistence gates poweroff */
     }
 }
 
@@ -505,6 +507,7 @@ static void update_timer_cb(lv_timer_t * timer) {
 #endif
 
     screen_poll_result_t screen = poll_screen_power();
+    ui_marquees_sync(screen.on);
 
     PERF_MARK("controls");
     if (screen.on) {
@@ -516,7 +519,7 @@ static void update_timer_cb(lv_timer_t * timer) {
 
     if (current_settings.remote_control_enabled) {
         gui_player_sync_remote_queue();
-        gui_external_controls_publish_status(favorite_is_set);
+        gui_external_controls_publish_status(now_playing_stars);
     }
 
     poll_background_jobs();

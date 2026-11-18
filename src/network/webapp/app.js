@@ -14,6 +14,7 @@ var ICONS = {
   album: '<rect x="3.5" y="3.5" width="17" height="17" rx="3"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1"/>',
   playlist: '<path d="M4 6h11M4 11h11M4 16h6"/><circle cx="17.5" cy="17" r="2.5"/><path d="M20 17V8l2-1"/>',
   upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
+  download: '<path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 17v3h16v-3"/>',
   folder: '<path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
   folderPlus: '<path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/>',
   folderUp: '<path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M12 16.5v-5M9.5 14l2.5-2.5 2.5 2.5"/>',
@@ -29,7 +30,7 @@ var ICONS = {
   modeRepeat: '<path d="M17 3.5 20 6.5l-3 3"/><path d="M4 11.5v-1a4 4 0 0 1 4-4h12"/><path d="m7 20.5-3-3 3-3"/><path d="M20 12.5v1a4 4 0 0 1-4 4H4"/>',
   modeRepeatOne: '<path d="M17 3.5 20 6.5l-3 3"/><path d="M4 11.5v-1a4 4 0 0 1 4-4h12"/><path d="m7 20.5-3-3 3-3"/><path d="M20 12.5v1a4 4 0 0 1-4 4H4"/><path d="M11.5 10.5 12.5 10v4.5"/>',
   modeShuffle: '<path d="M4 7h3.5c2 0 3.2 1 4.3 2.7l1.4 2.6c1.1 1.7 2.3 2.7 4.3 2.7H20"/><path d="m17 12 3 3-3 3"/><path d="M4 17h3.5c1.2 0 2.1-.4 2.9-1.1"/><path d="M14.1 8.1c.8-.7 1.7-1.1 2.9-1.1H20"/><path d="m17 4 3 3-3 3"/>',
-  heart: '<path d="M12 20s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6C19.5 15.4 12 20 12 20z"/>',
+  star: '<path d="m12 3 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L3 9.6l6.2-.9Z"/>',
   volume: '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   more: '<circle cx="5.5" cy="12" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><circle cx="18.5" cy="12" r="1.2" fill="currentColor"/>',
@@ -288,7 +289,9 @@ function poll() {
 function renderStatus() {
   var s = player;
   if (!s) return;
-  var dacMode = !!s.bluetooth_dac_mode;
+  var dacMode = s.dac_mode === 'bluetooth' || s.dac_mode === 'usb' || !!s.bluetooth_dac_mode;
+  var dacName = s.dac_mode === 'usb' ? 'USB DAC' : 'Bluetooth DAC';
+  var receivingName = s.dac_mode === 'usb' ? 'USB audio' : 'Bluetooth audio';
   var hasTrack = !!s.title && !dacMode;
   if (s.device_model) $('#deviceName').textContent = s.device_model;
   applyAccent(s.accent_color);
@@ -304,12 +307,12 @@ function renderStatus() {
     if (artUrl) probe.src = artUrl; else setArt(null);
   }
 
-  $all('[data-np-title]').concat([$('#npTitle')]).forEach(function (el) { el.textContent = dacMode ? 'Bluetooth DAC' : hasTrack ? s.title : 'Not playing'; });
-  $('#npArtist').textContent = dacMode ? (s.playing ? 'Receiving Bluetooth audio' : 'Waiting for Bluetooth audio') : hasTrack ? [s.artist, s.album].filter(Boolean).join(' — ') : '';
-  $all('[data-np-sub]').forEach(function (el) { el.textContent = dacMode ? (s.playing ? 'Receiving Bluetooth audio' : 'Waiting for Bluetooth audio') : [s.artist, s.album].filter(Boolean).join(' — '); });
+  $all('[data-np-title]').concat([$('#npTitle')]).forEach(function (el) { el.textContent = dacMode ? dacName : hasTrack ? s.title : 'Not playing'; });
+  $('#npArtist').textContent = dacMode ? (s.playing ? 'Receiving ' + receivingName : 'Waiting for ' + receivingName) : hasTrack ? [s.artist, s.album].filter(Boolean).join(' — ') : '';
+  $all('[data-np-sub]').forEach(function (el) { el.textContent = dacMode ? (s.playing ? 'Receiving ' + receivingName : 'Waiting for ' + receivingName) : [s.artist, s.album].filter(Boolean).join(' — '); });
   $all('[data-np-format]').forEach(function (el) { var f = audioFormat(s); el.textContent = f; el.style.display = f ? '' : 'none'; });
   $all('[data-play]').forEach(function (el) { el.innerHTML = icon(s.playing ? 'pause' : 'play'); el.setAttribute('aria-label', s.playing ? 'Pause' : 'Play'); });
-  $all('#modeBtn, [data-mode], [data-fav], [data-seek]').forEach(function (el) { el.disabled = dacMode; el.setAttribute('aria-disabled', String(dacMode)); });
+  $all('#modeBtn, [data-mode], [data-rating], [data-seek]').forEach(function (el) { el.disabled = dacMode; el.setAttribute('aria-disabled', String(dacMode)); });
   var mode = MODES[s.play_mode | 0] || MODES[0];
   $all('#modeBtn, [data-mode]').forEach(function (el) {
     el.innerHTML = icon(mode.icon);
@@ -317,10 +320,12 @@ function renderStatus() {
     el.setAttribute('aria-label', 'Playback mode: ' + mode.label);
     el.title = mode.label;
   });
-  $all('[data-fav]').forEach(function (el) {
-    el.classList.toggle('on', !!s.favorite);
-    el.innerHTML = s.favorite ? icon('heart').replace('<svg ', '<svg style="fill:currentColor" ') : icon('heart');
-    el.setAttribute('aria-label', s.favorite ? 'Remove from favorites' : 'Add to favorites');
+  $all('[data-rating]').forEach(function (el) {
+    var rating = Number(el.dataset.rating);
+    var lit = rating <= (s.rating | 0);
+    el.classList.toggle('on', lit);
+    el.setAttribute('aria-pressed', String(rating === (s.rating | 0)));
+    el.setAttribute('aria-label', rating === s.rating ? 'Clear rating' : 'Rate ' + rating + ' stars');
   });
   if (!seekDragging) {
     var pct = s.duration_seconds > 0 ? s.position_seconds / s.duration_seconds : 0;
@@ -388,10 +393,19 @@ function command(name) {
   return post('/api/playback/' + name).then(function () { setTimeout(poll, 250); });
 }
 
-function toggleFavorite() {
+function setRating(stars) {
   if (!player || !player.title) return;
-  post('/api/favorites/' + (player.favorite ? 'remove' : 'add') + '?current=1', player.favorite ? 'Removed from favorites' : 'Added to favorites')
+  var rating = player.rating === stars ? 0 : stars;
+  post('/api/ratings/set?current=1&rating=' + rating, rating ? 'Rating saved' : 'Rating cleared')
     .then(function () { setTimeout(poll, 250); });
+}
+
+function ratingControls() {
+  return h('div.rating-controls', { role: 'group', 'aria-label': 'Song rating' },
+    [1, 2, 3, 4, 5].map(function (stars) {
+      return h('button.icon-btn', { 'data-rating': stars, html: icon('star'),
+        'aria-label': 'Rate ' + stars + ' stars', onclick: function () { setRating(stars); } });
+    }));
 }
 
 /* ---------- Router ---------- */
@@ -558,7 +572,7 @@ routes.home = function (root) {
         h('button.icon-btn', { 'aria-label': 'Previous track', html: icon('prev'), onclick: function () { command('prev'); } }),
         h('button.play-big', { 'data-play': '', onclick: function () { command('toggle'); } }),
         h('button.icon-btn', { 'aria-label': 'Next track', html: icon('next'), onclick: function () { command('next'); } }),
-        h('button.icon-btn', { 'data-fav': '', onclick: toggleFavorite })))));
+        ratingControls()))));
 
   watchHero($('.hero .controls', root));
   var upNext = h('div.list', skeleton(4));
@@ -581,7 +595,7 @@ routes.home = function (root) {
     api('/api/queue?offset=0&limit=6').then(function (d) {
       upNext.textContent = '';
       if (!d.songs || !d.songs.length) { upNext.appendChild(emptyState('queue', 'Nothing queued', 'Play an album or add songs to the queue.')); return; }
-      d.songs.forEach(function (s, i) { upNext.appendChild(queueRow(s, i + 1, d.revision)); });
+      appendQueueSections(upNext, d.songs, d.current_position, d.queued_count, d.revision, false);
     }).catch(function () { upNext.textContent = ''; upNext.appendChild(emptyState('wifiOff', 'Queue unavailable')); });
   }
   queueViewRefresh = loadUpNext;
@@ -590,33 +604,62 @@ routes.home = function (root) {
   setArt(artKey ? artUrl : null);
 };
 
-function queueRow(song, number, revision) {
-  var row = songRow(song, number, '', [
+function queueRow(song, number, revision, full, removable) {
+  var removeUrl = '/api/queue/remove?offset=' + song.offset + '&revision=' + revision + (full ? '&full=1' : '');
+  var playUrl = '/api/queue/play?offset=' + song.offset + '&revision=' + revision + (full ? '&full=1' : '');
+  var actions = removable === false ? [] : [
     { icon: 'trash', label: 'Remove from queue', danger: true, run: function () {
-      post('/api/queue/remove?offset=' + song.offset + '&revision=' + revision, 'Removed from queue').then(refreshQueueViews);
+      post(removeUrl, 'Removed from queue').then(refreshQueueViews);
     } }
-  ]);
-  row.onclick = function () { post('/api/queue/play?offset=' + song.offset + '&revision=' + revision).then(function () { setTimeout(poll, 300); refreshQueueViews(); }); };
+  ];
+  var row = songRow(song, number, '', actions);
+  row.onclick = function () { post(playUrl).then(function () { setTimeout(poll, 300); refreshQueueViews(); }); };
   return row;
 }
 
+function appendQueueSections(list, songs, currentPosition, queuedCount, revision, full) {
+  var current = Number(currentPosition);
+  if (!isFinite(current)) current = -1;
+  var pending = Math.max(0, Number(queuedCount) || 0);
+  var queuedEnd = current + 1 + pending;
+  var section = null;
+  (songs || []).forEach(function (song, i) {
+    var pos = Number(song.offset);
+    if (!isFinite(pos)) pos = i;
+    var number = pos + 1;
+    if (!full) pos += current + 1;
+    var name = pos < current ? 'Played' : pos === current ? 'Now Playing' : pos < queuedEnd ? 'In queue · ' + pending : 'Continue Playing';
+    if (name !== section) {
+      section = name;
+      list.appendChild(h('h3.queue-section', name));
+    }
+    list.appendChild(queueRow(song, number, revision, full, pos > current));
+  });
+}
+
 routes.queue = function (root, params) {
-  var offset = Math.max(0, Number(params.get('offset')) || 0), PAGE = 50;
+  var offset = Math.max(0, Math.floor(Number(params.get('offset')) || 0)), PAGE = 25, loadRequest = 0;
   var list = h('div.list', skeleton());
   var head = viewHead('Queue', 'Up next on the player');
   root.appendChild(head);
   root.appendChild(list);
   function load() {
-    api('/api/queue?offset=' + offset + '&limit=' + PAGE).then(function (d) {
+    var request = ++loadRequest;
+    api('/api/queue?full=1&offset=' + offset + '&limit=' + PAGE).then(function (d) {
+      if (!root.isConnected || request !== loadRequest) return;
+      if (offset > 0 && offset >= (d.total || 0)) {
+        go('queue', { offset: d.total ? Math.floor((d.total - 1) / PAGE) * PAGE : 0 });
+        return;
+      }
       list.textContent = '';
-      head.querySelector('p').textContent = d.total ? plural(d.total, 'track', 'tracks') + ' up next' : 'Up next on the player';
-      if (!d.songs || !d.songs.length) { list.appendChild(emptyState('queue', 'The queue is empty', 'Play something or add songs from your library.')); return; }
-      d.songs.forEach(function (s, i) { list.appendChild(queueRow(s, offset + i + 1, d.revision)); });
+      head.querySelector('p').textContent = d.total ? plural(d.total, 'track', 'tracks') + ' in the queue' : 'Up next on the player';
+      if (!d.songs || !d.songs.length) { list.appendChild(emptyState('queue', 'Queue is empty', 'Play an album or playlist to see its songs here.')); return; }
+      appendQueueSections(list, d.songs, d.current_position, d.queued_count, d.revision, true);
       var pager = h('div.more');
       if (offset > 0) pager.appendChild(h('button.btn.sm', { onclick: function () { go('queue', { offset: Math.max(0, offset - PAGE) }); } }, 'Previous'));
       if (offset + d.songs.length < d.total) pager.appendChild(h('button.btn.sm', { onclick: function () { go('queue', { offset: offset + PAGE }); } }, 'Next'));
       pager.appendChild(h('button.btn.sm.ghost', { onclick: function () {
-        dialog({ title: 'Clear the queue?', text: 'This removes every upcoming track.', confirm: 'Clear', danger: true }).then(function (ok) {
+        dialog({ title: 'Clear the queue?', text: 'This removes every other track and keeps the current one.', confirm: 'Clear', danger: true }).then(function (ok) {
           if (ok) post('/api/queue/clear?revision=' + d.revision, 'Queue cleared').then(refreshQueueViews);
         });
       } }, 'Clear queue'));
@@ -757,8 +800,10 @@ var AUDIO_EXT = /\.(flac|mp3|wav|m4a|aac|ogg|oga|opus|ape|wv|dsf|dff|aiff?|alac|
 var IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp)$/i;
 var T = {
   state: 'unknown', error: '', path: '', entries: [], total: 0, nextOffset: null, loading: false,
-  queue: [], running: false, xhr: null, madeDirs: {}, uploadedSinceFinish: 0, ui: null
+  queue: [], running: false, xhr: null, madeDirs: {}, uploadedSinceFinish: 0, ui: null,
+  showHidden: false, browseRequest: 0
 };
+try { T.showHidden = localStorage.getItem('compas-remote-show-hidden') === '1'; } catch (e) { /* storage may be blocked */ }
 
 function importUrl(path, params) { return '/api/import/files' + path + (params ? '?' + new URLSearchParams(params).toString() : ''); }
 function joinPath(a, b) { return a ? (b ? a + '/' + b : a) : b; }
@@ -820,18 +865,22 @@ function waitForImport(target) {
 
 function browse(path, append) {
   if (T.state !== 'ready') return;
+  var request = ++T.browseRequest;
   T.loading = true;
   if (!append) { T.path = path; T.entries = []; T.total = 0; T.nextOffset = null; }
   drawTransfer();
   var requested = T.path;
-  api(importUrl('', { path: requested, offset: append ? T.nextOffset || 0 : 0, limit: 100 })).then(function (d) {
-    if (requested !== T.path) return;
+  var query = { path: requested, offset: append ? T.nextOffset || 0 : 0, limit: 100 };
+  if (T.showHidden) query.show_hidden = 1;
+  api(importUrl('', query)).then(function (d) {
+    if (request !== T.browseRequest || requested !== T.path) return;
     T.entries = (append ? T.entries : []).concat(d.entries || []);
     T.total = d.total || 0;
     T.nextOffset = d.next_offset;
     T.loading = false;
     drawTransfer();
   }).catch(function (err) {
+    if (request !== T.browseRequest || requested !== T.path) return;
     T.loading = false;
     if (err.code === 'import_not_ready') { setTransferState('stopped'); return; }
     T.error = transferErrorText(err);
@@ -875,6 +924,13 @@ function deleteEntry(entry) {
   });
 }
 
+function downloadEntry(entry) {
+  var link = h('a', { href: importUrl('/download', { path: entry.path }), download: entry.name });
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 /* Queue entries keep their own destination, so browsing elsewhere while a
  * batch uploads never redirects files. */
 function enqueue(files) {
@@ -903,6 +959,18 @@ function ensureDir(path) {
   }).then(function () { T.madeDirs[path] = true; });
 }
 
+/* The refusals an upload would send, asked before any body goes out so a
+ * refusal is never mistaken for a dropped connection. */
+function uploadCheck(item) {
+  return api(importUrl('/upload-check', { path: item.dest, name: item.name, size: item.file.size }));
+}
+
+function uploadRefused(item, err) {
+  if (item.state !== 'uploading') return;
+  if (err && err.status === 409 && err.code === 'name_exists') { item.state = 'skipped'; item.error = 'Already on the SD card'; }
+  else { item.state = 'failed'; item.error = err && err.status ? transferErrorText(err) : 'Connection lost'; }
+}
+
 function runQueue() {
   if (T.running || T.state !== 'ready') return;
   var item = T.queue.filter(function (q) { return q.state === 'queued'; })[0];
@@ -915,6 +983,9 @@ function runQueue() {
   item.state = 'uploading';
   drawTransfer();
   ensureDir(item.dest).then(function () {
+    return uploadCheck(item).then(function () { return false; }, function (err) { uploadRefused(item, err); return true; });
+  }).then(function (refused) {
+    if (refused) return;
     return new Promise(function (resolve) {
       if (item.state !== 'uploading') { resolve('abort'); return; }
       var xhr = new XMLHttpRequest();
@@ -935,7 +1006,9 @@ function runQueue() {
         else { item.state = 'failed'; item.error = transferErrorText(HttpError(xhr.status, xhr.responseText)); }
         resolve();
       };
-      xhr.onerror = function () { item.state = 'failed'; item.error = 'Connection lost'; resolve(); };
+      xhr.onerror = function () {
+        uploadCheck(item).then(function () { uploadRefused(item, null); }, function (err) { uploadRefused(item, err); }).then(function () { resolve(); });
+      };
       xhr.onabort = function () { item.state = 'queued'; item.sent = 0; resolve('abort'); };
       xhr.send(item.file);
     });
@@ -1069,7 +1142,9 @@ function drawTransfer() {
       h('span.size', entry.isDirectory ? '—' : fmtBytes(entry.size)),
       h('button.icon-btn', { 'aria-label': 'Options for ' + entry.name, html: icon('more'), onclick: function (e) {
         e.stopPropagation();
-        menu(e.currentTarget, (entry.isDirectory ? [{ icon: 'folder', label: 'Open', run: function () { browse(entry.path); } }] : []).concat([
+        menu(e.currentTarget, (entry.isDirectory ? [{ icon: 'folder', label: 'Open', run: function () { browse(entry.path); } }] : [
+          { icon: 'download', label: 'Download', run: function () { downloadEntry(entry); } }
+        ]).concat([
           { icon: 'rename', label: 'Rename…', run: function () { renameEntry(entry); } },
           { icon: 'trash', label: 'Delete', danger: true, run: function () { deleteEntry(entry); } }
         ]));
@@ -1077,7 +1152,13 @@ function drawTransfer() {
   });
   files.appendChild(h('div.files-foot',
     h('span', T.loading ? 'Loading…' : plural(T.total, 'item', 'items')),
-    T.nextOffset != null && T.nextOffset < T.total ? h('button.btn.sm', { onclick: function () { browse(T.path, true); } }, 'Load more') : h('span')));
+    h('div.foot-actions',
+      h('label.hidden-toggle', h('input', { type: 'checkbox', checked: T.showHidden, onchange: function (e) {
+        T.showHidden = e.currentTarget.checked;
+        try { localStorage.setItem('compas-remote-show-hidden', T.showHidden ? '1' : '0'); } catch (err) { /* storage may be blocked */ }
+        browse(T.path);
+      } }), 'Show hidden files'),
+      T.nextOffset != null && T.nextOffset < T.total ? h('button.btn.sm', { onclick: function () { browse(T.path, true); } }, 'Load more') : null)));
 
   var depth = 0;
   files.addEventListener('dragenter', function (e) { e.preventDefault(); depth++; files.classList.add('dragover'); });

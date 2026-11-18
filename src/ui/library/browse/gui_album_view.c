@@ -1,5 +1,6 @@
 #include "gui_album_view.h"
 #include "../../widgets/lists/lv_idempotent.h"
+#include "../../widgets/lists/compact_list.h"
 #include "../../text/i18n/i18n.h"
 #include "../../appearance/gui_theme.h"
 #include "../../widgets/builders/screen_builders.h"
@@ -7,9 +8,21 @@
 #include "../../assets/assets.h"
 #include "../../../core/system/runtime/board_config.h"
 #include <stdio.h>
+#include <ctype.h>
+#include <stdint.h>
 #include <string.h>
 
 static char dur_marker;
+static char number_marker;
+static char quality_marker;
+
+static lv_obj_t * find_marked_child(lv_obj_t * row, const void * marker) {
+    for (uint32_t i = 0; row && i < lv_obj_get_child_count(row); ++i) {
+        lv_obj_t * child = lv_obj_get_child(row, (int32_t)i);
+        if (lv_obj_get_user_data(child) == marker) return child;
+    }
+    return NULL;
+}
 
 static lv_obj_t * plain(lv_obj_t * parent) {
     lv_obj_t * o = lv_obj_create(parent);
@@ -42,12 +55,17 @@ static int32_t text_width(const char * text, const lv_font_t * font) {
     return size.x;
 }
 
-/* Wide enough for the album's longest number on one line, measured as 8s (the widest digit). */
+/* Reserve the widest digit for each position. */
 int32_t gui_album_view_number_width(int widest) {
     char digits[12];
     int len = snprintf(digits, sizeof(digits), "%d", widest < 1 ? 1 : widest);
-    memset(digits, '8', (size_t) len);
-    int32_t w = text_width(digits, gui_theme_font(GUI_FONT_ROLE_BODY));
+    const lv_font_t * font = gui_theme_font(GUI_FONT_ROLE_BODY);
+    int32_t w = 0;
+    for (char digit = '0'; digit <= '9'; ++digit) {
+        memset(digits, digit, (size_t)len);
+        int32_t candidate = text_width(digits, font);
+        if (candidate > w) w = candidate;
+    }
     return w > BOARD_SCALE_PX(40) ? w : BOARD_SCALE_PX(40);
 }
 
@@ -100,6 +118,41 @@ void gui_album_view_total_text(double seconds, char * out, size_t size) {
     if (minutes < 1) minutes = 1;
     if (minutes >= 60) snprintf(out, size, TR("%d hr %d min"), minutes / 60, minutes % 60);
     else snprintf(out, size, TR("%d min"), minutes);
+}
+
+lv_obj_t * gui_album_view_play_bar_build(lv_obj_t * parent, int32_t row_width, int64_t track_count,
+                                         lv_event_cb_t play_cb, lv_event_cb_t shuffle_cb) {
+    if (track_count <= 0) return NULL;
+    char text[48];
+    snprintf(text, sizeof(text), TR_N("%lld track", "%lld tracks", (long) track_count), (long long) track_count);
+    return gui_play_bar_build(parent, row_width, text, play_cb, shuffle_cb);
+}
+
+void gui_album_view_uppercase_suffix(const char * suffix, char * out, size_t size) {
+    if (!out || size == 0) return;
+    size_t i = 0;
+    for (; suffix && suffix[i] && i + 1 < size; i++)
+        out[i] = (char) toupper((unsigned char) suffix[i]);
+    out[i] = '\0';
+}
+
+int32_t gui_album_view_disc_number(int32_t disc_number) {
+    return disc_number > 0 ? disc_number : 1;
+}
+
+bool gui_album_view_has_multiple_discs(const void * rows, int count, size_t stride, size_t disc_offset) {
+    if (!rows || count <= 1 || stride == 0 || disc_offset > stride ||
+        sizeof(int32_t) > stride - disc_offset) return false;
+    int32_t first;
+    memcpy(&first, (const char *) rows + disc_offset, sizeof(first));
+    first = gui_album_view_disc_number(first);
+    for (int i = 1; i < count; i++) {
+        int32_t disc;
+        memcpy(&disc, (const char *) rows + (size_t) i * stride + disc_offset, sizeof(disc));
+        disc = gui_album_view_disc_number(disc);
+        if (disc != first) return true;
+    }
+    return false;
 }
 
 void gui_album_view_meta_text(int year, const char * genre, char * out, size_t size) {
@@ -201,6 +254,41 @@ static void set_duration_text(lv_obj_t * label, unsigned seconds) {
     lv_label_set_text(label, text);
 }
 
+static void layout_track_row(lv_obj_t * row) {
+    lv_obj_t * duration = find_marked_child(row, &dur_marker);
+    lv_obj_t * badge = find_marked_child(row, &quality_marker);
+    if (!row || !duration || lv_obj_get_child_count(row) < 2) return;
+    const lv_font_t * body = gui_theme_font(GUI_FONT_ROLE_BODY);
+    int32_t pad = BOARD_SCALE_PX(14);
+    int32_t duration_right = pad + BOARD_SCALE_PX(40) + BOARD_SCALE_PX(6);
+    bool has_duration = lv_label_get_text(duration)[0] != '\0';
+    lv_obj_t * number = find_marked_child(row, &number_marker);
+    if (number) {
+        lv_obj_t * trailing = compact_list_row_trailing_image(row);
+        int32_t badge_width = trailing ? lv_image_get_src_width(trailing) :
+                              badge ? BOARD_SCALE_PX(40) : 0;
+        int32_t badge_reserve = badge_width ? badge_width + 2 * pad : 0;
+        int32_t duration_reserve = has_duration ? duration_right + text_width(lv_label_get_text(duration), body) + BOARD_SCALE_PX(8) : 0;
+        int32_t right = duration_reserve > badge_reserve ? duration_reserve : badge_reserve;
+        if (right < pad) right = pad;
+        int32_t y = (lv_obj_get_style_pad_top(row, 0) - lv_obj_get_style_pad_bottom(row, 0)) / -2;
+        lv_obj_set_style_pad_right(row, right, 0);
+        lv_obj_align(duration, LV_ALIGN_RIGHT_MID, right - duration_right, y);
+        if (trailing)
+            lv_idem_align(trailing, LV_ALIGN_RIGHT_MID, right - pad, y);
+        return;
+    }
+    lv_obj_align(duration, LV_ALIGN_RIGHT_MID, -duration_right, 0);
+    lv_obj_update_layout(row);
+    int32_t trailing_reserve = badge ? pad + lv_obj_get_width(badge) + BOARD_SCALE_PX(6) : pad;
+    if (has_duration)
+        trailing_reserve = LV_MAX(trailing_reserve,
+            duration_right + text_width(lv_label_get_text(duration), body) + BOARD_SCALE_PX(8));
+    lv_obj_t * title = lv_obj_get_child(row, 0);
+    lv_obj_set_width(title, LV_MAX(0, lv_obj_get_content_width(row) -
+                                     lv_obj_get_style_x(title, 0) - trailing_reserve));
+}
+
 static lv_obj_t * row_label(lv_obj_t * row, const char * text, int32_t w, int32_t h, int32_t pad) {
     const lv_font_t * body = gui_theme_font(GUI_FONT_ROLE_BODY);
     lv_obj_t * n = lv_label_create(row);
@@ -221,14 +309,12 @@ void gui_album_view_decorate_row(lv_obj_t * row, int number, int num_w, int seco
     int32_t title_h = row_label_bounded_height(row_font);
     int32_t h = BOARD_SCALE_PX(76);
     if (h < title_h + 2 * BOARD_SCALE_PX(8)) h = title_h + 2 * BOARD_SCALE_PX(8);
-    int32_t pad = BOARD_SCALE_PX(14), badge = BOARD_SCALE_PX(40);
+    int32_t pad = BOARD_SCALE_PX(14);
     if (num_w <= 0) num_w = BOARD_SCALE_PX(40);
-    int32_t dur_w = text_width("88:88", body), dur_right = pad + badge + BOARD_SCALE_PX(6);
     int32_t title_x = pad + num_w + BOARD_SCALE_PX(8);
     lv_obj_set_size(row, LIST_ROW_WIDTH, h);
     lv_obj_t * title = lv_obj_get_child(row, 0);
     lv_obj_set_pos(title, title_x, (h - title_h) / 2);
-    lv_obj_set_width(title, LIST_ROW_WIDTH - title_x - dur_right - dur_w - BOARD_SCALE_PX(8));
 
     char text[12];
     snprintf(text, sizeof(text), "%d", number);
@@ -238,22 +324,72 @@ void gui_album_view_decorate_row(lv_obj_t * row, int number, int num_w, int seco
     lv_obj_add_style(d, &style_theme_text_muted, 0);
     lv_obj_set_style_text_font(d, body, 0);
     lv_obj_set_user_data(d, &dur_marker);
-    lv_obj_align(d, LV_ALIGN_RIGHT_MID, -dur_right, 0);
     lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
     if (seconds >= 0) set_duration_text(d, (unsigned) seconds);
     else lv_label_set_text(d, "");
+    layout_track_row(row);
 }
 
 void gui_album_view_row_set_duration(lv_obj_t * row, unsigned seconds) {
     uint32_t n = row ? lv_obj_get_child_count(row) : 0;
     for (uint32_t i = 0; i < n; i++) {
         lv_obj_t * child = lv_obj_get_child(row, (int32_t) i);
-        if (lv_obj_get_user_data(child) == &dur_marker) { set_duration_text(child, seconds); return; }
+        if (lv_obj_get_user_data(child) == &dur_marker) {
+            set_duration_text(child, seconds);
+            layout_track_row(row);
+            return;
+        }
+    }
+}
+
+static lv_obj_t * compact_detail_label(lv_obj_t * row, void * marker) {
+    lv_obj_t * existing = find_marked_child(row, marker);
+    if (existing) return existing;
+    lv_obj_t * label = lv_label_create(row);
+    lv_obj_add_style(label, &style_theme_text_muted, 0);
+    lv_obj_set_user_data(label, marker);
+    lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    return label;
+}
+
+/* Compact rows are recycled, so keep one marked child for each album detail. */
+void gui_album_view_decorate_compact_row(lv_obj_t * row, int number, int num_w, int seconds) {
+    if (!row) return;
+    const lv_font_t * font = gui_theme_font(GUI_FONT_ROLE_BODY);
+    int32_t pad = BOARD_SCALE_PX(14);
+    if (num_w <= 0) num_w = BOARD_SCALE_PX(40);
+    int32_t left = pad + num_w + BOARD_SCALE_PX(8);
+    lv_obj_set_style_pad_left(row, left, 0);
+    int32_t y = (lv_obj_get_style_pad_top(row, 0) - lv_obj_get_style_pad_bottom(row, 0)) / -2;
+    lv_obj_t * n = compact_detail_label(row, &number_marker);
+    char text[12];
+    snprintf(text, sizeof(text), "%d", number);
+    lv_label_set_text(n, text);
+    lv_obj_set_style_text_font(n, font, 0);
+    lv_obj_set_style_text_align(n, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(n, num_w);
+    lv_obj_align(n, LV_ALIGN_LEFT_MID, pad - left, y);
+    lv_obj_remove_flag(n, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t * d = compact_detail_label(row, &dur_marker);
+    lv_obj_set_style_text_font(d, font, 0);
+    if (seconds >= 0) set_duration_text(d, (unsigned)seconds);
+    else lv_label_set_text(d, "");
+    lv_obj_remove_flag(d, LV_OBJ_FLAG_HIDDEN);
+    layout_track_row(row);
+}
+
+void gui_album_view_clear_compact_row(lv_obj_t * row) {
+    if (!row) return;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(row); ++i) {
+        lv_obj_t * child = lv_obj_get_child(row, (int32_t)i);
+        if (lv_obj_get_user_data(child) == &number_marker || lv_obj_get_user_data(child) == &dur_marker)
+            lv_obj_add_flag(child, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
 void gui_album_view_row_badge(lv_obj_t * row, const char * asset) {
     lv_obj_t * quality = lv_image_create(row);
+    lv_obj_set_user_data(quality, &quality_marker);
     lv_image_set_src(quality, asset_path(asset));
 #if defined(BOARD_TEMPOTEC_V1)
     lv_obj_set_size(quality, BOARD_SCALE_PX(34), BOARD_SCALE_PX(34));
@@ -264,4 +400,5 @@ void gui_album_view_row_badge(lv_obj_t * row, const char * asset) {
      * 14px from the card edge (same rule as compact-list rows). */
     lv_obj_align(quality, LV_ALIGN_RIGHT_MID, BOARD_SCALE_PX(-14), 0);
     lv_obj_remove_flag(quality, LV_OBJ_FLAG_CLICKABLE);
+    layout_track_row(row);
 }

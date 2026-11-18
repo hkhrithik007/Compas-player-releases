@@ -25,6 +25,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/prctl.h>
 
 /* Port 8899 -- shared by the PIN-protected remote and native file API. */
 #define REMOTE_CONTROL_PORT 8899
@@ -311,23 +312,23 @@ static int request_wait_readable(int fd, const struct timespec * deadline) {
 /* Routes added after the original API. Returns false for any other path. */
 static bool handle_extension_route(int cfd, const char * method, const char * path_only, const char * path,
                                    long long content_length) {
-    bool get = strcmp(method, "GET") == 0, post = strcmp(method, "POST") == 0;
-    if (get && strcmp(path_only, "/api/folders/roots") == 0) handle_folder_roots_request(cfd);
-    else if (get && strcmp(path_only, "/api/folders") == 0) handle_folder_list_request(cfd, path);
-    else if (post && strcmp(path_only, "/api/folders/play") == 0) handle_folder_play_request(cfd, path);
-    else if (get && strcmp(path_only, "/api/recent") == 0) handle_recent_request(cfd, path);
-    else if (get && strcmp(path_only, "/api/favorites/state") == 0) handle_favorite_state_request(cfd, path);
-    else if (post && strcmp(path_only, "/api/favorites/add") == 0) handle_favorite_edit_request(cfd, path, true);
-    else if (post && strcmp(path_only, "/api/favorites/remove") == 0) handle_favorite_edit_request(cfd, path, false);
-    else if (post && strcmp(path_only, "/api/queue/move") == 0) handle_queue_edit_request(cfd, path, true);
-    else if (post && strcmp(path_only, "/api/queue/play") == 0) handle_queue_edit_request(cfd, path, false);
-    else if (post && strcmp(path_only, "/api/playlists/create") == 0) handle_playlist_create_request(cfd, path);
-    else if (post && strcmp(path_only, "/api/playlists/rename") == 0) handle_playlist_rename_request(cfd, path);
-    else if (post && strcmp(path_only, "/api/playlists/delete") == 0) handle_playlist_delete_request(cfd, path);
-    else if (post && strcmp(path_only, "/api/playlists/remove") == 0) handle_playlist_entry_request(cfd, path, false);
-    else if (post && strcmp(path_only, "/api/playlists/move") == 0) handle_playlist_entry_request(cfd, path, true);
-    else if (post && strcmp(path_only, "/api/playlists/import") == 0)
-        handle_playlist_import_request(cfd, path, content_length);
+    if (strcmp(path_only, "/api/folders/roots") == 0) handle_folder_roots_request(cfd);
+    else if (strcmp(path_only, "/api/folders") == 0) handle_folder_list_request(cfd, path);
+    else if (strcmp(path_only, "/api/folders/play") == 0) handle_folder_play_request(cfd, path);
+    else if (strcmp(path_only, "/api/recent") == 0) handle_recent_request(cfd, path);
+    else if (strcmp(path_only, "/api/ratings/state") == 0) handle_rating_state_request(cfd, path);
+    else if (strcmp(path_only, "/api/ratings/set") == 0) handle_rating_edit_request(cfd, path);
+    else if (strcmp(path_only, "/api/favorites/state") == 0) handle_favorite_state_request(cfd, path);
+    else if (strcmp(path_only, "/api/favorites/add") == 0) handle_favorite_edit_request(cfd, path, true);
+    else if (strcmp(path_only, "/api/favorites/remove") == 0) handle_favorite_edit_request(cfd, path, false);
+    else if (strcmp(path_only, "/api/queue/move") == 0) handle_queue_edit_request(cfd, path, true);
+    else if (strcmp(path_only, "/api/queue/play") == 0) handle_queue_edit_request(cfd, path, false);
+    else if (strcmp(path_only, "/api/playlists/create") == 0) handle_playlist_create_request(cfd, path);
+    else if (strcmp(path_only, "/api/playlists/rename") == 0) handle_playlist_rename_request(cfd, path);
+    else if (strcmp(path_only, "/api/playlists/delete") == 0) handle_playlist_delete_request(cfd, path);
+    else if (strcmp(path_only, "/api/playlists/remove") == 0) handle_playlist_entry_request(cfd, path, false);
+    else if (strcmp(path_only, "/api/playlists/move") == 0) handle_playlist_entry_request(cfd, path, true);
+    else if (strcmp(path_only, "/api/playlists/import") == 0) handle_playlist_import_request(cfd, path, content_length);
     else if (strcmp(path_only, "/api/library/sorting") == 0) handle_library_sorting_route(cfd, method, path);
     else if (strcmp(path_only, "/api/library/albums") == 0 && query_param_present(path, "scope"))
         handle_scoped_albums_route(cfd, method, path);
@@ -483,7 +484,7 @@ static void handle_capabilities_request(int cfd, bool trusted) {
         "\"transports\":[\"wifi\",\"bluetooth_classic_rfcomm\"],\"features\":["
         "\"status\",\"playback_controls\",\"queue\",\"library_browse\","
         "\"playlists\",\"album_art\",\"screenshots\",\"catalog_sync_v1\","
-        "\"folder_browse\",\"recently_played\",\"favorites_edit\",\"queue_edit\","
+        "\"folder_browse\",\"recently_played\",\"favorites_edit\",\"ratings_edit\",\"queue_edit\","
         "\"playlist_edit\",\"playlist_import\",\"player_accent\",\"device_info\","
         "\"collection_playback\",\"shuffle_modes\",\"library_sorting\","
         "\"wifi_import\",\"wifi_import_files\",\"settings_v1\",\"plugin_store\",\"plugin_management\",\"player_layouts\"],"
@@ -640,6 +641,20 @@ static void handle_legacy_get(int cfd, const char * path_only, const char * path
     }
 }
 
+static const char *route_method(const char *path) {
+    static const char *get_paths[] = {"/api/folders/roots", "/api/folders", "/api/recent", "/api/ratings/state", "/api/favorites/state", "/", "/api/status", "/api/import", "/api/catalog", "/api/catalog/covers",
+        "/api/catalog/art", "/api/library", "/api/library/artists", "/api/library/album_artists",
+        "/api/library/genres", "/api/library/albums", "/api/art", "/api/playlists/songs", "/api/queue"};
+    static const char *post_paths[] = {"/api/folders/play", "/api/ratings/set", "/api/favorites/add", "/api/favorites/remove", "/api/queue/move", "/api/queue/play", "/api/playlists/create", "/api/playlists/rename", "/api/playlists/delete", "/api/playlists/remove", "/api/playlists/move", "/api/playlists/import", "/api/playlists/add", "/api/playback/toggle", "/api/playback/next",
+        "/api/playback/prev", "/api/playback/mode", "/api/playback/seek", "/api/playback/volume",
+        "/api/playback/play", "/api/playback/queue", "/api/queue/remove", "/api/queue/clear", "/api/screenshot"};
+    for (unsigned i = 0; i < sizeof(get_paths) / sizeof(*get_paths); ++i)
+        if (!strcmp(path, get_paths[i])) return "GET";
+    for (unsigned i = 0; i < sizeof(post_paths) / sizeof(*post_paths); ++i)
+        if (!strcmp(path, post_paths[i])) return "POST";
+    return NULL; /* /playlists supports both; unknown paths retain 404 */
+}
+
 static void handle_legacy_route(int cfd, const char * method, const char * path_only, const char * path) {
     if (strcmp(method, "GET") == 0) {
         handle_legacy_get(cfd, path_only, path);
@@ -674,6 +689,11 @@ static bool route_v1_alias(int cfd, const char * method, char * path_only, bool 
 /* Routes a request that passed authorization. */
 static void route_authorized(int cfd, const char * method, const char * path_only, const char * path,
                              const request_headers_t * headers, bool trusted) {
+    const char *expected = route_method(path_only);
+    if (expected && strcmp(method, expected)) {
+        send_response(cfd, "405 Method Not Allowed", "text/plain", "Method Not Allowed");
+        return;
+    }
     if (headers->content_length_invalid) {
         send_response(cfd, "400 Bad Request", "text/plain", "Bad Content-Length");
         return;
@@ -735,9 +755,10 @@ void remote_control_handle_stream(int fd, const char * bt_mac) {
     if (fd >= 0) handle_connection(fd, bt_mac && bt_rc_trust_normalize(bt_mac, mac) ? mac : NULL);
 }
 
-/* Timeout for poll() on listen_fd so listener_thread_func periodically checks
- * running and terminates cleanly on stop. */
-#define ACCEPT_POLL_TIMEOUT_MS 200
+/* poll() on the listeners blocks until a client connects: stop wakes it by
+ * shutting the listening sockets down (POLLHUP), so no periodic wakeup is
+ * needed to notice it. */
+#define ACCEPT_POLL_TIMEOUT_MS (-1)
 
 typedef struct { int slot; int fd; } remote_client_start_t;
 
@@ -757,6 +778,7 @@ static void * client_worker_func(void *arg) {
 }
 
 static void * listener_thread_func(void * arg) {
+    (void) prctl(PR_SET_NAME, "remote_http");
     (void) arg;
     while (atomic_load_explicit(&running, memory_order_acquire)) {
         pthread_mutex_lock(&listener_mutex);
@@ -768,7 +790,7 @@ static void * listener_thread_func(void * arg) {
         if (pfds[0].fd < 0) break;
         nfds_t count = pfds[1].fd >= 0 ? 2 : 1;
         int pr = poll(pfds, count, ACCEPT_POLL_TIMEOUT_MS);
-        if (pr <= 0) continue; /* Timeout or interrupted -- re-check running */
+        if (pr <= 0) continue; /* Interrupted -- re-check running */
         if (!atomic_load_explicit(&running, memory_order_acquire)) break;
 
         /* Accept only from a listener that is readable (an error or hangup

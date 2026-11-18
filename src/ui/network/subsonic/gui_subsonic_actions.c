@@ -1,6 +1,8 @@
 #include "../../application/gui.h"
 #include "../../text/i18n/i18n.h"
 #include "gui_subsonic.h"
+#include "../../player/screen/gui_queue.h"
+#include "../../player/screen/gui_player.h"
 #include "gui_subsonic_album.h"
 #include "gui_subsonic_internal.h"
 #include "../../../core/persistence/settings.h"
@@ -8,6 +10,7 @@
 #include "../../../network/services/subsonic_client.h"
 #include "../../widgets/builders/screen_builders.h"
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -38,6 +41,8 @@ static void subsonic_fill_stream_queue_entry(const subsonic_server_t * server, c
 
     subsonic_stream_song_meta_t * m = &new_meta[slot];
     snprintf(m->song_id, sizeof(m->song_id), "%s", song->id);
+    snprintf(m->artist_id, sizeof(m->artist_id), "%s", song->artist_id);
+    snprintf(m->album_id, sizeof(m->album_id), "%s", song->album_id);
     snprintf(m->url, sizeof(m->url), "%s", url);
     snprintf(m->title, sizeof(m->title), "%s", song->title);
     snprintf(m->artist, sizeof(m->artist), "%s", song->artist);
@@ -65,23 +70,81 @@ static int subsonic_stream_quality_kbps(void) {
            current_settings.subsonic_stream_quality == 3 ? 320 : 0;
 }
 
+static void subsonic_play_songs(const subsonic_song_t * songs, int count, int index, bool is_album);
+
 static bool subsonic_streams_directly(const subsonic_song_t * song, int quality_kbps) {
     return quality_kbps > 0 || strcasecmp(song->suffix, "mp3") == 0 || strcasecmp(song->suffix, "flac") == 0;
 }
 
-static void subsonic_start_stream_queue(const subsonic_server_t * server, int index, int quality_kbps) {
-    char ** new_playlist = malloc(sizeof(char *) * (size_t) subsonic_songs_count);
-    subsonic_stream_song_meta_t * new_meta = malloc(sizeof(subsonic_stream_song_meta_t) * (size_t) subsonic_songs_count);
+/* The popup owns a copy; opening or cancelling it never grows the stream catalog. */
+static subsonic_stream_song_meta_t context_song;
+static bool context_verify_tls;
+static char context_base_url[sizeof(((subsonic_server_t *)0)->base_url)];
+
+static void subsonic_context_queue(bool next) {
+    size_t count = (size_t) subsonic_stream_meta_count + 1;
+    if (count > INT_MAX || count > SIZE_MAX / sizeof(*subsonic_stream_meta)) return;
+    subsonic_stream_song_meta_t * grown = realloc(subsonic_stream_meta, count * sizeof(*grown));
+    if (!grown) return;
+    subsonic_stream_meta = grown;
+    subsonic_stream_policy_set(context_base_url, context_verify_tls);
+    subsonic_stream_meta[subsonic_stream_meta_count++] = context_song;
+    uint64_t revision = gui_player_queue_revision();
+    if (next) gui_player_queue_play_next(context_song.url);
+    else gui_player_queue_add(context_song.url);
+    if (revision == gui_player_queue_revision()) --subsonic_stream_meta_count;
+}
+
+static bool subsonic_prepare_context_song(const subsonic_song_t *song) {
+    if (!song) return false;
+    int quality_kbps = subsonic_stream_quality_kbps();
+    if (!subsonic_streams_directly(song, quality_kbps)) return false;
+    subsonic_server_t server = subsonic_server_from_settings();
+    char * entry = NULL;
+    subsonic_fill_stream_queue_entry(&server, song, NULL, quality_kbps, &entry, &context_song, 0);
+    context_verify_tls = server.verify_tls;
+    snprintf(context_base_url, sizeof(context_base_url), "%s", server.base_url);
+    if (!entry) return false;
+    free(entry);
+    /* The shared queue and current-track path buffers are 600 bytes. */
+    return context_song.url[0] && strlen(context_song.url) < 600;
+}
+
+void gui_subsonic_open_song_context(int index) {
+    if (index < 0 || index >= subsonic_songs_count) return;
+    if (!subsonic_prepare_context_song(&subsonic_songs_cache[index])) return;
+    open_song_context_menu_stream(context_song.url, subsonic_context_queue);
+}
+
+void gui_subsonic_global_song(const subsonic_song_t *song, bool long_press) {
+    if (!song || !song->id[0] || !gui_subsonic_wifi_connected_guard()) return;
+    if (long_press) {
+        if (subsonic_prepare_context_song(song))
+            open_song_context_menu_stream(context_song.url, subsonic_context_queue);
+        return;
+    }
+
+    subsonic_play_songs(song, 1, 0, false);
+}
+
+static void subsonic_start_stream_queue(const subsonic_server_t * server, const subsonic_song_t * songs,
+                                        int song_count, int index, bool is_album, int quality_kbps) {
+    char ** new_playlist = malloc(sizeof(char *) * (size_t) song_count);
+    subsonic_stream_song_meta_t * new_meta = malloc(sizeof(subsonic_stream_song_meta_t) * (size_t) song_count);
+    if (!new_playlist || !new_meta) {
+        free(new_playlist);
+        free(new_meta);
+        return;
+    }
     int count = 0;
     int start_index = -1;
     /* An album's songs share its cover (Navidrome gives each file its own id);
      * a playlist mixes albums, so each song keeps its own. */
     gui_subsonic_album_info_t album = {0};
-    bool is_album = subsonic_songs_kind == SUBSONIC_LIST_ALBUM_SONGS;
     if (is_album) subsonic_songs_album_info(server, &album);
 
-    for (int i = 0; i < subsonic_songs_count; i++) {
-        subsonic_song_t * s = &subsonic_songs_cache[i];
+    for (int i = 0; i < song_count; i++) {
+        const subsonic_song_t * s = &songs[i];
         if (!subsonic_streams_directly(s, quality_kbps)) continue;
         subsonic_fill_stream_queue_entry(server, s, is_album ? album.cover_id : NULL, quality_kbps, new_playlist, new_meta, count);
         if (i == index) start_index = count;
@@ -98,6 +161,7 @@ static void subsonic_start_stream_queue(const subsonic_server_t * server, int in
         return;
     }
 
+    subsonic_stream_policy_set(server->base_url, server->verify_tls);
     free(subsonic_stream_meta);
     subsonic_stream_meta = new_meta;
     subsonic_stream_meta_count = count;
@@ -129,21 +193,21 @@ static void subsonic_download_then_play(const subsonic_server_t * server, const 
  * reachable instead of the queue silently dead-ending on it. See this
  * section's own top comment for why a non-streamable format tapped
  * directly still downloads first, as a single track, same as before. */
-static void subsonic_play_song_and_queue_rest(int index) {
+static void subsonic_play_songs(const subsonic_song_t * songs, int count, int index, bool is_album) {
     if (!gui_subsonic_wifi_connected_guard()) return; /* cached lists open offline, playing needs the server */
-    subsonic_song_t * song = &subsonic_songs_cache[index];
     subsonic_server_t server = subsonic_server_from_settings();
     int quality_kbps = subsonic_stream_quality_kbps();
-    if (subsonic_streams_directly(song, quality_kbps)) {
-        subsonic_start_stream_queue(&server, index, quality_kbps);
+    if (subsonic_streams_directly(&songs[index], quality_kbps)) {
+        subsonic_start_stream_queue(&server, songs, count, index, is_album, quality_kbps);
         return;
     }
-    subsonic_download_then_play(&server, song);
+    subsonic_download_then_play(&server, &songs[index]);
 }
 
 void gui_subsonic_play_from(int index) {
     if (index < 0 || index >= subsonic_songs_count) return;
-    subsonic_play_song_and_queue_rest(index);
+    subsonic_play_songs(subsonic_songs_cache, subsonic_songs_count, index,
+                        subsonic_songs_kind == SUBSONIC_LIST_ALBUM_SONGS);
 }
 
 static subsonic_download_pending_t subsonic_download_pending = SUBSONIC_DOWNLOAD_PENDING_NONE;
@@ -236,4 +300,43 @@ void gui_subsonic_download_confirm_build(void) {
 
 void gui_subsonic_download_confirm_teardown(void) {
     gui_popup_teardown(&subsonic_download_confirm_popup);
+}
+
+const subsonic_stream_song_meta_t * gui_subsonic_song_for_path(const char * path) {
+    if (!path || !path[0]) return NULL;
+    if (context_song.url[0] && !strcmp(path, context_song.url)) return &context_song;
+    for (int i = 0; i < subsonic_stream_meta_count; ++i)
+        if (!strcmp(path, subsonic_stream_meta[i].url)) return &subsonic_stream_meta[i];
+    return NULL;
+}
+
+bool gui_subsonic_open_song_group(const char * path, bool album) {
+    const subsonic_stream_song_meta_t * song = gui_subsonic_song_for_path(path);
+    if (!song) return false;
+    subsonic_server_t server = subsonic_server_from_settings();
+    char key[SUBSONIC_CACHE_KEY_SIZE];
+    subsonic_cache_server_key(&server, key);
+    if (strcmp(key, song->server_key)) {
+        show_error_toast(TR(album ? "Album unavailable" : "Artist unavailable"));
+        return true;
+    }
+    const char * id = album ? song->album_id : song->artist_id;
+    const char * name = album ? song->album : song->artist;
+    if (!id[0] || !name[0]) {
+        start_subsonic_browse(album ? SUBSONIC_BROWSE_SONG_ALBUM : SUBSONIC_BROWSE_SONG_ARTIST,
+                              song->song_id, name);
+    } else if (album) gui_subsonic_global_open_album(id, name);
+    else gui_subsonic_global_open_artist(id, name);
+    return true;
+}
+
+void gui_subsonic_update_song_groups(const char * server_key, const subsonic_song_t * song) {
+    for (int i = -1; i < subsonic_stream_meta_count; ++i) {
+        subsonic_stream_song_meta_t * meta = i < 0 ? &context_song : &subsonic_stream_meta[i];
+        if (strcmp(meta->server_key, server_key) || strcmp(meta->song_id, song->id)) continue;
+        if (song->artist_id[0]) snprintf(meta->artist_id, sizeof(meta->artist_id), "%s", song->artist_id);
+        if (song->album_id[0]) snprintf(meta->album_id, sizeof(meta->album_id), "%s", song->album_id);
+        if (song->artist[0]) snprintf(meta->artist, sizeof(meta->artist), "%s", song->artist);
+        if (song->album[0]) snprintf(meta->album, sizeof(meta->album), "%s", song->album);
+    }
 }

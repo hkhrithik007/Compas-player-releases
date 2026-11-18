@@ -16,6 +16,7 @@
 #include "../../hardware/indicators/led_control.h"
 #include "../../core/system/lifecycle/idle_shutdown.h"
 #include "../../hardware/power/power_suspend.h"
+#include "../../hardware/power/charge_limiter.h"
 #include "../../library/playlists/playlist_files.h"
 #include "../../core/system/lifecycle/screenshot.h"
 #include <string.h>
@@ -79,15 +80,23 @@ static bool screen_off_playback_active = false;
  * power is connected or unknown, the battery is charging, or external audio
  * (USB/WiFi/BT DAC) is active.
  *
- * In addition to WiFi and Bluetooth DAC modes, USB DAC mode (USB_MODE_DAC)
- * is checked to prevent idle suspend or radio disconnect while receiving USB audio. */
+ * USB DAC blocks it only while a host streams or the gadget is switching; an
+ * armed but idle one is paused first (gui_network_usb_dac_shutdown()). */
 static bool idle_shutdown_attempted = false;
+/* Last idle tick's external-power gate, so an unplug while the screen is
+ * off restarts the idle countdown instead of treating time spent charging
+ * as already-expired idle. */
+static bool idle_blocked_by_external_power = false;
+/* Idle power off was requested and has not yet been seen to either end the process or be refused. */
+static bool idle_poweroff_requested = false;
 
-/* Receiver modes that need their radio or gadget up to keep receiving. */
+/* Receiver modes that need their radio or gadget up to keep receiving. Bluetooth DAC only
+ * counts while a phone is connected or audio flows: idle with nothing connected it sleeps
+ * (the mode is remembered across suspend and power off). */
 static bool dac_receive_mode_active(void) {
-    return current_settings.wifi_dac_mode_enabled || current_settings.bt_dac_mode_enabled ||
-           gui_shell_bt_dac_busy() || gui_network_airplay_enable_pending() ||
-           gui_network_usb_dac_pending() || current_settings.usb_mode == (int) USB_MODE_DAC;
+    return current_settings.wifi_dac_mode_enabled ||
+           gui_shell_bt_dac_in_use() || gui_network_airplay_enable_pending() ||
+           gui_network_usb_dac_pending() || gui_shell_usb_dac_owns_output();
 }
 
 /* Idle radio suspend and idle shutdown never interrupt a DAC mode, playback,
@@ -317,7 +326,6 @@ static void finish_screen_wake_reveal(void) {
     gui_lock_screen_refresh(false);
     gui_control_poll_kick_player_ui();
     force_screen_just_woke = true;
-    gui_library_screen_woke(); /* the page's chunk timer resumes now, not at the next 500 ms poll */
 }
 
 static void begin_screen_wake_reveal(void) {
@@ -474,7 +482,12 @@ static void request_screen_power(bool on) {
 }
 
 void gui_sleep_timer_expired(void) {
-    if (current_settings.bt_dac_mode_enabled || gui_shell_bt_dac_busy()) disable_bt_dac_mode();
+    gui_network_usb_dac_pause();
+    if (current_settings.bt_dac_mode_enabled || gui_shell_bt_dac_busy()) {
+        gui_shell_bt_dac_remember(current_settings.bt_dac_mode_enabled);
+        gui_shell_bt_dac_release();
+        start_bt_apply_output_settings(false, current_settings.bt_volume_sync_enabled);
+    }
     /* A deliberate sleep timer must still finish the session when pausing
      * alone no longer releases the visible-lyrics keep-awake hold. */
     if (current_settings.lyrics_keep_screen_on && gui_lyrics_is_visible())
@@ -758,7 +771,7 @@ static void screen_wake_service_frame_prep(uint32_t age, bool retry_due) {
 static void power_button_timer_cb(lv_timer_t * timer) {
     (void) timer;
     if (!screen_wake_pending) {
-        if (ui_wake_enabled() && timer) lv_timer_pause(timer);
+        if (ui_wake_available() && timer) lv_timer_pause(timer);
         return;
     }
     uint32_t age = lv_tick_elaps(screen_wake_phase_tick);
@@ -790,7 +803,7 @@ static void power_button_timer_cb(lv_timer_t * timer) {
 void media_button_timer_cb(lv_timer_t *timer) {
     (void)timer;
     process_physical_button_events();
-    if (ui_wake_enabled() && media_input_timer) {
+    if (ui_wake_available() && media_input_timer) {
         bool pending = false;
         for (unsigned i = 0; i < BUTTON_MAPPING_BUTTON_COUNT; ++i)
             pending |= physical_button_mapping.pending_taps[i].pending;
@@ -864,12 +877,6 @@ static void poll_radio_suspend(bool playing_now_for_idle, bool external_power_bl
     if (!radios_suspended && (playing_now_for_idle || external_power_blocks_idle || battery_is_charging() ||
         dac_receive_mode_active()))
         gui_network_resume_radio_services();
-    /* bt_is_powered_cached, not bt_control_is_powered(), deliberately --
-     * the latter forks a process, and this condition is checked every
-     * tick while the screen is off, not throttled like refresh_bt_icon()
-     * is. The cached value is frozen at whatever it was when the screen
-     * went dark, which is fine: nothing in this app can change BT power
-     * state without a UI the user can't reach with the screen off. */
     if (!radios_suspended && !idle_power_action_blocked(external_power_blocks_idle) &&
         lv_tick_elaps(screen_off_since_tick) >= RADIO_SUSPEND_DELAY_MS &&
         !shutdown_background_work_active() &&
@@ -929,15 +936,30 @@ static void poll_idle_shutdown(bool external_power_blocks_idle) {
         !shutdown_background_work_active() &&
         gui_network_prepare_radio_sleep()) {
         if (current_settings.idle_suspend_enabled) {
-            if (!gui_shell_bt_dac_shutdown(true)) return;
+            if (!gui_network_usb_dac_shutdown()) return;
+            if (!gui_shell_bt_dac_shutdown(true)) {
+                idle_shutdown_attempted = true; /* no blocking retry every tick this screen-off period */
+                return;
+            }
             plugin_manager_notify_suspending();
             led_control_suspend();
             power_suspend_now();
+            gui_shell_bt_dac_resumed();
             led_control_resume(current_settings.led_indicator_enabled);
 
-            /* Restore UI state and reset inactivity timers on resume so the
-             * display does not immediately time out again. */
-            resume_from_suspend_fixups();
+            if (power_suspend_woke_on_external_power()) {
+                /* Charger plug woke the SoC. Keep the panel off, skip the
+                 * power-button echo window, and re-apply charge limits now. */
+                last_presented_screen = NULL;
+                screen_off_since_tick = lv_tick_get();
+                charge_limiter_poll(current_settings.charge_limiter_enabled, true);
+                safe_charging_poll(current_settings.safe_charging_enabled, true);
+            } else {
+                /* Restore UI state and reset inactivity timers on resume so the
+                 * display does not immediately time out again. */
+                resume_from_suspend_fixups();
+            }
+            gui_network_usb_dac_resume();
             plugin_manager_notify_system_resumed();
 
             /* Unlike idle_shutdown_now() (which never returns --
@@ -950,8 +972,10 @@ static void poll_idle_shutdown(bool external_power_blocks_idle) {
              * indefinitely after a single spurious wake. */
             idle_shutdown_attempted = false;
         } else {
+            if (!gui_network_usb_dac_shutdown()) return;
             (void) gui_shell_bt_dac_shutdown(false);
             idle_shutdown_attempted = true;
+            idle_poweroff_requested = true;
             idle_shutdown_now();
         }
     }
@@ -969,6 +993,11 @@ static void poll_screen_off_idle(bool screen_just_slept) {
     battery_external_power_state_t external_power_state = battery_get_external_power_state();
     bool external_power_blocks_idle =
         external_power_state != BATTERY_EXTERNAL_POWER_DISCONNECTED;
+    if (idle_blocked_by_external_power && !external_power_blocks_idle)
+        screen_off_since_tick = lv_tick_get();
+    idle_blocked_by_external_power = external_power_blocks_idle;
+    /* Likewise when a Bluetooth DAC session ends: time spent receiving is not idle time. */
+    if (gui_shell_bt_dac_went_idle()) screen_off_since_tick = lv_tick_get();
     poll_radio_suspend(playing_now_for_idle, external_power_blocks_idle);
 #ifdef TEST_BUILD_TAG
     log_idle_blockers(external_power_blocks_idle);
@@ -993,6 +1022,14 @@ static void poll_screen_transition_work(bool screen_on_now, bool screen_just_wok
     }
 }
 
+/* A power off that never ended the process was refused or could not save: bring back the
+ * Bluetooth DAC mode that was set aside for it. */
+static void poll_idle_poweroff_aborted(void) {
+    if (!idle_poweroff_requested || idle_shutdown_pending()) return;
+    idle_poweroff_requested = false;
+    gui_shell_bt_dac_resumed();
+}
+
 screen_poll_result_t poll_screen_power(void) {
     bool screen_was_on = backlight_screen_is_on();
 
@@ -1001,6 +1038,7 @@ screen_poll_result_t poll_screen_power(void) {
      * immediately on tap. */
 
     poll_screen_inactivity_timeout();
+    poll_idle_poweroff_aborted();
 
     /* Battery: skip every bit of UI-only refresh work below (label updates,
      * and especially the wpa_cli/bluetoothctl subprocess forks behind
@@ -1016,7 +1054,6 @@ screen_poll_result_t poll_screen_power(void) {
     bool screen_just_slept = !screen_on_now && (screen_was_on || force_screen_just_slept);
     force_screen_just_slept = false;
     if (screen_just_woke) gui_control_poll_kick_player_ui();
-    if (screen_just_woke) gui_library_screen_woke();
     /* A wake can precede completion of the background RC stop. Retry its
      * restoration without blocking input or losing the saved preference. */
     if (screen_on_now) gui_network_resume_radio_services();
@@ -1052,7 +1089,9 @@ void gui_screen_power_deinit(void) {
 void gui_screen_power_start_timers(void) {
     power_input_timer = lv_timer_create(power_button_timer_cb, 25, NULL);
     media_input_timer = lv_timer_create(media_button_timer_cb, 16, NULL);
-    if (ui_wake_enabled()) {
+    /* Button presses wake the loop through ui_wake (hw_buttons notifies), so
+     * these timers only run while a press or a screen wake is in progress. */
+    if (ui_wake_available()) {
         lv_timer_pause(power_input_timer);
         lv_timer_pause(media_input_timer);
     }
@@ -1062,6 +1101,7 @@ void gui_screen_power_reset_idle_state(void) {
     backlight_set_dimmed(false);
     inactivity_dimmed = false;
     idle_shutdown_attempted = false;
+    idle_blocked_by_external_power = false;
 }
 
 void gui_buttons_init(void) {

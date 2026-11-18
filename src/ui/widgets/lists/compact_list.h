@@ -11,6 +11,8 @@ typedef struct {
     const char * trailing_asset;   /* optional theme-relative badge asset */
     const char * subtitle;         /* optional; same borrowed lifetime as label */
     bool is_action;                /* explicit action affordance, not a song */
+    bool is_section_header;
+    int section_stars;             /* optional filled-star section heading */
     uint64_t artwork_key;           /* optional stable thumbnail key, separate from row identity */
     const char * artwork_name;      /* optional artist name for artist-image resolution */
 } compact_list_item_t;
@@ -26,6 +28,8 @@ typedef struct {
     char trailing_asset[64];
     char subtitle[256];
     bool is_action;
+    bool is_section_header;
+    int section_stars;             /* optional filled-star section heading */
     uint64_t artwork_key;
     char artwork_name[128];
     uint64_t aux_key;               /* provider-owned (0 by default): what compact_list_rederive_cached() needs to recompute the row */
@@ -104,6 +108,9 @@ void compact_list_set_now_playing(lv_obj_t * list, int item_index);
  * know this list's internal row geometry. */
 void compact_list_scroll_to_index(lv_obj_t * list, int index);
 
+/* Heading for an empty list; NULL restores the default. Must outlive the list. */
+/* An empty heading suppresses the built-in empty message for custom headers. */
+void compact_list_set_empty_heading(lv_obj_t * list, const char * heading);
 /* Swaps a build_compact_list_screen() list's contents in place -- used for
  * live search filtering -- without the delete()+rebuild this project
  * otherwise uses for changing a screen's list contents. */
@@ -164,6 +171,9 @@ typedef void (*compact_list_press_cb_t)(int index, bool pressed);
 void compact_list_set_press_cb(lv_obj_t * list, compact_list_press_cb_t cb);
 void compact_list_refresh_visible(lv_obj_t * list);
 void compact_list_refresh_all(void);
+void compact_list_recolor_section_ratings(void);
+/* Returns the visible row accessory for a recycled compact-list row. */
+lv_obj_t * compact_list_row_trailing_image(lv_obj_t * row);
 /* Re-runs only the visible row decorators and image alignment for already
  * bound compact-list rows. Does not fetch a paged provider, move the virtual
  * window, or rewrite row labels/identity; use for artwork/cache changes. */
@@ -210,6 +220,8 @@ void compact_list_refetch(lv_obj_t * list);
  * Changed rows are repainted in one pass, rows that look the same are left alone. Returns false
  * (nothing done) when the list has no valid cache or a page fetch is in flight: use
  * compact_list_refetch() then. UI thread only. */
+/* UI thread only. Copies a displayed page identity without fetching the provider. */
+bool compact_list_copy_cached_row(lv_obj_t *list, int index, compact_list_page_row_t *out);
 bool compact_list_rederive_cached(lv_obj_t * list, bool (*fn)(int index, compact_list_page_row_t * row, void * ctx),
                                   void * ctx);
 /* Main loop, after a worker published: make every list's finished page fetch due now. */

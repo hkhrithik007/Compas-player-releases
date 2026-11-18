@@ -133,6 +133,7 @@ static const char * const s_legacy_asset_inventory[] = {
     "pull_down/hibylink.png", "pull_down/hibylink_s.png",
     "pull_down/car_mode.png", "pull_down/car_mode_s.png",
     "pull_down/bt_dac.png", "pull_down/bt_dac_s.png",
+    "pull_down/usb_dac.png", "pull_down/usb_dac_s.png",
     "navigation/search.png", "navigation/more.png",
     "navigation/chevron-right.png", "navigation/back.png",
     "sub_back/bg_search.png", "sub_back/btn_back.png", "sub_back/btn_search.png", "sub_back/close.png",
@@ -152,7 +153,6 @@ static const char * const s_legacy_asset_inventory[] = {
     "touch_list/a_z_result_bg.png", "touch_list/del.png", "touch_list/item_bg.png",
     "touch_list/list_default_album.png", "touch_list/list_folder.png",
     "touch_list/quality_hr.png", "touch_list/quality_high.png", "touch_list/quality_nomal.png",
-    "usb/usb.png",
     "volume/bg.png", "volume/vol.png",
     "category/artist.png", "category/album_artist.png",
     "category/all.png", "category/genre.png",
@@ -1345,8 +1345,7 @@ static void populate_theme_picker_grid(lv_obj_t * list) {
 
     s_picker_entry_count = gui_themes_scan(s_picker_entries, cap);
 
-    lv_obj_t * download = add_pill_chevron_row(list, TR("Download"), download_row_click_cb);
-    lv_obj_set_width(download, lv_pct(100));
+    add_pill_chevron_row(list, TR("Download"), download_row_click_cb);
 
     lv_obj_t * grid = lv_obj_create(list);
     lv_obj_remove_style_all(grid);

@@ -1,4 +1,9 @@
 #include "gui_shell_internal.h"
+#include "../../network/wifi/wifi_dhcp.h"
+#ifndef HOST_BUILD
+#include "../../audio/output/audio_output.h"
+#include "../../hardware/power/power_suspend.h"
+#endif
 
 lv_obj_t * home_screen = NULL;
 static lv_obj_t * dac_home_screen = NULL;
@@ -13,7 +18,7 @@ lv_color_t shell_drawer_off_color;
  * without a rebuild. The native palette's white status glyph art is used
  * as drawn; any other palette recolors it. */
 lv_style_t shell_drawer_bg_style, shell_drawer_panel_style, shell_drawer_row_style,
-    shell_drawer_card_style, shell_drawer_handle_style, shell_topbar_glyph_style;
+    shell_drawer_card_style, shell_drawer_handle_style, shell_topbar_glyph_style, shell_drawer_slider_glyph_style;
 static lv_style_t * const bg_styles[] = {
     &shell_drawer_bg_style, &shell_drawer_panel_style, &shell_drawer_row_style,
     &shell_drawer_card_style, &shell_drawer_handle_style };
@@ -36,6 +41,7 @@ void shell_theme_styles_init(void) {
     if (shell_theme_styles_ready) return;
     for (unsigned i = 0; i < sizeof(bg_styles) / sizeof(bg_styles[0]); i++) lv_style_init(bg_styles[i]);
     lv_style_init(&shell_topbar_glyph_style);
+    lv_style_init(&shell_drawer_slider_glyph_style);
     shell_theme_styles_ready = true;
     gui_shell_refresh_theme_colors();
 }
@@ -95,6 +101,9 @@ void gui_shell_refresh_theme_colors(void) {
     lv_style_set_bg_color(&shell_drawer_row_style, row);
     lv_style_set_bg_color(&shell_drawer_card_style, row);
     lv_style_set_bg_color(&shell_drawer_handle_style, lv_color_mix(off, card, LV_OPA_60));
+    lv_style_set_image_recolor(&shell_drawer_slider_glyph_style, shell_legible(primary, row, GUI_CONTRAST_TEXT, false));
+    lv_style_set_image_recolor_opa(&shell_drawer_slider_glyph_style, LV_OPA_COVER);
+    lv_obj_report_style_change(&shell_drawer_slider_glyph_style);
     shell_drawer_surface = card;
     shell_drawer_off_color = off;
     shell_bar_color = screen;
@@ -221,6 +230,7 @@ void gui_shell_init(uint32_t screen_width, uint32_t screen_height) {
     gui_shell_build_screens(screen_width, screen_height);
     start_bt_source_codec_reconcile_if_needed();
     start_bt_dac_startup_reapply_if_needed();
+    if (wifi_control_is_enabled()) wifi_dhcp_start(); /* a supplicant left running by a previous player run */
     if (current_settings.wifi_restore_at_startup && current_settings.wifi_last_on)
         gui_shell_wifi_ensure_enabled();
     if (current_settings.bt_restore_at_startup && current_settings.bt_last_on)
@@ -240,6 +250,9 @@ void gui_shell_poll(void) {
     poll_usb_audio_output();
     poll_sleep_timer();
     poll_wifi_toggle();
+#ifndef HOST_BUILD
+    if (power_suspend_take_wifi_restore()) wifi_resume(true);
+#endif
     poll_bt_toggle();
     start_bt_source_codec_reconcile_if_needed();
     poll_bt_source_codec_reconcile();
@@ -336,4 +349,24 @@ void gui_shell_set_home_indicator_visible(bool visible) {
     if (home_indicator_band) {
         lv_obj_set_flag(home_indicator_band, LV_OBJ_FLAG_HIDDEN, !visible);
     }
+}
+
+lv_style_t * gui_shell_slider_glyph_style(void) {
+    shell_theme_styles_init();
+    return &shell_drawer_slider_glyph_style;
+}
+
+const char * gui_shell_output_icon_src(const char * wired_src) {
+#ifdef HOST_BUILD
+    bool bluetooth_route = gui_shell_is_bt_audio_connected();
+    bool usb_route = false;
+#else
+    bool usb_route = audio_output_is_usb_active();
+    audio_output_info_t info;
+    audio_output_get_info(&info);
+    audio_output_route_t route = info.active ? info.route : info.requested_route;
+    bool bluetooth_route = !usb_route && route == AUDIO_OUTPUT_ROUTE_BLUETOOTH;
+#endif
+    if (usb_route) return topbar_icon("usb");
+    return bluetooth_route ? topbar_icon("bluetooth") : wired_src;
 }

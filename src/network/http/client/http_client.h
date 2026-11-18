@@ -38,6 +38,7 @@
 typedef struct http_cancel_token {
     pthread_mutex_t mutex;
     int fd;
+    int secondary_fd; /* active stream plus a range-seek candidate; never overwrite */
     bool cancel_requested;
 } http_cancel_token_t;
 
@@ -91,25 +92,11 @@ typedef struct {
     uint8_t * body;
     size_t body_len;
     const char * error;
+    char host[256]; /* of the last hop reached, for diagnostics */
 } http_response_t;
 
 bool http_request_ex(const http_request_t * req_in, http_cancel_token_t * cancel, http_response_t * resp);
 void http_response_free(http_response_t * resp);
-
-/* Sends a one-shot GET request and buffers the response body into heap memory.
- * *out_body is dynamically allocated and must be freed by caller.
- * Returns true if an HTTP response was received (inspect *out_status). */
-bool http_get_to_buffer(const char * url, bool verify_tls, int * out_status, uint8_t ** out_body, size_t * out_body_size);
-bool http_get_to_buffer_limited(const char * url, bool verify_tls, size_t max_body_size, int * out_status,
-                                uint8_t ** out_body, size_t * out_body_size);
-
-/* Sends a POST request with the given Content-Type and payload.
- * *out_body is dynamically allocated and must be freed by caller. */
-bool http_post_to_buffer(const char * url, bool verify_tls, const char * content_type, const uint8_t * body,
-                          size_t body_size, int * out_status, uint8_t ** out_body, size_t * out_body_size);
-bool http_post_to_buffer_limited(const char * url, bool verify_tls, const char * content_type, const uint8_t * body,
-                                  size_t body_size, size_t max_body_size, int * out_status, uint8_t ** out_body,
-                                  size_t * out_body_size);
 
 /* Progress callback for downloads: bytes received so far, and total bytes
  * from Content-Length (0 if unknown). Returning false cancels the download. */
@@ -130,6 +117,7 @@ typedef struct {
     int system_errno;
     uint64_t bytes_written;
     char content_type[128];
+    char host[256]; /* of the last hop reached, for diagnostics */
 } http_file_result_t;
 
 bool http_get_to_open_file(const http_file_request_t *request, FILE *file,

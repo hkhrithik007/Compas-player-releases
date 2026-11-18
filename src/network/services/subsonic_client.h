@@ -14,9 +14,27 @@ typedef struct {
     bool verify_tls;
 } subsonic_server_t;
 
+typedef enum {
+    SUBSONIC_ERROR_NONE,
+    SUBSONIC_ERROR_REQUEST_TOO_LONG,
+    SUBSONIC_ERROR_REQUEST_FAILED,
+    SUBSONIC_ERROR_HTTP_STATUS,
+    SUBSONIC_ERROR_EMPTY_RESPONSE,
+    SUBSONIC_ERROR_INVALID_JSON,
+    SUBSONIC_ERROR_NOT_SUBSONIC_JSON,
+    SUBSONIC_ERROR_SERVER,
+    SUBSONIC_ERROR_INVALID_STATUS
+} subsonic_error_kind_t;
+
+typedef struct {
+    subsonic_error_kind_t kind;
+    int number;
+    char detail[128];
+} subsonic_error_t;
+
 /* Safe diagnostic for the most recent API request on the calling thread.
  * Copy before leaving a worker; never includes URLs or credentials. */
-const char * subsonic_last_error(void);
+subsonic_error_t subsonic_last_error(void);
 
 /* The server's own error code from the same request, 0 when it sent none
  * (network failure, bad JSON). 70 means the item no longer exists. */
@@ -52,6 +70,7 @@ typedef struct {
 
 typedef struct {
     char id[64];
+    char artist_id[64], album_id[64];
     char title[128];
     char artist[128];
     char album[128];
@@ -112,6 +131,10 @@ bool subsonic_get_artists(const subsonic_server_t * server, subsonic_artist_t **
 bool subsonic_get_artist_albums(const subsonic_server_t * server, const char * artist_id,
                                  subsonic_album_t ** out_albums, int * out_count, http_cancel_token_t * cancel);
 
+/* Resolves server group IDs for a song from an older cache entry. */
+bool subsonic_get_song(const subsonic_server_t * server, const char * song_id,
+                       subsonic_song_t * song, http_cancel_token_t * cancel);
+
 /* Fetches songs for an album via getAlbum.view. Caller owns *out_songs. */
 bool subsonic_get_album_songs(const subsonic_server_t * server, const char * album_id,
                                subsonic_song_t ** out_songs, int * out_count, http_cancel_token_t * cancel);
@@ -136,6 +159,12 @@ bool subsonic_get_genres(const subsonic_server_t * server, subsonic_genre_t ** o
  * Caller owns *out_songs. */
 bool subsonic_get_random_songs(const subsonic_server_t * server, int size, subsonic_song_t ** out_songs,
                                int * out_count, http_cancel_token_t * cancel);
+
+/* Bounded global search via search3.view. Each result list is independently owned by the caller. */
+bool subsonic_search3(const subsonic_server_t * server, const char * query, int limit,
+                      subsonic_artist_t ** out_artists, int * out_artist_count,
+                      subsonic_album_t ** out_albums, int * out_album_count,
+                      subsonic_song_t ** out_songs, int * out_song_count, http_cancel_token_t * cancel);
 
 /* The starred items of getStarred2.view. Free each list with free(); a list
  * with no items is NULL with count 0. */
@@ -187,5 +216,15 @@ void subsonic_build_stream_url_quality(const subsonic_server_t * server, const c
  * size_px > 0 asks the server for a cover scaled to that size; 0 asks for the original. */
 void subsonic_build_cover_art_url(const subsonic_server_t * server, const char * cover_art_id, int size_px,
                                   char * out_url, size_t out_url_size);
+
+/* Worker-only. Returns success for an empty result; caller frees *text.
+ * Synced responses are converted to LRC for the shared lyrics parser. */
+bool subsonic_get_lyrics(const subsonic_server_t * server, const char * song_id,
+                         const char * artist, const char * title, char ** text,
+                         bool * synced, http_cancel_token_t * cancel);
+
+/* Captures the selected server policy; reads are thread-safe. */
+void subsonic_stream_policy_set(const char *base_url, bool verify_tls);
+bool subsonic_stream_verify_tls(const char *url);
 
 #endif /* SUBSONIC_CLIENT_H */

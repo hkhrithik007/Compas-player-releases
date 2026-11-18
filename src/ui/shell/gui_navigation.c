@@ -204,7 +204,7 @@ static lv_draw_buf_t * snapshot_screen_base(lv_obj_t * target_screen) {
 /* Blends whichever persistent lv_layer_top() bands would actually be
  * visible on target_screen (status_bar_band per Settings > Display > "Hide
  * Player/Lyrics Top Bar", home_indicator_band per Settings > Display >
- * "Swipe Up for Home") onto an existing owned RGB565 base, mutating it in
+ * "Swipe up for home") onto an existing owned RGB565 base, mutating it in
  * place. Kept as a separate, fresh step from the base snapshot itself
  * (snapshot_screen_base() above) so a cached base does not bake in stale
  * clock, battery, wifi, or home-indicator content.
@@ -1467,6 +1467,7 @@ static void note_text_view_if_dropped(void) {
 }
 
 void nav_pop_ex(bool forward, bool vertical, bool reveal) {
+    if (gui_option_menu_close()) return;
     if (!current_settings.setup_complete && lv_screen_active() == gui_setup_get_screen()) return;
     if (nav_depth > 1) {
         lv_obj_t * removed = nav_stack[nav_depth - 1];
@@ -1531,22 +1532,8 @@ void nav_remove_stack_slot(int index) {
  * since any deeper screen (Artists/Albums/group songs/...) may be showing
  * rows built from the pre-rescan data and would otherwise still be reachable
  * via back-navigation. */
-/* Where "home" actually is right now.
- *
- * In USB DAC mode the device presents itself to a PC as a sound card and the
- * DAC overlay owns the whole screen (see gui_network.c's mode-switch success
- * path) -- it cannot sensibly be used as a normal music player at the same
- * time, so the ordinary Home is not a destination the user is meant to reach
- * while that holds. Routing every reset-to-home through here keeps that true
- * for all of them, rather than only the one path that happened to be
- * reported. Falls back to Home if the overlay was never built. */
-static lv_obj_t * nav_home_target(void) {
-    if (gui_network_usb_dac_mode_active()) {
-        lv_obj_t * dac_overlay = gui_network_get_usb_dac_overlay();
-        if (dac_overlay) return dac_overlay;
-    }
-    return gui_shell_get_home_screen();
-}
+/* Home remains the reset destination while receiver modes are armed. */
+static lv_obj_t * nav_home_target(void) { return gui_shell_get_home_screen(); }
 
 void nav_reset_to_home(void) {
     if (!current_settings.setup_complete) return;
@@ -1765,25 +1752,66 @@ static lv_obj_t * gui_navigation_resolve_reload_page(gui_nav_page_id_t page) {
         case GUI_NAV_PAGE_SETTINGS: return gui_settings_get_screen();
         case GUI_NAV_PAGE_SETTINGS_SYSTEM: return gui_settings_get_system_screen();
         case GUI_NAV_PAGE_PLUGIN_MANAGER: return gui_plugin_manage_get_screen();
+        case GUI_NAV_PAGE_SETTINGS_SOUND: return gui_settings_get_sound_screen();
+        case GUI_NAV_PAGE_SETTINGS_PLAYBACK: return gui_settings_get_playback_screen();
+        case GUI_NAV_PAGE_SETTINGS_DISPLAY: return gui_settings_get_display_screen();
+        case GUI_NAV_PAGE_SETTINGS_PERSONALIZE: return gui_settings_get_personalize_screen();
+        case GUI_NAV_PAGE_SETTINGS_ADVANCED_SOUND: return gui_settings_get_advanced_sound_screen();
+        case GUI_NAV_PAGE_SETTINGS_BUTTONS: return gui_settings_get_buttons_screen();
+        case GUI_NAV_PAGE_SETTINGS_LYRICS: return gui_settings_get_lyrics_screen();
+        case GUI_NAV_PAGE_SETTINGS_ABOUT: return gui_settings_get_about_screen();
         default: return NULL;
     }
 }
 
+static bool reload_page_follows(gui_nav_page_id_t parent, gui_nav_page_id_t child) {
+    switch (child) {
+        case GUI_NAV_PAGE_MORE:
+        case GUI_NAV_PAGE_SETTINGS: return parent == GUI_NAV_PAGE_HOME;
+        case GUI_NAV_PAGE_SETTINGS_SYSTEM:
+        case GUI_NAV_PAGE_SETTINGS_SOUND:
+        case GUI_NAV_PAGE_SETTINGS_PLAYBACK:
+        case GUI_NAV_PAGE_SETTINGS_DISPLAY:
+        case GUI_NAV_PAGE_SETTINGS_PERSONALIZE:
+        case GUI_NAV_PAGE_SETTINGS_ABOUT: return parent == GUI_NAV_PAGE_SETTINGS;
+        case GUI_NAV_PAGE_SETTINGS_ADVANCED_SOUND: return parent == GUI_NAV_PAGE_SETTINGS_SOUND;
+        case GUI_NAV_PAGE_SETTINGS_BUTTONS: return parent == GUI_NAV_PAGE_SETTINGS_PLAYBACK;
+        case GUI_NAV_PAGE_SETTINGS_LYRICS: return parent == GUI_NAV_PAGE_SETTINGS_PERSONALIZE;
+        case GUI_NAV_PAGE_PLUGIN_MANAGER:
+            return parent == GUI_NAV_PAGE_MORE || parent == GUI_NAV_PAGE_SETTINGS_SYSTEM;
+        default: return false;
+    }
+}
+
+bool gui_navigation_capture_settings_path(gui_nav_reload_state_t * state) {
+    if (!state || nav_depth < 2 || nav_depth > GUI_NAV_RELOAD_PATH_MAX ||
+        nav_stack[0] != gui_shell_get_home_screen() || nav_stack[1] != gui_settings_get_screen())
+        return false;
+    memset(state, 0, sizeof(*state));
+    state->pages[0] = GUI_NAV_PAGE_HOME;
+    for (int i = 1; i < nav_depth; ++i) {
+        gui_nav_page_id_t page;
+        for (page = GUI_NAV_PAGE_SETTINGS; page < GUI_NAV_PAGE_COUNT; ++page) {
+            if (page == GUI_NAV_PAGE_PLUGIN_MANAGER) continue;
+            if (nav_stack[i] == gui_navigation_resolve_reload_page(page)) break;
+        }
+        if (page == GUI_NAV_PAGE_COUNT || !reload_page_follows(state->pages[i - 1], page)) return false;
+        state->pages[i] = page;
+    }
+    state->depth = nav_depth;
+    return true;
+}
+
 bool gui_navigation_restore_path(const gui_nav_reload_state_t * state) {
     if (!state || state->depth < 1 || state->depth > GUI_NAV_RELOAD_PATH_MAX ||
-        state->pages[0] != GUI_NAV_PAGE_HOME ||
-        state->pages[state->depth - 1] != GUI_NAV_PAGE_PLUGIN_MANAGER) return false;
+        state->pages[0] != GUI_NAV_PAGE_HOME) return false;
 
     lv_obj_t * rebuilt[GUI_NAV_RELOAD_PATH_MAX] = {0};
     for (int i = 0; i < state->depth; i++) {
+        if (i && !reload_page_follows(state->pages[i - 1], state->pages[i])) return false;
         rebuilt[i] = gui_navigation_resolve_reload_page(state->pages[i]);
         if (!rebuilt[i]) return false;
     }
-
-    bool valid_path = (state->depth == 3 && state->pages[1] == GUI_NAV_PAGE_MORE) ||
-                      (state->depth == 4 && state->pages[1] == GUI_NAV_PAGE_SETTINGS &&
-                       state->pages[2] == GUI_NAV_PAGE_SETTINGS_SYSTEM);
-    if (!valid_path) return false;
 
     for (int i = 0; i < NAV_STACK_MAX; i++) nav_stack[i] = NULL;
     for (int i = 0; i < state->depth; i++) nav_stack[i] = rebuilt[i];
@@ -1793,7 +1821,8 @@ bool gui_navigation_restore_path(const gui_nav_reload_state_t * state) {
     lv_screen_load(rebuilt[state->depth - 1]);
     sync_player_topbar_visibility(rebuilt[state->depth - 1]);
     sync_home_indicator_visibility(rebuilt[state->depth - 1]);
-    gui_plugin_manage_restore_scroll_y(state->plugin_manager_scroll_y);
+    if (state->pages[state->depth - 1] == GUI_NAV_PAGE_PLUGIN_MANAGER)
+        gui_plugin_manage_restore_scroll_y(state->plugin_manager_scroll_y);
     return true;
 }
 

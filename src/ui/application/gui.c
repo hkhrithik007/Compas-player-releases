@@ -23,6 +23,7 @@
 #include "../effects/transition_compositor.h"
 #include "../../network/bluetooth/control/bluetooth_control.h"
 #include "../../hardware/device/headphone_status.h"
+#include "../../hardware/usb/wireless_adb.h"
 #include "../plugins/manage/gui_plugin_manage.h"
 #include "../plugins/manage/gui_plugin_store.h"
 #include "../plugins/emulators/gui_emulator_store.h"
@@ -43,7 +44,7 @@
 #endif
 
 lv_obj_t * stream_media_screen;
-bool favorite_is_set = false;
+int now_playing_stars = 0;
 
 /* Set when gui_release_memory_for_external_session() dropped the snapshots,
  * so the resume rebuilds them only after a session that freed them. */
@@ -312,15 +313,13 @@ static void reconcile_usb_mode_at_boot(void) {
     if (!usb_mode_control_reconcile_dac_session())
         fprintf(stderr, "gui: USB DAC session recovery incomplete; retaining conservative power policy\n");
 
-    /* ADB is the one mode that survives a restart, because enabling it means
-     * going into Developer Options and asking for it. Anything else starts as
-     * Storage: DAC in particular would otherwise block local playback on a
-     * device that may not even be plugged into anything.
-     *
-     * Applied through the ordinary switch path rather than inline --
-     * usb_mode_control_apply() spends seconds in settle and retry loops, which
-     * would stall startup if it ran on this thread. poll_usb_mode_switch()
-     * completes it in the background. */
+    /* Live or about to start, USB ADB owns the port; claimed before the boot
+     * switch so its result, success or failure, is the last word. */
+    wireless_adb_boot_sync(current_settings.wireless_adb_enabled,
+                           current_settings.usb_mode == (int) USB_MODE_ADB);
+
+    /* Gadget discovery is separate from saved DAC intent. Restoration waits
+     * for host enumeration in the hotplug poll and never blocks startup. */
     if (!detected) {
         if (current_settings.usb_mode == (int) USB_MODE_ADB) {
             start_usb_mode_switch(USB_MODE_ADB);
@@ -329,6 +328,7 @@ static void reconcile_usb_mode_at_boot(void) {
             settings_save(&current_settings);
         }
     }
+    gui_network_usb_dac_boot_reconcile();
 }
 
 /* Applies the saved volume, brightness, LED, charging and timezone settings. */
@@ -362,16 +362,11 @@ static void apply_boot_audio_and_power(void) {
 
 /* Clears the receiver and server modes that never survive a restart. */
 static void reset_session_only_network_modes(void) {
-    /* Receiver/server modes are session-only:
-     * Never restore AirPlay, DLNA, or Remote Control automatically after a
-     * process start to avoid unintentional listener exposure and resource usage.
-     * Remote Control can use either Wi-Fi or Bluetooth after explicit activation. */
+    /* AirPlay and DLNA remain session-only. */
     bool network_modes_changed = current_settings.wifi_dac_mode_enabled ||
-                                 current_settings.dlna_renderer_enabled ||
-                                 current_settings.remote_control_enabled;
+                                 current_settings.dlna_renderer_enabled;
     current_settings.wifi_dac_mode_enabled = false;
     current_settings.dlna_renderer_enabled = false;
-    current_settings.remote_control_enabled = false;
     if (network_modes_changed) settings_save_async(&current_settings);
     gui_remote_settings_init(); /* after the session-only fields above are final */
 }

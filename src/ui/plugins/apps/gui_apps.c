@@ -56,13 +56,6 @@ typedef struct {
     bool has_file;
 } launch_request_t;
 
-#ifndef HOST_BUILD
-static bool dac_mode_active(void) {
-    return current_settings.wifi_dac_mode_enabled || current_settings.bt_dac_mode_enabled ||
-           current_settings.usb_mode == USB_MODE_DAC;
-}
-#endif
-
 static bool approval_show(const app_manifest_t * app, const char * file, const char * sha);
 
 /* Runs the app with the emulators' guards: SD card, USB storage, DAC mode,
@@ -82,7 +75,7 @@ static void launch_now(const char * app_id, const char * file) {
         show_info_toast(TR("Check the SD card and disconnect USB storage before running apps."));
         return;
     }
-    if (dac_mode_active()) {
+    if (gui_network_dac_mode_active()) {
         show_info_toast(TR("Turn off DAC mode to run apps."));
         return;
     }
@@ -310,7 +303,7 @@ static void build_apps_screen(void) {
                                            .on_click = app_row_click_cb, .user_data = (void *) (intptr_t) i,
                                            .out_row = &app_rows[i] };
     }
-    apps_screen = build_pill_list_screen(TR("External Apps"), generic_back_cb, app_items, count,
+    apps_screen = build_pill_list_screen(TR("External apps"), generic_back_cb, app_items, count,
                                          gui_theme_accent_style(), GUI_ROW_GAP, 100);
     for (int i = 0; i < count; i++) {
         decorate_app_row(app_rows[i], app_icons[i]);

@@ -22,10 +22,12 @@ bool wifi_control_is_enabled(void);
 
 /* Enable/disable Wi-Fi via the stock firmware's own scripts
  * (/usr/bin/wifi_on.sh, /usr/bin/wifi_off.sh) rather than reimplementing
- * the ifconfig/wpa_supplicant/udhcpc dance ourselves. Brings wlan0 up,
- * starts wpa_supplicant against /data/wpa_supplicant.conf (auto-reconnecting
- * to any saved network), and gets a DHCP lease. Blocking for a second or
- * so; call off the UI thread. */
+ * the ifconfig/wpa_supplicant dance ourselves. Brings wlan0 up and starts
+ * wpa_supplicant against /data/wpa_supplicant.conf (auto-reconnecting to
+ * any saved network); DHCP is then owned by wifi_dhcp.h, which follows
+ * wpa_supplicant's association events. Blocking for as long as the script
+ * runs (a few seconds, up to the radio script budget); call off the UI
+ * thread. */
 void wifi_control_enable(void);
 void wifi_control_disable(void);
 
@@ -49,7 +51,8 @@ int wifi_control_get_results(wifi_network_t * out, int max_count);
  * a few seconds for association, call off the UI thread. Returns true once
  * wpa_cli accepted the configuration -- doesn't itself confirm association
  * succeeded (poll wifi_get_status() afterward for that). */
-bool wifi_control_connect(const char * ssid, const char * password);
+void wifi_control_finish_connect(bool associated);
+bool wifi_control_connect_with_id(const char *ssid, const char *password, int *out_id);
 
 /* Drops the current association (wpa_cli disconnect) without touching the
  * saved network profile -- wpa_supplicant stays in a disconnected state
@@ -88,6 +91,7 @@ bool wifi_control_connect_saved(int id);
 
 typedef struct {
     char ssid[WIFI_MAX_SSID_LEN];
+    int network_id; /* supplicant profile ID, -1 if absent */
     char ip[16];
     char gateway[16];
     char mac[18];

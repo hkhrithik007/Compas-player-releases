@@ -149,7 +149,7 @@ static lv_obj_t * build_timezone_region_screen(void) {
         items[i] = (pill_list_item_t){ TR(TIMEZONE_REGIONS[i]), PILL_ACCESSORY_CHEVRON, false, timezone_region_row_cb, NULL,
                                         (void *) (intptr_t) i };
     }
-    lv_obj_t * scr = build_pill_list_screen(TR("Time Zone"), generic_back_cb, items, (int) TIMEZONE_REGION_COUNT, gui_theme_accent_style(), GUI_ROW_GAP, 100);
+    lv_obj_t * scr = build_pill_list_screen(TR("Time zone"), generic_back_cb, items, (int) TIMEZONE_REGION_COUNT, gui_theme_accent_style(), GUI_ROW_GAP, 100);
     finalize_screen_navigation(scr);
     return scr;
 }
@@ -208,7 +208,7 @@ static void clock_set_time_save_cb(lv_event_t * e) {
 static void clock_set_time_row_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     if (current_settings.clock_automatic) {
-        show_info_toast(TR("Turn off Automatic to set the clock"));
+        show_info_toast(TR("Turn off automatic to set the clock"));
         return;
     }
     struct tm local;
@@ -239,24 +239,25 @@ static lv_obj_t * build_clock_screen(void) {
     pill_list_item_t items[] = {
         { TR("Automatic"), PILL_ACCESSORY_TOGGLE, current_settings.clock_automatic,
           NULL, clock_automatic_changed_cb, NULL },
-        { .label = TR("Set Time"), .accessory = PILL_ACCESSORY_CHEVRON,
+        { .label = TR("Set time"), .accessory = PILL_ACCESSORY_CHEVRON,
           .on_click = clock_set_time_row_cb, .out_row = &clock_set_time_row },
-        { TR("24-Hour Clock"), PILL_ACCESSORY_TOGGLE, current_settings.clock_24h,
+        { TR("24-hour clock"), PILL_ACCESSORY_TOGGLE, current_settings.clock_24h,
           NULL, clock_24h_switch_event_cb, NULL },
-        { .label = TR("Time Zone"), .accessory = PILL_ACCESSORY_CHEVRON,
+        { .label = TR("Time zone"), .accessory = PILL_ACCESSORY_CHEVRON,
           .on_click = timezone_settings_row_cb, .out_row = &clock_timezone_row },
     };
     lv_obj_t * scr = build_pill_list_screen(TR("Clock"), generic_back_cb, items, 4,
 gui_theme_accent_style(), GUI_ROW_GAP, 100);
     if (clock_timezone_row) {
         lv_obj_t * title = lv_obj_get_child(clock_timezone_row, 0);
-        if (title) lv_obj_align(title, LV_ALIGN_LEFT_MID, 24, -18);
+        if (title) lv_obj_align(title, LV_ALIGN_LEFT_MID, BOARD_SCALE_PX(24), -BOARD_SCALE_PY(18));
         clock_timezone_value_label = lv_label_create(clock_timezone_row);
         lv_obj_add_style(clock_timezone_value_label, &style_theme_text_muted, 0);
         lv_obj_set_style_text_font(clock_timezone_value_label,
                                    gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
-        configure_scrolling_row_label(clock_timezone_value_label, 370);
-        lv_obj_align(clock_timezone_value_label, LV_ALIGN_LEFT_MID, 24, 23);
+        configure_scrolling_row_label(clock_timezone_value_label, BOARD_SCALE_PX(370));
+        lv_obj_align(clock_timezone_value_label, LV_ALIGN_LEFT_MID,
+                     BOARD_SCALE_PX(24), BOARD_SCALE_PY(23));
         clock_timezone_indicator_update();
     }
     clock_update_set_time_enabled();
@@ -267,7 +268,7 @@ gui_theme_accent_style(), GUI_ROW_GAP, 100);
 static lv_obj_t * build_clock_set_time_screen(void) {
     lv_obj_t * scr = lv_obj_create(NULL);
     lv_obj_add_style(scr, &style_theme_screen_bg, 0);
-    build_screen_header(scr, TR("Set Time"), generic_back_cb, NULL, NULL);
+    build_screen_header(scr, TR("Set time"), generic_back_cb, NULL, NULL);
 
     lv_obj_t * row = lv_obj_create(scr);
 #if defined(BOARD_TEMPOTEC_V1)

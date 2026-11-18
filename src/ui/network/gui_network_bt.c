@@ -18,6 +18,88 @@ static lv_obj_t * bt_codec_screen;
 static lv_obj_t * bt_advanced_screen;
 static lv_obj_t * bt_rate_screen;
 static void start_bt_scan(bool inquiry);
+static void start_bt_connect(const char * mac);
+static void start_bt_forget(const char * mac, bool disconnect);
+
+static lv_obj_t * bt_output_menu_popup;
+static lv_obj_t * bt_output_menu_backdrop;
+static bool bt_output_menu_pending;
+static gui_shell_bt_output_device_t bt_output_menu_devices[BT_MAX_RESULTS];
+static int bt_output_menu_device_count;
+
+static void bt_output_menu_delete(void) {
+    if (bt_output_menu_backdrop) gui_popup_backdrop_hide(bt_output_menu_backdrop);
+    if (bt_output_menu_popup) lv_obj_delete(bt_output_menu_popup);
+    if (bt_output_menu_backdrop) lv_obj_delete(bt_output_menu_backdrop);
+    bt_output_menu_popup = NULL;
+    bt_output_menu_backdrop = NULL;
+}
+static void bt_output_menu_close(void) {
+    bt_output_menu_pending = false;
+    bt_output_menu_delete();
+}
+
+static void bt_output_menu_backdrop_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) bt_output_menu_close();
+}
+
+static void bt_output_menu_action_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    int action = (int)(intptr_t)lv_event_get_user_data(e);
+    char mac[18] = "";
+    bool disconnect = false;
+    if (action == -1) {
+        disconnect = gui_shell_get_bt_audio_device_mac(mac, sizeof(mac));
+    } else if (action >= 0 && action < bt_output_menu_device_count) {
+        snprintf(mac, sizeof(mac), "%s", bt_output_menu_devices[action].mac);
+        if (bt_output_menu_devices[action].connected) mac[0] = '\0';
+    }
+    bt_output_menu_close();
+    if (!mac[0]) return;
+    gui_shell_cancel_bt_reconnect();
+    if (disconnect) start_bt_forget(mac, true);
+    else start_bt_connect(mac);
+}
+
+static void bt_output_menu_build(void) {
+    bt_output_menu_delete();
+    menu_popup_row_t rows[BT_MAX_RESULTS + 2];
+    int count = 0;
+    rows[count++] = (menu_popup_row_t){ TR("Wired"), bt_output_menu_action_cb, false, false,
+                                        (void *)(intptr_t)-1 };
+    for (int i = 0; i < bt_output_menu_device_count; ++i) {
+        static char labels[BT_MAX_RESULTS][112];
+        const char * name = bt_output_menu_devices[i].name[0] ? bt_output_menu_devices[i].name
+                                                              : bt_output_menu_devices[i].mac;
+        snprintf(labels[i], sizeof(labels[i]), "%s%s%s", name,
+                 bt_output_menu_devices[i].connected ? " · " : "",
+                 bt_output_menu_devices[i].connected ? TR("Connected") : "");
+        rows[count++] = (menu_popup_row_t){ labels[i], bt_output_menu_action_cb, false, false,
+                                            (void *)(intptr_t)i };
+    }
+    rows[count++] = (menu_popup_row_t){ TR("Cancel"), bt_output_menu_action_cb, false, true,
+                                        (void *)(intptr_t)-2 };
+    bt_output_menu_popup = build_menu_popup(rows, count, bt_output_menu_backdrop_cb,
+                                            &bt_output_menu_backdrop);
+    gui_popup_backdrop_show(bt_output_menu_backdrop);
+    lv_obj_remove_flag(bt_output_menu_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void gui_network_bt_open_output_menu(void) {
+    bt_output_menu_pending = true;
+    bt_output_menu_device_count = 0;
+    bt_output_menu_build();
+    gui_shell_request_bt_output_devices();
+}
+
+void gui_network_bt_output_snapshot_ready(void) {
+    if (!bt_output_menu_pending) return;
+    bt_output_menu_pending = false;
+    int count = gui_shell_get_bt_output_devices(bt_output_menu_devices, BT_MAX_RESULTS);
+    if (count < 0) show_error_toast(TR("Unable to load items"));
+    bt_output_menu_device_count = count > 0 ? count : 0;
+    if (bt_output_menu_popup) bt_output_menu_build();
+}
 
 /* ---- Bluetooth settings screen ----
  *
@@ -80,8 +162,14 @@ static void * bt_connect_thread_func(void * arg) {
 }
 
 static void start_bt_connect(const char * mac) {
-    if (current_settings.bt_dac_mode_enabled) return;
-    if (bt_connect_active) return; /* one at a time -- bt_connect_thread/succeeded are single shared slots */
+    if (gui_network_bt_dac_active()) {
+        show_info_toast(TR("Pause Bluetooth DAC to connect a device"));
+        return;
+    }
+    if (bt_connect_active) {
+        show_info_toast(TR("Still connecting"));
+        return;
+    }
 
     bt_connect_request_t * req = malloc(sizeof(*req));
     if (!req) return;
@@ -125,6 +213,7 @@ static atomic_bool bt_forget_done_flag = false;
 typedef struct {
     char mac[18];
     bool succeeded;
+    bool disconnect;
 } bt_forget_request_t;
 
 /* Kept alive past the thread completing (freed in poll_bt_forget() instead
@@ -135,17 +224,18 @@ static bt_forget_request_t * bt_forget_pending_req = NULL;
 
 static void * bt_forget_thread_func(void * arg) {
     bt_forget_request_t * req = (bt_forget_request_t *) arg;
-    req->succeeded = bt_control_forget(req->mac);
+    req->succeeded = req->disconnect ? bt_control_disconnect(req->mac) : bt_control_forget(req->mac);
     atomic_store_explicit(&bt_forget_done_flag, true, memory_order_release); /* written last -- poll_bt_forget only checks this flag */
     return NULL;
 }
 
-static void start_bt_forget(const char * mac) {
+static void start_bt_forget(const char * mac, bool disconnect) {
     if (bt_forget_active) return;
     gui_shell_cancel_bt_reconnect();
     bt_forget_request_t * req = malloc(sizeof(*req));
     if (!req) return;
     snprintf(req->mac, sizeof(req->mac), "%s", mac);
+    req->disconnect = disconnect;
     bt_forget_pending_req = req;
 
     atomic_store_explicit(&bt_forget_done_flag, false, memory_order_relaxed);
@@ -169,8 +259,11 @@ void poll_bt_forget(void) {
          * have observed the device before Forget completed. Invalidate that
          * positive snapshot before changing the remembered preference. */
         gui_shell_cancel_bt_reconnect();
-        bt_clear_snapshot_state_for_mac(bt_forget_pending_req->mac);
-        if (strcasecmp(current_settings.bt_last_output_mac, bt_forget_pending_req->mac) == 0) {
+        if (bt_forget_pending_req->disconnect)
+            bt_apply_connection_result_to_snapshot(bt_forget_pending_req->mac, false);
+        else bt_clear_snapshot_state_for_mac(bt_forget_pending_req->mac);
+        if (!bt_forget_pending_req->disconnect &&
+            strcasecmp(current_settings.bt_last_output_mac, bt_forget_pending_req->mac) == 0) {
             current_settings.bt_last_output_mac[0] = '\0';
             settings_save_async(&current_settings);
         }
@@ -184,8 +277,11 @@ void poll_bt_forget(void) {
  * Displays an action popup offering Connect or Forget based on the device's
  * current paired/connected state. */
 static gui_popup_t bt_action_popup;
+static gui_popup_t bt_forget_popup;
+static char bt_forget_mac[18];
+static bool bt_action_disconnect;
+static lv_obj_t * bt_action_connect_label;
 static lv_obj_t * bt_action_popup_title;
-static lv_obj_t * bt_action_connect_row;
 static lv_obj_t * bt_action_forget_row;
 static char bt_action_popup_device_mac[18] = "";
 
@@ -216,19 +312,24 @@ static void bt_action_connect_cb(lv_event_t * e) {
     char mac[18];
     if (!bt_action_take_mac(mac)) return;
     gui_shell_cancel_bt_reconnect();
-    start_bt_connect(mac);
+    if (bt_action_disconnect) start_bt_forget(mac, true);
+    else start_bt_connect(mac);
 }
 
+static void bt_forget_confirm_cb(lv_event_t * e) {
+    (void) e;
+    gui_popup_hide(&bt_forget_popup);
+    start_bt_forget(bt_forget_mac, false);
+}
 static void bt_action_forget_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    char mac[18];
-    if (!bt_action_take_mac(mac)) return;
-    start_bt_forget(mac);
+    if (!bt_action_take_mac(bt_forget_mac)) return;
+    gui_popup_confirm(&bt_forget_popup, TR("Forget this device?"), NULL, TR("Forget"), bt_forget_confirm_cb);
 }
 
 static void build_bt_action_popup(void) {
-    bt_action_popup.popup = build_confirm_popup("", LV_LABEL_LONG_DOT, &bt_action_popup_title, NULL, TR("Connect"),
-                                                 accent_lv_color(), bt_action_connect_cb, &bt_action_connect_row, TR("Forget"),
+    bt_action_popup.popup = build_confirm_popup_with_labels("", LV_LABEL_LONG_DOT, &bt_action_popup_title, NULL, NULL, TR("Connect"), &bt_action_connect_label,
+                                                 accent_lv_color(), bt_action_connect_cb, NULL, TR("Forget"),
                                                  lv_color_hex(GUI_BREEZE_NEGATIVE), bt_action_forget_cb, &bt_action_forget_row,
                                                  bt_action_popup_backdrop_cb, &bt_action_popup.backdrop);
 }
@@ -240,17 +341,9 @@ static void show_bt_action_popup(int index) {
 
     lv_label_set_text(bt_action_popup_title, dev->name[0] != '\0' ? dev->name : dev->mac);
 
-    /* Connect makes sense unless already connected. Forget makes sense for
-     * anything paired OR connected (the "OR connected" is just a safety net
-     * -- a connected-but-somehow-not-paired device shouldn't be able to land
-     * on a popup with neither action available). */
-    bool show_connect = !dev->connected;
+    bt_action_disconnect = dev->connected;
+    lv_label_set_text(bt_action_connect_label, dev->connected ? TR("Disconnect") : TR("Connect"));
     bool show_forget = dev->paired || dev->connected;
-    /* No manual reposition needed -- bt_action_popup's rows are flex-column
-     * children now (build_confirm_popup()), so hiding one lets the other
-     * reflow up to take its place automatically. */
-    if (show_connect) lv_obj_remove_flag(bt_action_connect_row, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(bt_action_connect_row, LV_OBJ_FLAG_HIDDEN);
     if (show_forget) lv_obj_remove_flag(bt_action_forget_row, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(bt_action_forget_row, LV_OBJ_FLAG_HIDDEN);
 
@@ -428,6 +521,7 @@ static bool bt_scan_active = false;
 static atomic_bool bt_scan_done_flag = false;
 static bt_device_t bt_scan_pending_results[BT_MAX_RESULTS];
 static int bt_scan_pending_result_count = 0;
+static bool bt_paired_snapshot_loaded;
 
 /* Set before the thread starts, so the write happens-before the read. */
 static bool bt_scan_want_inquiry = true;
@@ -448,14 +542,17 @@ static void start_bt_scan(bool inquiry) {
     if (bt_scan_active) return;
 
     bt_scan_want_inquiry = inquiry;
+    bt_paired_snapshot_loaded = false;
 
     atomic_store_explicit(&bt_scan_done_flag, false, memory_order_relaxed);
     bt_scan_active = true;
     set_bt_rescan_active(true);
+    populate_bt_screen();
 
     if (pthread_create(&bt_scan_thread, NULL, bt_scan_thread_func, NULL) != 0) {
         bt_scan_active = false;
         set_bt_rescan_active(false);
+        populate_bt_screen();
     }
 }
 
@@ -469,6 +566,7 @@ void poll_bt_scan(void) {
         memcpy(bt_scan_results, bt_scan_pending_results,
                (size_t) bt_scan_pending_result_count * sizeof(bt_scan_results[0]));
         bt_scan_result_count = bt_scan_pending_result_count;
+        bt_paired_snapshot_loaded = true;
     }
     populate_bt_screen(); /* refresh the list either way -- worth keeping current even if the user already backed out */
 }
@@ -486,7 +584,7 @@ typedef struct {
 } bt_codec_option_t;
 
 static const bt_codec_option_t bt_codec_options[] = {
-    { "auto", N_("Auto") },   { "ldac_hq", N_("LDAC Quality") }, { "ldac_sq", N_("LDAC Standard") },
+    { "auto", N_("Auto") },   { "ldac_hq", N_("LDAC quality") }, { "ldac_sq", N_("LDAC standard") },
     { "ssc", "SSC" },        { "aptx", "aptX" },                { "aac", "AAC" },
     { "sbc", "SBC" },        { "sbc_xq", "SBC-XQ" },
 };
@@ -729,18 +827,18 @@ static void bt_speexrate_toggle_cb(lv_event_t * e) {
 
 static void populate_bt_advanced_screen(void) {
     lv_obj_clean(bt_advanced_list);
-    add_pill_toggle_row(bt_advanced_list, TR("Bluetooth Volume Sync"),
+    add_pill_toggle_row(bt_advanced_list, TR("Bluetooth volume sync"),
                         current_settings.bt_volume_sync_enabled, bt_volume_sync_toggle_cb);
     add_pill_chevron_row(bt_advanced_list, TR("Codec"), bt_codec_settings_row_cb);
-    add_pill_chevron_row(bt_advanced_list, TR("Sample Rate"), bt_rate_settings_row_cb);
+    add_pill_chevron_row(bt_advanced_list, TR("Sample rate"), bt_rate_settings_row_cb);
     /* Only does anything for a track whose rate differs from the negotiated
      * transport rate; with Sample Rate at 44.1 kHz most tracks never reach
      * the resampler at all. */
-    add_pill_toggle_row(bt_advanced_list, TR("Speex Resampling"),
+    add_pill_toggle_row(bt_advanced_list, TR("Speex resampling"),
                         current_settings.bt_speexrate_enabled, bt_speexrate_toggle_cb);
-    add_pill_toggle_row(bt_advanced_list, TR("Hide Unnamed Devices"),
+    add_pill_toggle_row(bt_advanced_list, TR("Hide unnamed devices"),
                         current_settings.bt_hide_unnamed_devices, bt_hide_unnamed_toggle_cb);
-    add_pill_toggle_row(bt_advanced_list, TR("Restore at Startup"),
+    add_pill_toggle_row(bt_advanced_list, TR("Restore at startup"),
                         current_settings.bt_restore_at_startup, bt_restore_at_startup_toggle_cb);
 }
 
@@ -800,6 +898,7 @@ static uint64_t bt_screen_signature(bool powered) {
     int32_t row_h = ui_list_row_height();
     const lv_font_t * fonts[2] = {gui_theme_font(GUI_FONT_ROLE_BODY), gui_theme_font(GUI_FONT_ROLE_SUBTEXT)};
     h = bt_sig_add(h, &powered, sizeof(powered));
+    h = bt_sig_add(h, &bt_paired_snapshot_loaded, sizeof(bt_paired_snapshot_loaded));
     h = bt_sig_add(h, &row_h, sizeof(row_h));
     h = bt_sig_add(h, fonts, sizeof(fonts));
     /* A font size change rewrites the descriptors in place, so the addresses alone miss it. */
@@ -869,6 +968,7 @@ void populate_bt_screen(void) {
      * pre-existing hang class start_refresh_bt_icon()'s own comment
      * documents). The cache is kept fresh in the background regardless. */
     bool powered = bt_is_powered_cached;
+    if (!powered) bt_paired_snapshot_loaded = false;
     if (bt_rescan_btn) {
         if (powered) lv_obj_remove_flag(bt_rescan_btn, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_add_flag(bt_rescan_btn, LV_OBJ_FLAG_HIDDEN);
@@ -877,7 +977,7 @@ void populate_bt_screen(void) {
     /* Nothing changed: keep the rows (and any press on them) in place. A
      * different or emptied list always rebuilds. A touch in progress defers
      * the rebuild; the signature stays stale so the next refresh does it. */
-    uint64_t signature = bt_screen_signature(powered);
+    uint64_t signature = bt_screen_signature(powered) ^ ((uint64_t)(bt_scan_active && bt_scan_want_inquiry) << 63);
     bool same_list = bt_list == last_list && lv_obj_get_child_count(bt_list) == last_child_count;
     if (same_list && signature == last_signature) return;
     if (same_list && network_list_touch_active(bt_list)) return;
@@ -900,13 +1000,14 @@ void populate_bt_screen(void) {
     add_pill_chevron_row(bt_list, TR("Bluetooth DAC"), bt_dac_settings_row_cb);
     add_pill_chevron_row(bt_list, TR("Advanced"), bt_advanced_settings_row_cb);
 
-    add_section_header(bt_list, TR("Paired Devices"));
-    if (add_bt_device_section(true) == 0) {
+    add_section_header(bt_list, TR("Paired devices"));
+    if (add_bt_device_section(true) == 0 && bt_paired_snapshot_loaded) {
         build_list_message(bt_list, TR("No paired devices"), TR("Previously connected accessories will appear here."));
     }
 
-    add_section_header(bt_list, TR("Available Devices"));
-    if (add_bt_device_section(false) == 0) {
+    add_section_header(bt_list, bt_scan_active && bt_scan_want_inquiry
+                       ? TR("Scanning for devices") : TR("Available devices"));
+    if (add_bt_device_section(false) == 0 && !bt_scan_active) {
         build_list_message(bt_list, TR("No nearby devices"), TR("Make an accessory discoverable, then tap Rescan."));
     }
 
@@ -966,12 +1067,14 @@ void gui_network_bt_build(void) {
     bt_screen = build_bluetooth_screen();
     bt_codec_screen = network_list_screen(TR("Codec"), &bt_codec_list);
     bt_advanced_screen = network_list_screen(TR("Advanced"), &bt_advanced_list);
-    bt_rate_screen = network_list_screen(TR("Sample Rate"), &bt_rate_list);
+    bt_rate_screen = network_list_screen(TR("Sample rate"), &bt_rate_list);
     build_bt_action_popup();
 }
 
 void gui_network_bt_teardown(void) {
+    bt_output_menu_close();
     gui_popup_teardown(&bt_action_popup);
+    gui_popup_teardown(&bt_forget_popup);
     network_delete_screen(&bt_screen);
     network_delete_screen(&bt_codec_screen);
     network_delete_screen(&bt_advanced_screen);

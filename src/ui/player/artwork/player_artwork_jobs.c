@@ -42,11 +42,14 @@ static pthread_mutex_t cover_decode_partial_mutex = PTHREAD_MUTEX_INITIALIZER;
 static cover_decode_partial_t cover_decode_partial;
 static int cover_decode_result_for_index;
 static unsigned int cover_decode_result_generation;
+static bool cover_decode_result_reflection_only;
+static uint64_t cover_decode_result_source_cover_generation;
 static int cover_decode_result_edge;
 static audio_current_format_info_t cover_decode_result_format;
 static bool cover_decode_result_ok;
 static uint16_t * cover_decode_result_pixels;
 static uint8_t * cover_decode_result_reflection;
+static unsigned int cover_decode_result_reflection_epoch;
 static bool cover_decode_result_flat;
 static bool cover_decode_result_has_bg_color;
 static uint32_t cover_decode_result_bg_color;
@@ -94,8 +97,12 @@ static unsigned player_cover_negative_seen_epoch;
 /* Keep only the newest request that arrives during a decode or reload. If it
  * were dropped, the visible cover could remain stuck on an earlier track. */
 
-static void cover_decode_partial_clear(void) {
+static void cover_decode_partial_clear_generation(unsigned int generation) {
     pthread_mutex_lock(&cover_decode_partial_mutex);
+    if (generation && cover_decode_partial.generation != generation) {
+        pthread_mutex_unlock(&cover_decode_partial_mutex);
+        return;
+    }
     uint16_t * pixels = cover_decode_partial.pixels;
     memset(&cover_decode_partial, 0, sizeof(cover_decode_partial));
     pthread_mutex_unlock(&cover_decode_partial_mutex);
@@ -392,7 +399,14 @@ static void * cover_decode_thread_func(void * arg) {
     cover_file_id_t file_id = { .valid = false };
 
     memset(&cover_decode_result_format, 0, sizeof(cover_decode_result_format));
-    if (req->local_track_path[0]) {
+    /* Reflection-only jobs borrow the request-owned copy until the worker frees the request. */
+    if (req->reflection_only) {
+        file_id = req->shown_cover;
+        if (req->picture_data && req->picture_size >= (uint32_t)((size_t)req->edge * req->edge * 2)) {
+            pixels = (uint16_t *)req->picture_data;
+            ok = true;
+        }
+    } else if (req->local_track_path[0]) {
         if (!audio_get_current_format_info(&cover_decode_result_format) ||
             strcmp(cover_decode_result_format.path, req->local_track_path) != 0) {
             memset(&cover_decode_result_format, 0, sizeof(cover_decode_result_format));
@@ -402,9 +416,9 @@ static void * cover_decode_thread_func(void * arg) {
         }
     }
 
-    if (req->stream_url[0] || req->subsonic_cover_id[0]) {
+    if (!req->reflection_only && (req->stream_url[0] || req->subsonic_cover_id[0])) {
         ok = cover_decode_stream(req, &pixels);
-    } else if (req->local_track_path[0]) {
+    } else if (!req->reflection_only && req->local_track_path[0]) {
         ok = load_cached_player_cover(req->local_track_path, req->artist, req->album,
                                        req->album_artist, req->edge, req->generation, req->bt_art_token, req->force_source,
                                        &req->shown_cover, &file_id, &same, &pixels);
@@ -415,27 +429,27 @@ static void * cover_decode_thread_func(void * arg) {
 #endif
     bool cancelled = player_cover_decode_cancelled((void *) (uintptr_t) req->generation);
     if (cancelled) {
-        free(pixels);
+        if (!req->reflection_only) free(pixels);
         pixels = NULL;
         ok = false;
         same = false;
     }
 
-    if (ok && pixels)
+    if (!req->reflection_only && ok && pixels)
         bt_cover_art_publish_rgb565_async(req->bt_art_token, pixels, req->edge, req->edge,
                                       bt_cover_file_key(&file_id));
-    else if (!ok && !cancelled)
+    else if (!req->reflection_only && !ok && !cancelled)
         bt_cover_art_clear(req->bt_art_token);
 
 #ifdef UI_PERF_TRACE
     bt_done = (uint32_t)(ui_perf_now_us() / 1000);
 #endif
     uint32_t accent = 0;
-    bool accent_valid = ok && pixels && player_cover_accent_from_rgb565(pixels, req->edge, &accent);
+    bool accent_valid = !req->reflection_only && ok && pixels && player_cover_accent_from_rgb565(pixels, req->edge, &accent);
 
     /* Publish an owned display copy now; the worker's pixels remain private
      * until reflection computation has finished. */
-    if (ok && pixels && !same)
+    if (!req->reflection_only && ok && pixels && !same)
         cover_decode_partial_publish(req, pixels, &file_id, accent_valid, accent);
 
     uint8_t * reflection = NULL;
@@ -447,9 +461,8 @@ static void * cover_decode_thread_func(void * arg) {
             .tint_rgb = req->tint_rgb, .tint_weight = req->tint_weight
         };
         reflection = player_reflection_cache_get(&file_id, &params);
-        bool reflection_cache_hit = reflection != NULL;
 #ifdef UI_PERF_TRACE
-        if (reflection_cache_hit)
+        if (reflection)
             printf("PERF frost_cache reused=1 source=worker generation=%u\n", req->generation);
 #endif
         if (!reflection)
@@ -462,13 +475,9 @@ static void * cover_decode_thread_func(void * arg) {
                                                                      req->tint_weight,
                                                                      player_cover_decode_cancelled,
                                                                      (void *) (uintptr_t) req->generation);
-        if (reflection && !reflection_cache_hit && reflection_cache_epoch ==
-            player_reflection_cache_epoch())
-            player_reflection_cache_put(&file_id, &params, reflection, reflection_cache_epoch,
-                                       req->generation, player_artwork_jobs_cache_write_stale);
     }
     if (player_cover_decode_cancelled((void *) (uintptr_t) req->generation)) {
-        free(pixels);
+        if (!req->reflection_only) free(pixels);
         pixels = NULL;
         free(reflection);
         reflection = NULL;
@@ -485,12 +494,17 @@ static void * cover_decode_thread_func(void * arg) {
            (unsigned)((uint32_t)(ui_perf_now_us() / 1000) - work_begin),
            req->flat, same, ok);
 #endif
+    /* An unclaimed preview is redundant once the final pixels are ready. */
+    cover_decode_partial_clear_generation(req->generation);
     cover_decode_result_for_index = req->for_index;
     cover_decode_result_generation = req->generation;
+    cover_decode_result_reflection_only = req->reflection_only;
+    cover_decode_result_source_cover_generation = req->source_cover_generation;
     cover_decode_result_edge = req->edge;
     cover_decode_result_ok = ok;
-    cover_decode_result_pixels = pixels;
+    cover_decode_result_pixels = req->reflection_only ? NULL : pixels;
     cover_decode_result_reflection = reflection;
+    cover_decode_result_reflection_epoch = reflection_cache_epoch;
     cover_decode_result_flat = req->flat;
     cover_decode_result_has_bg_color = req->has_bg_color;
     cover_decode_result_bg_color = req->bg_color;
@@ -507,6 +521,7 @@ static void * cover_decode_thread_func(void * arg) {
 #ifdef UI_PERF_TRACE
     cover_decode_result_request_perf_us = req->request_perf_us;
 #endif
+    if (req->reflection_only) free(req->picture_data);
     free(req);
     atomic_store_explicit(&cover_decode_running, false, memory_order_release);
     atomic_store_explicit(&cover_decode_done_flag, true, memory_order_release);
@@ -515,25 +530,28 @@ static void * cover_decode_thread_func(void * arg) {
 }
 
 
-static void cover_decode_start_request(cover_decode_request_t r, const cover_file_id_t * shown_file) {
+static bool cover_decode_start_request(cover_decode_request_t r, const cover_file_id_t * shown_file,
+                                       bool allow_queue) {
     if (atomic_load_explicit(&cover_reload_active, memory_order_relaxed)) {
+        if (!allow_queue) { free(r.picture_data); return false; }
         free(cover_decode_pending.picture_data);
         cover_decode_pending = r;
         cover_decode_pending.shown_cover = (cover_file_id_t) { .valid = false };
         cover_decode_pending_valid = true;
-        return;
+        return false;
     }
     if (cover_decode_active) {
+        if (!allow_queue) { free(r.picture_data); return false; }
         free(cover_decode_pending.picture_data);
         cover_decode_pending = r;
         cover_decode_pending.shown_cover = (cover_file_id_t) { .valid = false };
         cover_decode_pending_valid = true;
-        return;
+        return false;
     }
     cover_decode_request_t * req = malloc(sizeof(*req));
     if (!req) {
         free(r.picture_data);
-        return;
+        return false;
     }
     *req = r;
     /* Snapshot only now: pending requests may start after the UI applied another result. */
@@ -557,11 +575,24 @@ static void cover_decode_start_request(cover_decode_request_t r, const cover_fil
         free(req);
         cover_decode_active = false;
         atomic_store_explicit(&cover_decode_running, false, memory_order_release);
+        return false;
     }
+    return true;
 }
 
 void player_artwork_jobs_submit(cover_decode_request_t request, const cover_file_id_t * shown_file) {
-    cover_decode_start_request(request, shown_file);
+    (void) cover_decode_start_request(request, shown_file, true);
+}
+
+bool player_artwork_jobs_try_submit_reflection(cover_decode_request_t request) {
+    if (!request.reflection_only || !request.picture_data ||
+        cover_decode_active || cover_decode_pending_valid ||
+        atomic_load_explicit(&cover_reload_active, memory_order_relaxed) ||
+        atomic_load_explicit(&cover_decode_done_flag, memory_order_acquire)) {
+        free(request.picture_data);
+        return false;
+    }
+    return cover_decode_start_request(request, &request.shown_cover, false);
 }
 
 void player_artwork_jobs_park_retry(cover_decode_request_t request) {
@@ -595,7 +626,7 @@ void player_artwork_jobs_clear_pending(void) {
     if (cover_decode_pending_valid) free(cover_decode_pending.picture_data);
     memset(&cover_decode_pending, 0, sizeof(cover_decode_pending)); cover_decode_pending_valid = false;
 }
-void player_artwork_jobs_partial_clear(void) { cover_decode_partial_clear(); }
+void player_artwork_jobs_partial_clear(void) { cover_decode_partial_clear_generation(0); }
 cover_decode_partial_t player_artwork_jobs_take_partial(void) {
     return cover_decode_partial_take();
 }
@@ -603,9 +634,11 @@ bool player_artwork_jobs_take_result(player_artwork_result_t * result) {
     if (!result || !atomic_load_explicit(&cover_decode_done_flag,memory_order_acquire)) return false;
     cover_decode_active=false;
     pthread_join(cover_decode_thread,NULL);
-    *result=(player_artwork_result_t){.for_index=cover_decode_result_for_index,.generation=cover_decode_result_generation,.edge=cover_decode_result_edge,
+    *result=(player_artwork_result_t){.for_index=cover_decode_result_for_index,.generation=cover_decode_result_generation,
+        .reflection_only=cover_decode_result_reflection_only,
+        .source_cover_generation=cover_decode_result_source_cover_generation,.edge=cover_decode_result_edge,
         .format=cover_decode_result_format,.ok=cover_decode_result_ok,.pixels=cover_decode_result_pixels,
-        .reflection=cover_decode_result_reflection,.flat=cover_decode_result_flat,
+        .reflection=cover_decode_result_reflection,.reflection_epoch=cover_decode_result_reflection_epoch,.flat=cover_decode_result_flat,
         .has_bg_color=cover_decode_result_has_bg_color,.bg_color=cover_decode_result_bg_color,
         .blur_radius=cover_decode_result_blur_radius,.blur_passes=cover_decode_result_blur_passes,
         .darken_num=cover_decode_result_darken_num,.darken_den=cover_decode_result_darken_den,
@@ -617,13 +650,14 @@ bool player_artwork_jobs_take_result(player_artwork_result_t * result) {
 #endif
     };
     cover_decode_result_pixels=NULL; cover_decode_result_reflection=NULL;
+    atomic_store_explicit(&cover_decode_done_flag, false, memory_order_release);
     return true;
 }
 void player_artwork_jobs_begin_reload(void) { atomic_store_explicit(&cover_reload_active,true,memory_order_relaxed); }
 void player_artwork_jobs_end_reload(void) { atomic_store_explicit(&cover_reload_active,false,memory_order_relaxed); }
 void player_artwork_jobs_cancel_worker(void) {
     if (cover_decode_active) {
-        pthread_join(cover_decode_thread,NULL); cover_decode_active=false; cover_decode_partial_clear();
+        pthread_join(cover_decode_thread,NULL); cover_decode_active=false; cover_decode_partial_clear_generation(0);
         free(cover_decode_result_pixels); free(cover_decode_result_reflection);
         cover_decode_result_pixels=NULL; cover_decode_result_reflection=NULL;
         atomic_store_explicit(&cover_decode_done_flag,false,memory_order_relaxed);

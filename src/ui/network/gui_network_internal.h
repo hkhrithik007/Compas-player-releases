@@ -79,10 +79,14 @@ void gui_network_pairing_build(void);
 void gui_network_pairing_teardown(void);
 
 /* gui_network_receivers.c */
-extern lv_obj_t * usb_dac_overlay_screen;
+void gui_network_usb_dac_build(void);
+void gui_network_usb_dac_refresh(void);
+void gui_network_usb_dac_teardown(void);
 void stop_local_playback(void);
 void disable_bt_dac_mode(void);
 void disable_airplay_mode(void);
+bool gui_network_airplay_stop_pending(void);
+void gui_network_bt_dac_poll_enable(void);
 void bt_dac_settings_row_cb(lv_event_t * e);
 void format_rate(char * out, size_t size, unsigned int rate);
 void populate_airplay_screen(void);

@@ -74,6 +74,8 @@ static atomic_bool network_service_done = false;
 static atomic_bool network_service_cancelling = false;
 
 static void poll_network_service_ops(void);
+static bool set_remote_control_enabled(bool enabled);
+static bool remote_startup_pending = true;
 
 /* Removes the oldest queued job; the caller holds network_service_mutex. */
 static bool network_service_pop_locked(network_service_job_t * out) {
@@ -223,6 +225,11 @@ static void poll_network_service_ops(void) {
 
 void poll_remote_import(void) {
     poll_network_service_ops();
+    if (remote_startup_pending && current_settings.remote_control_enabled &&
+        !remote_radio_sleep_prepared && !remote_radio_sleep_stop_queued &&
+        (bt_is_powered_cached || gui_shell_wifi_effective_enabled()) &&
+        !network_service_is_busy(NETWORK_SERVICE_REMOTE))
+        set_remote_control_enabled(true);
     if (!network_service_is_busy(NETWORK_SERVICE_IMPORT)) {
         unsigned worker_events = atomic_exchange_explicit(&remote_import_worker_events, 0, memory_order_acquire);
         if (worker_events & REMOTE_IMPORT_WORKER_START_FAILED) remote_import_active = false;
@@ -289,7 +296,8 @@ static void handle_remote_import_request(bool start) {
             remote_control_set_import_state(REMOTE_IMPORT_ERROR, "sd_card_unavailable");
             return;
         }
-        if (gui_network_usb_storage_session_active() || gui_library_navigation_blocked()) {
+        if (gui_network_usb_storage_session_active() || gui_library_navigation_blocked() ||
+            gui_library_scan_active()) {
             remote_control_set_import_state(REMOTE_IMPORT_ERROR, "player_storage_busy");
             return;
         }
@@ -366,6 +374,7 @@ void gui_network_resume_radio_services(void) {
         remote_import_active || remote_import_stop_pending) return;
 
     if (network_service_enqueue(NETWORK_SERVICE_REMOTE, true, false)) {
+        remote_startup_pending = false;
         remote_radio_sleep_prepared = false;
         remote_radio_sleep_stop_queued = false;
     }
@@ -380,10 +389,10 @@ static void dlna_toggle_cb(lv_event_t * e);
 
 static void populate_dlna_screen(void) {
     lv_obj_clean(dlna_list);
-    add_pill_toggle_row(dlna_list, TR("DLNA Renderer"), current_settings.dlna_renderer_enabled, dlna_toggle_cb);
+    add_pill_toggle_row(dlna_list, TR("DLNA renderer"), current_settings.dlna_renderer_enabled, dlna_toggle_cb);
 
     add_network_explanation(dlna_list,
-                      TR("When on, this device is visible to DLNA/UPnP controller apps on your Wi-Fi network -- cast "
+                      TR("When on, this device is visible to DLNA/UPnP controller apps on your Wi-Fi network. Cast "
                       "a track from one to play it here. Pause, mute, volume, and seek from the controller app "
                       "aren't supported; use this device's own controls instead once a track starts."));
 }
@@ -461,12 +470,20 @@ void remote_control_refresh_pin_label(void) {
     lv_label_set_text(remote_control_pin_label, pin[0] ? pin : TR("Unavailable"));
     snprintf(remote_control_displayed_pin, sizeof(remote_control_displayed_pin), "%s", pin);
     remote_control_displayed_pin_valid = true;
+    lv_obj_t * pin_row = lv_obj_get_parent(remote_control_pin_label);
+    lv_obj_update_layout(pin_row);
+    lv_obj_update_layout(remote_control_pin_label);
+    lv_obj_t * pin_title = lv_obj_get_child(pin_row, 0);
+    int32_t title_width = lv_obj_get_x(remote_control_pin_label) - lv_obj_get_x(pin_title) - BOARD_SCALE_PX(12);
+    if (title_width < 0) title_width = 0;
+    configure_scrolling_row_label(pin_title, title_width);
+    lv_obj_set_width(pin_title, title_width);
 }
 
 /* Bluetooth route line of the Remote Control screen. */
 static const char * remote_control_bt_line(bool powered, bt_remote_control_status_t status,
                                            bool available) {
-    if (available) return TR("Bluetooth: Compas Remote Control");
+    if (available) return TR("Bluetooth: Compas remote control");
     if (powered && status == BT_REMOTE_CONTROL_FAILED) return TR("Bluetooth: registration failed; retrying");
     if (powered) return TR("Bluetooth: waiting for service registration");
     return "";
@@ -487,8 +504,9 @@ void remote_control_refresh_address(void) {
     }
 
     wifi_settings_snapshot_start();
-    bool wifi_available = gui_shell_wifi_effective_enabled() && wifi_cached_info_is_current() &&
-                          wifi_cached_info_connected && wifi_cached_info.ip[0] != '\0';
+    bool wifi_associated = gui_shell_wifi_effective_enabled() && wifi_cached_info_is_current() &&
+                           wifi_cached_info_connected;
+    bool wifi_available = wifi_associated && wifi_cached_info.ip[0] != '\0';
     bool bluetooth_available = false;
     bool bluetooth_powered = false;
     bt_remote_control_status_t bluetooth_status = BT_REMOTE_CONTROL_DISABLED;
@@ -502,6 +520,8 @@ void remote_control_refresh_address(void) {
             lv_label_set_text(remote_control_status_label, TR("Bluetooth remote service is unavailable; retrying."));
         else if (bluetooth_powered)
             lv_label_set_text(remote_control_status_label, TR("Bluetooth remote service is starting…"));
+        else if (wifi_associated) /* DHCP still running */
+            lv_label_set_text(remote_control_status_label, TR("Waiting for a network address"));
         else
             lv_label_set_text(remote_control_status_label, TR("Enable Wi-Fi or Bluetooth to connect."));
         lv_label_set_text(remote_control_url_label, "");
@@ -548,14 +568,14 @@ static void refresh_remote_control_screen_if_built(void) {
 /* gui_network_toggle_airplay()'s twin for the phone remote-control server --
  * shown as "RC" on the quick drawer's own tile, where there is no room for
  * the full name. */
-bool gui_network_toggle_remote_control(void) {
-    bool turning_on = !current_settings.remote_control_enabled;
+static bool set_remote_control_enabled(bool turning_on) {
     if (network_service_is_busy(NETWORK_SERVICE_REMOTE) ||
         !network_service_enqueue(NETWORK_SERVICE_REMOTE, turning_on, false)) {
         show_info_toast(TR("Service is busy"));
         refresh_remote_control_screen_if_built();
         return current_settings.remote_control_enabled;
     }
+    remote_startup_pending = false;
     current_settings.remote_control_enabled = turning_on;
     settings_save_async(&current_settings);
 
@@ -568,6 +588,10 @@ bool gui_network_toggle_remote_control(void) {
     refresh_remote_control_screen_if_built();
     if (turning_on) gui_network_extend_bt_pairing_window();
     return current_settings.remote_control_enabled;
+}
+
+bool gui_network_toggle_remote_control(void) {
+    return set_remote_control_enabled(!current_settings.remote_control_enabled);
 }
 
 static void remote_control_toggle_cb(lv_event_t * e) {
@@ -618,9 +642,9 @@ static void build_remote_control_new_pin_popup(void) {
  * details follow as wrapped text lines. */
 static lv_obj_t * build_remote_control_screen(void) {
     lv_obj_t * list;
-    lv_obj_t * scr = network_list_screen(TR("Remote Control"), &list);
+    lv_obj_t * scr = network_list_screen(TR("Remote control"), &list);
 
-    lv_obj_t * toggle_row = add_pill_toggle_row(list, TR("Remote Control"), current_settings.remote_control_enabled,
+    lv_obj_t * toggle_row = add_pill_toggle_row(list, TR("Remote control"), current_settings.remote_control_enabled,
                                                 remote_control_toggle_cb);
     /* add_pill_toggle_row() creates the label first and the switch last;
      * gui_network_toggle_remote_control() drives this switch's state. */
@@ -636,7 +660,7 @@ static lv_obj_t * build_remote_control_screen(void) {
     lv_label_set_text(regenerate_icon, LV_SYMBOL_REFRESH);
     lv_obj_add_style(regenerate_icon, gui_theme_accent_style(), 0);
     lv_obj_set_style_text_font(regenerate_icon, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
-    lv_obj_align(regenerate_icon, LV_ALIGN_RIGHT_MID, -20, 0);
+    lv_obj_align(regenerate_icon, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(20), 0);
     lv_obj_add_flag(regenerate_icon, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(regenerate_icon, BOARD_SCALE_PX(20));
     lv_obj_add_event_cb(regenerate_icon, remote_control_regenerate_pin_cb, LV_EVENT_CLICKED, NULL);
@@ -649,10 +673,10 @@ static lv_obj_t * build_remote_control_screen(void) {
     remote_control_pin_label = lv_label_create(pin_row);
     lv_obj_add_style(remote_control_pin_label, &style_theme_text_primary, 0);
     lv_obj_set_style_text_font(remote_control_pin_label, gui_theme_font(GUI_FONT_ROLE_BODY), 0);
-    lv_obj_align(remote_control_pin_label, LV_ALIGN_RIGHT_MID, -20 - icon_width - BOARD_SCALE_PX(16), 0);
+    lv_obj_align(remote_control_pin_label, LV_ALIGN_RIGHT_MID,
+                 -BOARD_SCALE_PX(20) - icon_width - BOARD_SCALE_PX(16), 0);
     remote_control_displayed_pin_valid = false;
     remote_control_refresh_pin_label();
-
     lv_obj_t * explanation = lv_label_create(list);
     lv_label_set_text(explanation,
                       TR("Connect over Wi-Fi or Bluetooth to see what's playing, control playback, and browse "
@@ -813,9 +837,8 @@ void gui_network_handle_wifi_disabled(void) {
      * veto idle suspend after the radio is already off. */
     gui_subsonic_handle_wifi_disabled();
 
-    if (current_settings.wifi_dac_mode_enabled) {
-        airplay_control_stop();
-        current_settings.wifi_dac_mode_enabled = false;
+    if (current_settings.wifi_dac_mode_enabled || gui_network_airplay_enable_pending()) {
+        disable_airplay_mode();
         settings_changed = true;
         populate_airplay_screen();
     }

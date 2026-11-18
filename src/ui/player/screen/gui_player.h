@@ -7,6 +7,7 @@
 #include "../../../core/persistence/settings.h"
 #include "../../../audio/engine/audio.h"
 
+typedef struct tagcache_snapshot metadata_db_snapshot_t;
 typedef struct file_browser_index file_browser_index_t;
 
 
@@ -38,6 +39,7 @@ lv_style_t * gui_player_backdrop_icon_style(void);
 void gui_player_update_backdrop_contrast(void);
 void sync_player_topbar_visibility(lv_obj_t * screen);
 void gui_player_poll_track_metadata(void);
+void gui_player_poll_stream_metadata(void);
 /* Supplies the exact visible list row for the next matching manual track
  * selection. The player copies display fields only; audio tags stay fresh. */
 void gui_player_seed_selection_song(const char * path, const track_metadata_t * metadata);
@@ -46,6 +48,7 @@ void gui_player_seed_selection_song(const char * path, const track_metadata_t * 
 void gui_player_service_artwork_cache(void);
 void poll_cover_decode(void);
 void gui_player_update_progress(void);
+bool gui_player_sync_popup_pause(void);
 void gui_format_time(double seconds, char * buf, size_t buf_size);
 void show_volume_popup(int32_t percent);
 void poll_volume_popup_timeout(void);
@@ -107,7 +110,7 @@ bool gui_player_queue_snapshot(int ** order, int * count, int * current, uint64_
 void gui_player_sync_remote_queue(void);
 bool gui_player_remote_queue_remove(int offset, uint64_t revision);
 bool gui_player_remote_queue_clear(uint64_t revision);
-/* Remote Control Up Next edits by offset (current track excluded); each
+/* Remote Control actions by displayed queue index; each
  * returns false and changes nothing when the revision is stale. */
 bool gui_player_remote_queue_move(int from_offset, int to_offset, uint64_t revision);
 bool gui_player_remote_queue_play(int offset, uint64_t revision);
@@ -117,8 +120,11 @@ bool gui_player_play_folder_track(const char * track_path);
  * ownership of index on every return path. */
 bool gui_player_play_folder_index(file_browser_index_t * index, unsigned playable_count,
                                   int play_mode);
-/* Reloads the now-playing heart after Remote Control changed a favorite. */
-void gui_player_refresh_favorite(void);
+/* Reloads the now-playing rating after a Remote Control edit. */
+void gui_player_refresh_rating(void);
+void gui_player_open_rating_popup(const char * path);
+int gui_player_rating_path(const char * path);
+void gui_player_set_rating_path(const char * path, int stars);
 bool gui_player_queue_edit(uint64_t revision, int from, int to);
 bool gui_player_queue_select(uint64_t revision, int index);
 void gui_player_queue_clear_all(void);
@@ -132,7 +138,9 @@ void gui_player_queue_checkpoint_urgent(void);
 void gui_player_queue_poll_urgent(void);
 bool gui_player_queue_write_busy(void);
 bool gui_player_queue_checkpoint_failed(void);
-void gui_player_queue_flush(void);
+/* Request the final checkpoint and poll until durable; never joins an active writer. */
+bool gui_player_queue_flush(void);
+void gui_player_queue_flush_cancel(void);
 void gui_player_step_manual(int direction);
 /* Time skipping applies only to manual transport within this directory. */
 void gui_player_set_transport_skip(const char * directory, int seconds);
@@ -158,11 +166,13 @@ void on_file_selected(char ** new_playlist, int count, int selected_index);
 void on_file_selected_stay(char ** new_playlist, int count, int selected_index);
 void on_file_selected_at(char ** new_playlist, int count, int selected_index, double start_seconds);
 void on_file_selected_lazy_all_songs(int selected_index);
+void on_file_selected_lazy_all_songs_reverse(int selected_index);
 void on_file_selected_lazy_recently_added(int selected_index);
 void on_file_browser_selected(char ** new_playlist, int count, int selected_index);
 void on_track_auto_advanced(int index);
 void play_track_at(int index);
 void play_track_at_from(int index, double start_seconds);
+/* Records play-count only after the requested decoder is active. */
 bool gui_player_local_playback_allowed(void);
 bool gui_player_transport_button(int direction); /* -1 previous, 0 play/pause, 1 next */
 void toggle_play_pause(void);
@@ -208,6 +218,8 @@ int gui_player_boot_resume_mode(void);
 void gui_player_notify_sd_unmounted_immediate(void);
 void gui_player_notify_sd_mounted(void);
 void gui_player_handle_sd_unmount(void);
+/* A USB drive mounted at root went away: stops and clears the queue when its track played from there. */
+void gui_player_handle_storage_removed(const char * root);
 bool install_saved_resume_playlist(char ** resume_playlist, int resume_count);
 void prepare_deferred_resume(int index, double start_seconds);
 
@@ -238,3 +250,7 @@ void gui_player_refresh_font_geometry(void);
 lv_obj_t * gui_player_get_dismiss_btn(void);
 /* UI-thread accessor; optional generation identifies pixel replacements. */
 const lv_image_dsc_t * gui_player_get_current_cover_dsc(uint64_t * generation);
+
+/* Takes ownership of the title ranks and the tap-time snapshot; rejects a stale generation. */
+void on_file_selected_lazy_ranks(int *ranks, int count, int selected_index,
+                                 metadata_db_snapshot_t *snapshot, int32_t generation);

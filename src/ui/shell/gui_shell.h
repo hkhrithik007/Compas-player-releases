@@ -40,6 +40,15 @@ void gui_shell_refresh_quick_drawer_cover(void);
  * re-points the widgets at the new buffers. Call after the accent changes. */
 void gui_shell_refresh_quick_drawer_toggle_accent(void);
 void gui_shell_update_quick_drawer_play_state(bool is_playing);
+typedef struct {
+    lv_obj_t * cover;
+    lv_obj_t * title;
+    lv_obj_t * play;
+} gui_shell_mini_player_widgets_t;
+/* Shared cover/title/play widget constructor used by the drawer and Home. */
+void gui_shell_build_mini_player_widgets(lv_obj_t * cover_parent, lv_obj_t * title_parent,
+                                         lv_obj_t * play_parent,
+                                         gui_shell_mini_player_widgets_t * out);
 
 void gui_shell_init(uint32_t screen_width, uint32_t screen_height);
 /* The screen-construction half of gui_shell_init(), without the Bluetooth-
@@ -56,10 +65,18 @@ void refresh_battery_topbar(void);
 void refresh_volume_topbar(int32_t percent);
 void gui_shell_apply_topbar_settings(void);
 void quick_drawer_mark_snapshot_dirty(void);
+/* Re-lays the drawer's card and slider values after a font change. */
+void gui_shell_refresh_drawer_font_geometry(void);
 /* Repaints the drawer and status bar from the current theme slots. */
 void gui_shell_refresh_theme_colors(void);
 /* The drawer's control-row surface, shared with the volume popup. */
 lv_style_t * gui_shell_drawer_row_style(void);
+/* Live theme tint shared by drawer and Settings brightness glyphs. */
+lv_style_t * gui_shell_slider_glyph_style(void);
+/* Bluetooth icon when audio goes to Bluetooth, otherwise wired_src. */
+const char * gui_shell_output_icon_src(const char * wired_src);
+/* Status-bar icon path for name in the active icon set. */
+const char * topbar_icon(const char * name);
 /* Frees the drawer's cached full-screen frames; quick_drawer_mark_snapshot_dirty()
  * rebuilds them. Used before an emulator runs. */
 void gui_shell_release_memory_for_external_session(void);
@@ -72,6 +89,7 @@ void unregister_swipe_dead_zone(lv_obj_t * obj);
 /* For gui_reload.c's in-process UI reload -- see its own comment. Must run
  * before any screen's sliders are actually deleted. */
 void reset_swipe_dead_zones(void);
+bool gui_shell_quick_drawer_visible(void);
 void open_quick_drawer(void);
 void close_quick_drawer(void);
 
@@ -79,6 +97,14 @@ bool gui_shell_is_bt_audio_connected(void);
 /* Copies the UI-thread Bluetooth codec snapshot populated by the existing
  * asynchronous status refresh; does not query BlueALSA or spawn a process. */
 bool gui_shell_get_bt_audio_codec(char * out, size_t out_size);
+bool gui_shell_get_bt_audio_device_mac(char * out, size_t out_size);
+typedef struct {
+    char mac[18];
+    char name[64];
+    bool connected;
+} gui_shell_bt_output_device_t;
+void gui_shell_request_bt_output_devices(void);
+int gui_shell_get_bt_output_devices(gui_shell_bt_output_device_t * out, int capacity);
 void gui_shell_notify_bt_audio_disconnected(void);
 /* Cancels persisted-device auto-reconnect and suppresses it for the current
  * powered Bluetooth cycle. Manual connect/forget actions use this so an
@@ -148,13 +174,25 @@ bool gui_shell_player_topbar_hidden(lv_obj_t * screen);
 void gui_shell_set_status_bar_screen_context(lv_obj_t * screen);
 void gui_shell_set_home_indicator_visible(bool visible);
 
+bool gui_shell_usb_dac_owns_output(void);
+void poll_usb_dac_session(void);
+void gui_shell_usb_dac_release(void);
 bool gui_shell_bt_dac_owns_output(void);
 bool gui_shell_bt_dac_receiving(void);
 bool gui_shell_bt_dac_failed(void);
 bool gui_shell_bt_dac_busy(void);
+/* A phone is connected as the A2DP source, or audio is received or routed. Cached reads only. */
+bool gui_shell_bt_dac_in_use(void);
 bool gui_shell_bt_dac_profile_ready(void);
 void gui_shell_bt_dac_release(void);
 /* Leave Bluetooth DAC; restore_source also brings back the source profile (false when powering off). */
+bool gui_shell_bt_dac_suspended(void);
+void gui_shell_bt_dac_powered_off(void);
+/* True once when the DAC stops being in use (phone gone, audio ended, apply finished). */
+bool gui_shell_bt_dac_went_idle(void);
+/* Back from a suspend or aborted power off that left Bluetooth powered: no power edge will come,
+ * so restore now, once any post-resume Bluetooth restore has finished. */
+void gui_shell_bt_dac_resumed(void);
 bool gui_shell_bt_dac_shutdown(bool restore_source);
 /* Turn Bluetooth DAC back on once Bluetooth has gone off and come back on. */
 void gui_shell_bt_dac_remember(bool restore);

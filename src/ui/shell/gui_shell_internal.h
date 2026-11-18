@@ -70,7 +70,7 @@
 #if defined(BOARD_TEMPOTEC_V1)
 /* V1 uses the same four-control Compas drawer, scaled to its 240x320 panel. */
 #define QUICK_DRAWER_TOGGLE_ICON_PX BOARD_SCALE_PX(72)
-#define QUICK_DRAWER_TOGGLE_CELL_W BOARD_SCALE_PX(112)
+#define QUICK_DRAWER_TOGGLE_CELL_W (BOARD_SCREEN_WIDTH / 4)
 #define QUICK_DRAWER_TOGGLE_ROW_PITCH BOARD_SCALE_PY(245)
 #define QUICK_DRAWER_CARD_H BOARD_SCALE_PY(322)
 #define QUICK_DRAWER_ROW1_TOP BOARD_SCALE_PY(80)
@@ -78,22 +78,26 @@
 #define QUICK_DRAWER_TOGGLE_STATE_GAP 20
 #define QUICK_DRAWER_TOGGLE_CAPTION_GAP BOARD_SCALE_PY(5)
 #endif
-#if defined(BOARD_TEMPOTEC_V1)
-#else
+#if !defined(BOARD_TEMPOTEC_V1)
 #define QUICK_DRAWER_TOGGLE_ICON_PX BOARD_SCALE_PX(84)
+#if BOARD_COMPACT_UI
+#define QUICK_DRAWER_TOGGLE_CELL_W BOARD_SCALE_PX(104)
+#else
 #define QUICK_DRAWER_TOGGLE_CELL_W BOARD_SCALE_PX(84)
+#endif
 #define QUICK_DRAWER_TOGGLE_ROW_PITCH BOARD_SCALE_PY(148)
-#define QUICK_DRAWER_CARD_H BOARD_SCALE_PY(354)
+#define QUICK_DRAWER_CARD_H BOARD_SCALE_PY(357)
 #define QUICK_DRAWER_ROW1_TOP BOARD_SCALE_PY(71)
 #define QUICK_DRAWER_EXPANSION_MAX_HEIGHT INT32_MAX
 #define QUICK_DRAWER_TOGGLE_STATE_GAP BOARD_SCALE_PY(24)
 #define QUICK_DRAWER_TOGGLE_CAPTION_GAP BOARD_SCALE_PY(2)
 #endif
-#define QUICK_DRAWER_TOGGLE_SLOTS (QD_TOGGLE_COUNT + PLUGIN_MAX_QUICK_TOGGLES)
+#define QUICK_DRAWER_TOGGLE_SLOTS (QD_TOGGLE_COUNT + PLUGIN_QUICK_TOGGLE_CAPACITY)
 
 /* ---- Expanded area ----------------------------------------------------
- * The handle under the first toggle row drags down to reveal two more rows.
- * Both slider rails shift down by exactly the revealed height, and the
+ * The handle under the first toggle row reveals the remaining tiles.
+ * Above twelve tiles, the slider space holds additional four-column rows.
+ * Otherwise both slider rails shift down by the revealed height, and the
  * now-playing card hides for the duration -- there is no room for both.
  *
  * The rows live inside quick_drawer_expansion_box, whose HEIGHT is the
@@ -111,6 +115,12 @@
  * row 2 straight against it with no gap at all. */
 /* The now-playing card. Its cover frame fills it, so both read these. */
 #define QUICK_DRAWER_PANEL_X BOARD_SCALE_PX(19)
+#define QUICK_DRAWER_PANEL_Y BOARD_SCALE_PY(59)
+#if defined(BOARD_TEMPOTEC_V1)
+#define QUICK_DRAWER_HANDLE_Y BOARD_SCALE_PY(272)
+#else
+#define QUICK_DRAWER_HANDLE_Y BOARD_SCALE_PY(219)
+#endif
 #define QUICK_DRAWER_PANEL_W BOARD_SCALE_PX(442)
 /* Share one physical inset on all three edges, including after board scaling. */
 #define QUICK_DRAWER_CARD_INSET (BOARD_SCALE_PX(34) - QUICK_DRAWER_PANEL_X)
@@ -118,8 +128,7 @@
 #if defined(BOARD_TEMPOTEC_V1)
 #else
 #define quick_drawer_toggle_column_x(column, columns) \
-    ((columns) > 4 ? BOARD_SCALE_PX(18 + 90 * (column)) \
-                   : BOARD_SCALE_PX(quick_drawer_column_label_x[column]))
+    BOARD_SCALE_PX(quick_drawer_column_label_x[column])
 #define quick_drawer_toggle_state_y(row_y) \
     ((row_y) + QUICK_DRAWER_TOGGLE_ICON_PX + QUICK_DRAWER_TOGGLE_STATE_GAP)
 #endif
@@ -166,22 +175,24 @@ typedef enum {
      * own comment on the expanded area. */
     QD_TOGGLE_AIRPLAY,
     QD_TOGGLE_BT_DAC,
+    QD_TOGGLE_USB_DAC,
     QD_TOGGLE_DLNA,
     QD_TOGGLE_GAPLESS,
     QD_TOGGLE_RC,
     QD_TOGGLE_CAR_MODE,
+    QD_TOGGLE_POWER_OFF,
     QD_TOGGLE_COUNT
 } qd_toggle_t;
 
 /* Stateless helpers */
 #if defined(BOARD_TEMPOTEC_V1)
 
-/* Keep four predictable columns at every board size. V1 uses 48px cells
- * with 16px native gutters; the wider boards retain the measured positions
+/* Keep four predictable columns at every board size. V1 divides its width
+ * evenly across the four caption cells; wider boards retain measured positions
  * (the first four columns come from the table below). */
 static inline int32_t quick_drawer_toggle_column_x(int column, int columns) {
     (void) columns;
-    return BOARD_SCALE_PX(18 + 110 * column);
+    return (BOARD_SCREEN_WIDTH / 4) * column;
 }
 static inline int32_t quick_drawer_toggle_state_y(int32_t row_y) {
     return row_y + QUICK_DRAWER_TOGGLE_ICON_PX + QUICK_DRAWER_TOGGLE_STATE_GAP;
@@ -276,6 +287,20 @@ extern lv_obj_t * quick_drawer_volume_icon;
 extern lv_obj_t * quick_drawer_eq_button;
 extern lv_obj_t * quick_drawer_volume_track;
 extern lv_obj_t * quick_drawer_volume_label;
+/* Test: tiles without the On/Off state line under their names. */
+#define QUICK_DRAWER_SHOW_STATE false
+/* Row 1's top: centred between the panel edge and the handle without the state line. */
+int32_t quick_drawer_row1_top(void);
+#if !defined(BOARD_TEMPOTEC_V1)
+/* Expanded row pitch and the expansion box's top, from the same gap. */
+int32_t quick_drawer_row_pitch(void);
+int32_t quick_drawer_expansion_top(void);
+#endif
+#if defined(BOARD_TEMPOTEC_V1)
+#define QUICK_DRAWER_ROW_PITCH QUICK_DRAWER_TOGGLE_ROW_PITCH
+#else
+#define QUICK_DRAWER_ROW_PITCH quick_drawer_row_pitch()
+#endif
 extern lv_obj_t * quick_drawer_toggle_state[QUICK_DRAWER_TOGGLE_SLOTS];
 extern lv_color_t shell_drawer_off_color;
 extern lv_obj_t * quick_drawer_toggle_icon[QUICK_DRAWER_TOGGLE_SLOTS];
@@ -289,14 +314,16 @@ extern lv_obj_t * quick_drawer_expansion_handle;
 extern lv_obj_t * quick_drawer_card;
 extern lv_obj_t * quick_drawer_airplay_icon;
 extern lv_obj_t * quick_drawer_bt_dac_icon;
+extern lv_obj_t * quick_drawer_usb_dac_icon;
 extern lv_obj_t * quick_drawer_dlna_icon;
 extern lv_obj_t * quick_drawer_gapless_icon;
 extern lv_obj_t * quick_drawer_rc_icon;
 extern lv_obj_t * quick_drawer_car_mode_icon;
-extern lv_obj_t * quick_drawer_plugin_icon[PLUGIN_MAX_QUICK_TOGGLES];
+extern lv_obj_t * quick_drawer_plugin_icon[PLUGIN_QUICK_TOGGLE_CAPACITY];
 extern int quick_drawer_plugin_toggle_count;
 extern int32_t quick_drawer_expansion_full;
 extern int32_t quick_drawer_expansion_y;
+extern bool quick_drawer_many_tiles;
 extern bool quick_drawer_expanded;
 extern bool quick_drawer_expansion_motion;
 extern lv_timer_t * quick_drawer_expansion_start_timer;
@@ -310,7 +337,7 @@ extern lv_obj_t * usb_audio_status_icon;
 extern lv_obj_t * play_pause_status_icon;
 extern lv_obj_t * bt_codec_status_icon;
 extern lv_style_t shell_drawer_bg_style, shell_drawer_panel_style, shell_drawer_row_style,
-    shell_drawer_card_style, shell_drawer_handle_style, shell_topbar_glyph_style;
+    shell_drawer_card_style, shell_drawer_handle_style, shell_topbar_glyph_style, shell_drawer_slider_glyph_style;
 extern bool shell_theme_native;
 extern lv_color_t shell_bar_color, shell_bar_glyph_color, shell_drawer_surface;
 #if defined(BOARD_TEMPOTEC_V1)
@@ -350,7 +377,6 @@ void quick_drawer_retint_toggle_states(lv_color_t old_off);
 void style_topbar_text(lv_obj_t * label, const lv_font_t * font);
 const lv_font_t * topbar_digit_font(void);
 const lv_font_t * topbar_ampm_font(void);
-const char * topbar_icon(const char * name);
 void layout_battery_topbar_image(lv_obj_t * image);
 void layout_volume_topbar_image(lv_obj_t * image);
 void layout_headphone_topbar_image(lv_obj_t * image);
@@ -395,9 +421,7 @@ int32_t quick_drawer_motion_y(void);
 void quick_drawer_rebuild_snapshot(void);
 bool quick_drawer_begin_bitmap_motion(void);
 void quick_drawer_finish_bitmap_motion(void);
-#if defined(BOARD_TEMPOTEC_V1)
 void quick_drawer_expansion_scroll_event_cb(lv_event_t * e);
-#endif
 void quick_drawer_wifi_long_press_cb(lv_event_t * e);
 void quick_drawer_bt_long_press_cb(lv_event_t * e);
 void quick_drawer_wifi_pressed_cb(lv_event_t * e);
@@ -418,6 +442,7 @@ void quick_drawer_make_toggle_labels(int slot, int32_t x, int32_t row_y,
 void build_quick_drawer(void);
 bool quick_drawer_customization_enabled(void);
 void quick_drawer_reflow_customization(void);
+void quick_drawer_refresh_output_state(void);
 void topbar_load_volume_warn_threshold(void);
 void quick_drawer_motion_teardown_cancel(void);
 void quick_drawer_brightness_teardown_flush(void);
