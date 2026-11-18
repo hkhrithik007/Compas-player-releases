@@ -10,8 +10,7 @@
 static lv_style_t style_accent;
 static lv_style_t style_accent_knob;
 static lv_style_t style_accent_outline;
-/* Added after style_theme_text_primary on Breeze title-bar icons: empty
- * unless "Tint title bar icons" is on, so they follow the text color. */
+/* Optional accent override shared by title-bar images and symbol labels. */
 static lv_style_t style_titlebar_tint;
 
 lv_style_t * gui_theme_accent_style(void) { return &style_accent; }
@@ -23,6 +22,7 @@ lv_style_t * gui_theme_titlebar_tint_style(void) { return &style_titlebar_tint; 
 static void update_titlebar_tint(void) {
     lv_style_reset(&style_titlebar_tint);
     if (current_settings.titlebar_icon_tint) {
+        lv_style_set_text_color(&style_titlebar_tint, accent_lv_color());
         lv_style_set_image_recolor(&style_titlebar_tint, accent_lv_color());
         lv_style_set_image_recolor_opa(&style_titlebar_tint, LV_OPA_COVER);
     }
@@ -59,13 +59,14 @@ const uint32_t accent_palette[ACCENT_PALETTE_COUNT] = {
 /* Effective accent (see accent_lv_color()) and the last cover's color. */
 static uint32_t accent_rgb = DEFAULT_ACCENT_COLOR;
 static bool cover_accent_valid;
+static bool cover_accent_known;
 static uint32_t cover_accent;
 
 extern player_settings_t current_settings;
 extern void player_transition_mark_dirty(void);
 extern void refresh_play_btn_icon(void);
 extern void gui_shell_refresh_quick_drawer_toggle_accent(void);
-extern void gui_settings_accent_changed(void);
+extern void gui_settings_accent_changed(bool color_changed);
 
 const lv_font_t * gui_theme_font(gui_font_role_t role) {
     switch (role) {
@@ -103,6 +104,8 @@ uint32_t gui_anim_ms(uint32_t base_ms) {
 
 static uint32_t resolve_accent(void) {
     if (current_settings.accent_dynamic && cover_accent_valid) return cover_accent;
+    if (current_settings.accent_dynamic && !cover_accent_known && current_settings.accent_dynamic_color_valid)
+        return current_settings.accent_dynamic_color & 0xFFFFFF;
     return current_settings.accent_color & 0xFFFFFF;
 }
 
@@ -175,7 +178,8 @@ void gui_theme_update_surface_contrast(void) {
  * color did not change, so a new track from the same album costs nothing. */
 static void refresh_accent(void) {
     uint32_t rgb = resolve_accent();
-    if (rgb != accent_rgb) {
+    bool color_changed = rgb != accent_rgb;
+    if (color_changed) {
         accent_rgb = rgb;
         lv_color_t c = lv_color_hex(rgb);
         lv_style_set_bg_color(&style_accent, c);
@@ -206,7 +210,7 @@ static void refresh_accent(void) {
         /* Swipe transitions must not reuse frames painted with the previous accent. */
         gui_navigation_invalidate_theme_snapshots();
     }
-    gui_settings_accent_changed();
+    gui_settings_accent_changed(color_changed);
 }
 
 void gui_theme_apply_accent(uint32_t rgb) {
@@ -218,14 +222,24 @@ void gui_theme_apply_accent(uint32_t rgb) {
 
 void gui_theme_set_accent_dynamic(bool on) {
     current_settings.accent_dynamic = on;
+    if (on && cover_accent_valid) {
+        current_settings.accent_dynamic_color = cover_accent;
+        current_settings.accent_dynamic_color_valid = true;
+    }
     settings_save_async(&current_settings);
     refresh_accent();
 }
 
 void gui_theme_set_cover_accent(bool valid, uint32_t rgb) {
-    if (valid == cover_accent_valid && (!valid || rgb == cover_accent)) return;
+    if (cover_accent_known && valid == cover_accent_valid && (!valid || rgb == cover_accent)) return;
+    /* Keep the saved boot color only until the first artwork result. */
+    cover_accent_known = true;
     cover_accent_valid = valid;
     cover_accent = valid ? (rgb & 0xFFFFFF) : 0;
+    if (current_settings.accent_dynamic && valid) {
+        current_settings.accent_dynamic_color = cover_accent;
+        current_settings.accent_dynamic_color_valid = true;
+    }
     if (current_settings.accent_dynamic) refresh_accent();
 }
 
@@ -301,4 +315,3 @@ void gui_theme_reload_styles(void) {
     init_style_objects();
     screen_builders_refresh_font_geometry(NULL);
 }
-

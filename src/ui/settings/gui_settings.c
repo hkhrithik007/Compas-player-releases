@@ -1,5 +1,6 @@
 #include "../application/gui.h"
 #include "gui_settings.h"
+#include "gui_native_audio.h"
 #include "input/gui_button_mapping.h"
 #include "../player/settings/gui_equalizer.h"
 #include "../home/gui_home.h"
@@ -57,8 +58,9 @@ extern lv_obj_t * stream_media_screen;
 
 /* Called by gui_theme.c after every accent change, including a new cover
  * while "Match album art" is on. */
-void gui_settings_accent_changed(void) {
+void gui_settings_accent_changed(bool color_changed) {
     gui_accent_sync();
+    if (!color_changed) return;
     gui_equalizer_accent_changed();
     gui_library_accent_changed();
 }
@@ -118,28 +120,36 @@ static void settings_category_library_cb(lv_event_t * e) {
     gui_settings_open_library();
 }
 
+static void settings_about_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    lv_obj_t * screen = gui_settings_get_about_screen();
+    if (screen) nav_push(screen);
+}
+
 
 static lv_obj_t * build_settings_screen(void) {
-    pill_list_item_t items[7];
-    lv_obj_t * category_rows[7] = { NULL };
+    pill_list_item_t items[9];
+    lv_obj_t * category_rows[9] = { NULL };
     items[0] = (pill_list_item_t){ TR("Sound"), PILL_ACCESSORY_CHEVRON, false, settings_category_music_cb, NULL, NULL };
-    items[1] = (pill_list_item_t){ TR("Playback & Controls"), PILL_ACCESSORY_CHEVRON, false, settings_category_playback_cb, NULL, NULL };
+    items[1] = (pill_list_item_t){ TR("Playback"), PILL_ACCESSORY_CHEVRON, false, settings_category_playback_cb, NULL, NULL };
     items[2] = (pill_list_item_t){ TR("Display"), PILL_ACCESSORY_CHEVRON, false, push_screen_slot_cb, NULL, &settings_display_screen };
-    items[3] = (pill_list_item_t){ TR("Power"), PILL_ACCESSORY_CHEVRON, false, push_screen_slot_cb, NULL, &settings_power_screen };
-    items[4] = (pill_list_item_t){ TR("Library"), PILL_ACCESSORY_CHEVRON, false, settings_category_library_cb, NULL, NULL };
-    items[5] = (pill_list_item_t){ TR("System"), PILL_ACCESSORY_CHEVRON, false, push_screen_slot_cb, NULL, &settings_system_screen };
-    items[6] = (pill_list_item_t){ TR("Updates"), PILL_ACCESSORY_CHEVRON, false, settings_updates_row_cb, NULL, NULL };
-    for (unsigned i = 0; i < 7; ++i) {
+    items[3] = (pill_list_item_t){ TR("Personalize"), PILL_ACCESSORY_CHEVRON, false, push_screen_slot_cb, NULL, &settings_personalize_screen };
+    items[4] = (pill_list_item_t){ TR("Power"), PILL_ACCESSORY_CHEVRON, false, push_screen_slot_cb, NULL, &settings_power_screen };
+    items[5] = (pill_list_item_t){ TR("Library"), PILL_ACCESSORY_CHEVRON, false, settings_category_library_cb, NULL, NULL };
+    items[6] = (pill_list_item_t){ TR("System"), PILL_ACCESSORY_CHEVRON, false, push_screen_slot_cb, NULL, &settings_system_screen };
+    items[7] = (pill_list_item_t){ TR("Updates"), PILL_ACCESSORY_CHEVRON, false, settings_updates_row_cb, NULL, NULL };
+    items[8] = (pill_list_item_t){ TR("About"), PILL_ACCESSORY_CHEVRON, false, settings_about_cb, NULL, NULL };
+    for (unsigned i = 0; i < 9; ++i) {
         items[i].out_row = &category_rows[i];
     }
 
-    lv_obj_t * scr = build_pill_list_screen(TR("Settings"), generic_back_cb, items, 7, gui_theme_accent_style(), GUI_ROW_GAP, 100);
+    lv_obj_t * scr = build_pill_list_screen(TR("Settings"), generic_back_cb, items, 9, gui_theme_accent_style(), GUI_ROW_GAP, 100);
     static const char * icons[] = {
         "settings/sound.png", "settings/playback.png", "settings/display.png",
-        "settings/power.png", "settings/library.png", "settings/system.png",
-        "submenu/update_database.png",
+        "submenu/themes.png", "settings/power.png", "settings/library.png", "settings/system.png",
+        "submenu/update_database.png", "settings/about.png",
     };
-    for (unsigned i = 0; i < 7; ++i) {
+    for (unsigned i = 0; i < 9; ++i) {
         if (category_rows[i]) decorate_category_row(category_rows[i], icons[i]);
     }
     finalize_screen_navigation(scr);
@@ -165,36 +175,22 @@ static void settings_tile_cb(lv_event_t * e) {
  * settings_about_row_cb()). ---- */
 
 static void dac_home_usb_row_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    /* If USB DAC is already active in hardware, show its overlay directly. */
-    usb_mode_t detected;
-    bool have_detected = usb_mode_control_detect_current(&detected);
-    if (have_detected && detected == USB_MODE_DAC) {
-        current_settings.usb_mode = (int) USB_MODE_DAC;
-        nav_push(gui_network_get_usb_dac_overlay());
-        return;
-    }
-    /* Require explicit disable of ADB mode before switching to USB DAC. */
-    if (have_detected && detected == USB_MODE_ADB) {
-        show_info_toast(TR("Turn off ADB first (Settings > System > USB Mode), then enable USB DAC from here."));
-        return;
-    }
-    start_usb_mode_switch(USB_MODE_DAC);
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) gui_network_open_usb_dac();
 }
 
 PLUGIN_ROW_CLICK_CB(plugin_more_list_item_click_cb, plugin_manager_more_list_item_clicked)
 
 static const struct { const char * icon; const char * label; lv_event_cb_t cb; } native[] = {
     { "submenu/plugins.png", N_("Plugins"), gui_plugin_manage_row_cb },
-    { "submenu/files.png", N_("File Manager"), gui_file_manager_tile_cb },
+    { "submenu/files.png", N_("File manager"), gui_file_manager_tile_cb },
     { "submenu/themes.png", N_("Themes"), themes_row_cb },
-    { "submenu/layouts.png", N_("Now Playing layouts"), player_layout_choice_settings_row_cb },
+    { "submenu/layouts.png", N_("Player layout"), player_layout_choice_settings_row_cb },
     { "submenu/usb.png", N_("USB DAC"), dac_home_usb_row_cb },
     { "submenu/bluetooth.png", N_("Bluetooth DAC"), bt_dac_settings_row_cb },
 #if BOARD_SUPPORTS_EMULATORS
     { "submenu/emulators.png", N_("Emulators"), gui_emulators_row_cb },
 #endif
-    { "breeze_rows/submenu_external_apps.png", N_("External Apps"), gui_apps_row_cb },
+    { "breeze_rows/submenu_external_apps.png", N_("External apps"), gui_apps_row_cb },
 };
 enum { NATIVE_COUNT = (int) (sizeof(native) / sizeof(native[0])) };
 
@@ -297,11 +293,12 @@ void gui_settings_teardown(void) {
     gui_plugin_order_editor_teardown();
     gui_shell_settings_teardown_after_plugin_order();
     /* The summary labels live on screens deleted below; drop them first. The
-     * Buttons & Remote label is dropped by gui_button_mapping_teardown_screens(),
-     * which must run before that screen is deleted. */
+     * Button Mapping label is dropped by gui_button_mapping_teardown_screens(),
+     * which must run before the Playback screen is deleted. */
     settings_eq_summary = settings_car_summary = settings_sleep_summary = NULL;
     gui_button_mapping_teardown_screens();
     gui_volume_settings_teardown_car_mode_screen();
+    gui_native_audio_deinit();
     settings_music_teardown_screens();
     settings_display_teardown_screens();
     settings_power_teardown_screens();

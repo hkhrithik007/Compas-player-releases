@@ -37,16 +37,25 @@ typedef struct {
      * redirect page never lands in the destination file. */
     char * out_location;
     size_t out_location_size;
+    /* Set when the body passed max_buffer_size, so a chunked body without a
+     * Content-Length still reports too large rather than an I/O error. */
+    bool over_limit;
 } body_sink_t;
 
 static bool sink_write(body_sink_t * sink, const uint8_t * data, size_t len, uint64_t total_written, uint64_t total_expected) {
     if (sink->out_file) {
         /* Enforce max_buffer_size limit when nonzero. */
-        if (sink->max_buffer_size > 0 && total_written > sink->max_buffer_size) return false;
+        if (sink->max_buffer_size > 0 && total_written > sink->max_buffer_size) {
+            sink->over_limit = true;
+            return false;
+        }
         if (len > 0 && fwrite(data, 1, len, sink->out_file) != len) return false;
     } else {
         size_t old_size = *sink->out_buffer_size;
-        if (len > sink->max_buffer_size || old_size > sink->max_buffer_size - len) return false;
+        if (len > sink->max_buffer_size || old_size > sink->max_buffer_size - len) {
+            sink->over_limit = true;
+            return false;
+        }
         size_t needed = old_size + len;
         if (needed > sink->buffer_capacity) {
             size_t capacity = sink->buffer_capacity ? sink->buffer_capacity : 4096;
@@ -72,7 +81,7 @@ static bool sink_write(body_sink_t * sink, const uint8_t * data, size_t len, uin
  * zero-size chunk. Any trailing headers after the last chunk are read and
  * discarded (rarely used in practice, but must not be left on the wire /
  * misparsed as a new response). */
-static bool read_body(http_conn_reader_t * r, bool is_chunked, uint64_t content_length, body_sink_t * sink) {
+static bool read_body(http_conn_reader_t * r, bool is_chunked, bool has_length, uint64_t content_length, body_sink_t * sink) {
     uint8_t chunk[HTTP_CONN_READ_CHUNK];
 
     if (is_chunked) {
@@ -103,14 +112,14 @@ static bool read_body(http_conn_reader_t * r, bool is_chunked, uint64_t content_
         return true;
     }
 
-    uint64_t remaining = content_length;
-    uint64_t total = 0;
-    while (remaining > 0) {
-        size_t take = remaining < sizeof(chunk) ? (size_t) remaining : sizeof(chunk);
-        if (!http_conn_reader_read_exact(r, chunk, take)) return false;
-        total += take;
-        if (!sink_write(sink, chunk, take, total, content_length)) return false;
-        remaining -= take;
+    uint64_t remaining = content_length, total = 0;
+    while (!has_length || remaining > 0) {
+        size_t take = has_length && remaining < sizeof(chunk) ? (size_t)remaining : sizeof(chunk);
+        int n = http_conn_reader_read_some(r, chunk, take);
+        if (n <= 0) return n == 0 && !has_length;
+        total += (size_t)n;
+        if (!sink_write(sink, chunk, (size_t)n, total, has_length ? content_length : 0)) return false;
+        if (has_length) remaining -= (size_t)n;
     }
     return true;
 }
@@ -196,11 +205,7 @@ static bool do_get(const char * url, bool verify_tls, int * out_status, body_sin
     return do_get_ex(url, verify_tls, out_status, sink, 0, 0, NULL);
 }
 
-static bool do_post(const char * url, bool verify_tls, const char * content_type, const uint8_t * body,
-                    size_t body_size, int * out_status, body_sink_t * sink) {
-    return do_request(url, verify_tls, out_status, sink, 0, 0, NULL,
-                      true, content_type, body, body_size);
-}
+
 
 static bool read_content_type(void * ctx, const char * name, char * value) {
     body_sink_t * sink = ctx;
@@ -243,7 +248,8 @@ static bool read_response(http_conn_t * conn, int * out_status, body_sink_t * si
         return false;
     }
 
-    if (!read_body(&reader, is_chunked, content_length, sink)) {
+    if (status == 204 || status == 304) { *out_status = status; return true; }
+    if (!read_body(&reader, is_chunked, head.has_length, content_length, sink)) {
         DBG_LOG("http_client: read_body failed (chunked=%d content_length=%llu)\n", is_chunked,
                 (unsigned long long) content_length);
         return false;
@@ -251,54 +257,6 @@ static bool read_response(http_conn_t * conn, int * out_status, body_sink_t * si
 
     *out_status = status;
     return true;
-}
-
-bool http_get_to_buffer_limited(const char * url, bool verify_tls, size_t max_body_size, int * out_status,
-                                uint8_t ** out_body, size_t * out_body_size) {
-    *out_body = NULL;
-    *out_body_size = 0;
-
-    body_sink_t sink = { .out_buffer = out_body, .out_buffer_size = out_body_size, .out_file = NULL,
-                          .buffer_capacity = 0, .max_buffer_size = max_body_size,
-                          .progress_cb = NULL, .progress_user_data = NULL,
-                          .out_content_type = NULL, .out_content_type_size = 0 };
-    if (!do_get(url, verify_tls, out_status, &sink)) {
-        free(*out_body);
-        *out_body = NULL;
-        *out_body_size = 0;
-        return false;
-    }
-    return true;
-}
-
-bool http_get_to_buffer(const char * url, bool verify_tls, int * out_status, uint8_t ** out_body,
-                         size_t * out_body_size) {
-    return http_get_to_buffer_limited(url, verify_tls, 8 * 1024 * 1024, out_status, out_body, out_body_size);
-}
-
-bool http_post_to_buffer_limited(const char * url, bool verify_tls, const char * content_type, const uint8_t * body,
-                                  size_t body_size, size_t max_body_size, int * out_status, uint8_t ** out_body,
-                                  size_t * out_body_size) {
-    *out_body = NULL;
-    *out_body_size = 0;
-
-    body_sink_t sink = { .out_buffer = out_body, .out_buffer_size = out_body_size, .out_file = NULL,
-                          .buffer_capacity = 0, .max_buffer_size = max_body_size,
-                          .progress_cb = NULL, .progress_user_data = NULL,
-                          .out_content_type = NULL, .out_content_type_size = 0 };
-    if (!do_post(url, verify_tls, content_type, body, body_size, out_status, &sink)) {
-        free(*out_body);
-        *out_body = NULL;
-        *out_body_size = 0;
-        return false;
-    }
-    return true;
-}
-
-bool http_post_to_buffer(const char * url, bool verify_tls, const char * content_type, const uint8_t * body,
-                          size_t body_size, int * out_status, uint8_t ** out_body, size_t * out_body_size) {
-    return http_post_to_buffer_limited(url, verify_tls, content_type, body, body_size, 8 * 1024 * 1024, out_status,
-                                        out_body, out_body_size);
 }
 
 bool http_get_to_file(const char * url, bool verify_tls, const char * dest_path,
@@ -413,6 +371,7 @@ static uint64_t monotonic_now_ms(void) {
 void http_cancel_token_init(http_cancel_token_t * tok) {
     pthread_mutex_init(&tok->mutex, NULL);
     tok->fd = -1;
+    tok->secondary_fd = -1;
     tok->cancel_requested = false;
 }
 
@@ -426,6 +385,7 @@ void http_cancel_token_cancel(http_cancel_token_t * tok) {
     pthread_mutex_lock(&tok->mutex);
     tok->cancel_requested = true;
     if (tok->fd >= 0) shutdown(tok->fd, SHUT_RDWR);
+    if (tok->secondary_fd >= 0) shutdown(tok->secondary_fd, SHUT_RDWR);
     pthread_mutex_unlock(&tok->mutex);
 }
 
@@ -682,16 +642,16 @@ static bool read_response_ex(http_conn_t * conn, http_response_t * resp, body_si
     bool is_chunked = head.chunked;
     uint64_t content_length = head.content_length;
 
-    if (head_only) return true; /* no body to read for HEAD, regardless of what headers claim */
+    if (head_only || head.status == 204 || head.status == 304) return true; /* no body to read for HEAD, regardless of what headers claim */
 
     if (!is_chunked && content_length > sink->max_buffer_size) {
         resp->error = HTTP_ERR_RESPONSE_TOO_LARGE;
         return false;
     }
 
-    if (!read_body(&reader, is_chunked, content_length, sink)) {
-        /* Report timeout if read timed out; otherwise report I/O error. */
-        resp->error = conn->last_read_timed_out ? HTTP_ERR_TIMEOUT : HTTP_ERR_IO;
+    if (!read_body(&reader, is_chunked, head.has_length, content_length, sink)) {
+        if (sink->over_limit) resp->error = HTTP_ERR_RESPONSE_TOO_LARGE;
+        else resp->error = conn->last_read_timed_out ? HTTP_ERR_TIMEOUT : HTTP_ERR_IO;
         return false;
     }
     return true;
@@ -729,13 +689,14 @@ static bool http_request_ex_internal(http_request_t * req, http_cancel_token_t *
         resp->error = HTTP_ERR_INVALID_URL;
         return false;
     }
+    memcpy(resp->host, host, sizeof(host));
 
     http_conn_t conn;
     http_conn_error_t conn_error = HTTP_CONN_OK;
     uint32_t eff_connect_timeout = http_effective_timeout_ms(req->connect_timeout_ms, absolute_deadline_ms);
     uint32_t eff_read_timeout = http_effective_timeout_ms(req->read_timeout_ms, absolute_deadline_ms);
-    if (!http_conn_open_ex(&conn, host, port, is_https, req->verify_tls,
-                            eff_connect_timeout, eff_read_timeout, cancel, &conn_error)) {
+    if (!http_conn_open_deadline_ex(&conn, host, port, is_https, req->verify_tls,
+                            eff_connect_timeout, eff_read_timeout, cancel, &conn_error, absolute_deadline_ms)) {
         DBG_LOG("http_client: http_request_ex conn_open failed for host='%s' port='%s' https=%d (conn_error=%d)\n",
                 host, port, is_https, (int) conn_error);
         http_conn_close(&conn);
@@ -1003,6 +964,7 @@ static bool file_get_hop(file_transfer_t *t, const char *url, char *location, si
         t->result->error = HTTP_ERR_INVALID_URL;
         return false;
     }
+    memcpy(t->result->host, host, sizeof(host));
     http_conn_t conn;
     http_conn_error_t error;
     uint32_t connect_ms = http_effective_timeout_ms(t->request->connect_timeout_ms, t->deadline);

@@ -1,4 +1,5 @@
 #include "wifi_control.h"
+#include "wifi_dhcp.h"
 #include "wifi_status.h"
 #include "../../core/process/subprocess.h"
 #include "../radio/aic_radio.h"
@@ -72,9 +73,6 @@ bool wifi_control_is_enabled(void) {
     return access("/var/run/wpa_supplicant/" WIFI_INTERFACE, F_OK) == 0;
 }
 
-/* Enables WiFi by running wifi_on.sh, then polls wpa_cli status up to ~10s
- * for an IP address or completed association. If associated without an IP address,
- * terminates existing udhcpc instances and triggers udhcpc to obtain a lease. */
 void wifi_control_enable(void) {
     char * argv[] = { (char *) "/usr/bin/wifi_on.sh", NULL };
     if (aic_radio_active()) {
@@ -87,26 +85,11 @@ void wifi_control_enable(void) {
     } else {
         subprocess_run(argv, NULL, 0);
     }
-
-    bool associated = false, got_ip = false;
-    for (int i = 0; i < 20 && !got_ip; i++) {
-        usleep(500000);
-        char status_buf[512];
-        char * status_argv[] = { (char *) "wpa_cli", (char *) "-i", (char *) WIFI_INTERFACE, (char *) "status",
-                                 NULL };
-        if (!subprocess_run(status_argv, status_buf, sizeof(status_buf))) continue;
-        associated = strstr(status_buf, "wpa_state=COMPLETED") != NULL;
-        got_ip = strstr(status_buf, "\nip_address=") != NULL;
-    }
-    if (associated && !got_ip) {
-        subprocess_kill_all_matching("udhcpc");
-        char * dhcp_argv[] = { (char *) "udhcpc", (char *) "-b", (char *) "-i", (char *) WIFI_INTERFACE,
-                               (char *) "-q", NULL };
-        subprocess_run(dhcp_argv, NULL, 0);
-    }
+    wifi_dhcp_start(); /* takes over from the script's own one-shot udhcpc */
 }
 
 void wifi_control_disable(void) {
+    wifi_dhcp_stop(); /* before the script kills wpa_supplicant, so the client is reaped here */
     char * argv[] = { (char *) "/usr/bin/wifi_off.sh", NULL };
     if (aic_radio_active()) {
         aic_radio_wifi_disable();
@@ -198,7 +181,39 @@ static void bytes_to_hex(const unsigned char * data, size_t len, char * out_hex)
     for (size_t i = 0; i < len; i++) snprintf(out_hex + i * 2, 3, "%02x", data[i]);
 }
 
-bool wifi_control_connect(const char * ssid, const char * password) {
+static bool wifi_set_credentials(char *id_str, const char *ssid, const char *password) {
+    char out[256];
+    if (password && password[0] != '\0') {
+        unsigned char psk[32];
+        mbedtls_pkcs5_pbkdf2_hmac_ext(MBEDTLS_MD_SHA1, (const unsigned char *) password, strlen(password),
+                                      (const unsigned char *) ssid, strlen(ssid), 4096, sizeof(psk), psk);
+        char psk_hex[sizeof(psk) * 2 + 1];
+        bytes_to_hex(psk, sizeof(psk), psk_hex);
+        psk_hex[sizeof(psk) * 2] = '\0';
+
+        char * set_psk_argv[] = { (char *) "wpa_cli",     (char *) "-i",  (char *) WIFI_INTERFACE,
+                                  (char *) "set_network", id_str,         (char *) "psk",
+                                  psk_hex,                 NULL };
+        if (!subprocess_run(set_psk_argv, out, sizeof(out)) || strncmp(out, "OK", 2) != 0) {
+            char * remove_argv[] = { (char *) "wpa_cli", (char *) "-i", (char *) WIFI_INTERFACE,
+                                     (char *) "remove_network", id_str, NULL };
+            subprocess_run(remove_argv, NULL, 0);
+            return false;
+        }
+    } else {
+        /* Open network -- matches /etc/wpa_supplicant.conf's own stub
+         * network{} block for open networks on this device. */
+        char * set_keymgmt_argv[] = { (char *) "wpa_cli",     (char *) "-i",  (char *) WIFI_INTERFACE,
+                                      (char *) "set_network", id_str,         (char *) "key_mgmt",
+                                      (char *) "NONE",        NULL };
+        subprocess_run(set_keymgmt_argv, out, sizeof(out));
+    }
+
+    return true;
+}
+
+bool wifi_control_connect_with_id(const char * ssid, const char * password, int *out_id) {
+    if (out_id) *out_id = -1;
     if (!ssid) return false;
     size_t ssid_len = strlen(ssid);
     if (ssid_len == 0 || ssid_len > 32) return false;
@@ -235,41 +250,9 @@ bool wifi_control_connect(const char * ssid, const char * password) {
                                     (char *) "1",            NULL };
     subprocess_run(set_scan_ssid_argv, out, sizeof(out));
 
-    if (password && password[0] != '\0') {
-        unsigned char psk[32];
-        mbedtls_pkcs5_pbkdf2_hmac_ext(MBEDTLS_MD_SHA1, (const unsigned char *) password, strlen(password),
-                                      (const unsigned char *) ssid, strlen(ssid), 4096, sizeof(psk), psk);
-        char psk_hex[sizeof(psk) * 2 + 1];
-        bytes_to_hex(psk, sizeof(psk), psk_hex);
-        psk_hex[sizeof(psk) * 2] = '\0';
-
-        char * set_psk_argv[] = { (char *) "wpa_cli",     (char *) "-i",  (char *) WIFI_INTERFACE,
-                                  (char *) "set_network", id_str,         (char *) "psk",
-                                  psk_hex,                 NULL };
-        if (!subprocess_run(set_psk_argv, out, sizeof(out)) || strncmp(out, "OK", 2) != 0) {
-            char * remove_argv[] = { (char *) "wpa_cli", (char *) "-i", (char *) WIFI_INTERFACE,
-                                     (char *) "remove_network", id_str, NULL };
-            subprocess_run(remove_argv, NULL, 0);
-            return false;
-        }
-    } else {
-        /* Open network -- matches /etc/wpa_supplicant.conf's own stub
-         * network{} block for open networks on this device. */
-        char * set_keymgmt_argv[] = { (char *) "wpa_cli",     (char *) "-i",  (char *) WIFI_INTERFACE,
-                                      (char *) "set_network", id_str,         (char *) "key_mgmt",
-                                      (char *) "NONE",        NULL };
-        subprocess_run(set_keymgmt_argv, out, sizeof(out));
-    }
-
-    char * enable_argv[] = { (char *) "wpa_cli", (char *) "-i", (char *) WIFI_INTERFACE,
-                             (char *) "enable_network", id_str, NULL };
-    subprocess_run(enable_argv, out, sizeof(out));
-
-    char * save_argv[] = { (char *) "wpa_cli", (char *) "-i", (char *) WIFI_INTERFACE, (char *) "save_config",
-                           NULL };
-    subprocess_run(save_argv, NULL, 0);
-
-    return true;
+    if (!wifi_set_credentials(id_str, ssid, password)) return false;
+    if (out_id) *out_id = id;
+    return wifi_control_connect_saved(id);
 }
 
 bool wifi_control_disconnect(void) {
@@ -352,9 +335,16 @@ bool wifi_control_connect_saved(int id) {
                              id_str, NULL };
     if (!subprocess_run(select_argv, out, sizeof(out)) || strncmp(out, "OK", 2) != 0) return false;
 
-    char * save_argv[] = { (char *) "wpa_cli", (char *) "-i", (char *) WIFI_INTERFACE, (char *) "save_config", NULL };
-    subprocess_run(save_argv, NULL, 0);
     return true;
+}
+
+void wifi_control_finish_connect(bool associated) {
+    char * enable[] = { "wpa_cli", "-i", WIFI_INTERFACE, "enable_network", "all", NULL };
+    char * retry[] = { "wpa_cli", "-i", WIFI_INTERFACE, "reassociate", NULL };
+    char * save[] = { "wpa_cli", "-i", WIFI_INTERFACE, "save_config", NULL };
+    subprocess_run(enable, NULL, 0);
+    if (associated) subprocess_run(save, NULL, 0);
+    else subprocess_run(retry, NULL, 0);
 }
 
 bool wifi_control_forget(int id) {
@@ -374,6 +364,7 @@ bool wifi_control_forget(int id) {
 
 bool wifi_control_get_info(wifi_info_t * out) {
     memset(out, 0, sizeof(*out));
+    out->network_id = -1;
 
     char status_buf[512];
     char * status_argv[] = { (char *) "wpa_cli", (char *) "-i", (char *) WIFI_INTERFACE, (char *) "status", NULL };
@@ -384,6 +375,8 @@ bool wifi_control_get_info(wifi_info_t * out) {
     if (!strstr(status_buf, "wpa_state=COMPLETED")) return false;
 
     (void) copy_status_ssid(status_buf, out->ssid, sizeof(out->ssid));
+    const char *id = strstr(status_buf, "\nid=");
+    if (id) (void)sscanf(id + 4, "%d", &out->network_id);
     const char *p = strstr(status_buf, "\nip_address=");
     if (p) sscanf(p + 12, "%15[^\n]", out->ip);
 

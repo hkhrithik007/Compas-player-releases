@@ -1,7 +1,9 @@
 #include "bluetooth_control_internal.h"
+#include <sys/prctl.h>
 
 static pthread_mutex_t bt_dac_info_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t bt_dac_monitor_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t bt_dac_monitor_cond = PTHREAD_COND_INITIALIZER;
 static bt_dac_stream_info_t bt_dac_info;
 static pthread_t bt_dac_info_thread;
 static bool bt_dac_info_active;
@@ -12,7 +14,12 @@ static struct { char path[256]; bool running; } pcm_edges[32];
 static uint32_t stream_generation;
 static atomic_bool output_reserved;
 
-void bt_control_dac_set_reserved(bool reserved) { atomic_store(&output_reserved, reserved); }
+void bt_control_dac_set_reserved(bool reserved) {
+    pthread_mutex_lock(&bt_dac_monitor_mutex);
+    atomic_store(&output_reserved, reserved);
+    pthread_cond_broadcast(&bt_dac_monitor_cond);
+    pthread_mutex_unlock(&bt_dac_monitor_mutex);
+}
 
 void bt_control_get_dac_stream_info(bt_dac_stream_info_t * out) {
     if (!out) return;
@@ -38,6 +45,19 @@ static unsigned int pcm_format_bit_depth(const char * format) {
     return 0;
 }
 
+/* The selected PCM went away: show another phone's PCM, if one remains, so
+ * `available` stays true while any sink is attached. */
+static void bt_dac_info_fall_back(bt_dac_stream_info_t * info) {
+    for (int i = 0; i < 32; i++) {
+        if (!pcm_edges[i].path[0]) continue;
+        snprintf(info->pcm_path, sizeof(info->pcm_path), "%s", pcm_edges[i].path);
+        bt_pcm_path_mac(info->pcm_path, info->mac);
+        info->available = true;
+        info->running = pcm_edges[i].running;
+        return;
+    }
+}
+
 static void bt_dac_info_refresh_event(const char * path, bool removed, int running_event) {
     int slot = -1;
     for (int i = 0; i < 32; i++) {
@@ -56,6 +76,7 @@ static void bt_dac_info_refresh_event(const char * path, bool removed, int runni
         pcm_edges[slot].running = false;
         if (!strcmp(previous.pcm_path, path)) {
             stream_generation++;
+            bt_dac_info_fall_back(&info);
             bt_dac_info_store(&info);
         }
         return;
@@ -208,16 +229,14 @@ static void bt_dac_info_monitor_run_once(void) {
  * monitor started (after a short pause, so a child that cannot start does
  * not spin). stop() clears bt_dac_info_active and ends the loop. */
 static void * bt_dac_info_thread_func(void * arg) {
+    (void) prctl(PR_SET_NAME, "bt_dacinfo");
     (void) arg;
     for (;;) {
         bt_dac_info_monitor_run_once();
-        while (atomic_load(&output_reserved)) {
-            pthread_mutex_lock(&bt_dac_monitor_mutex);
-            bool active = bt_dac_info_active;
-            pthread_mutex_unlock(&bt_dac_monitor_mutex);
-            if (!active) break;
-            usleep(20000);
-        }
+        pthread_mutex_lock(&bt_dac_monitor_mutex);
+        while (bt_dac_info_active && atomic_load(&output_reserved))
+            pthread_cond_wait(&bt_dac_monitor_cond, &bt_dac_monitor_mutex);
+        pthread_mutex_unlock(&bt_dac_monitor_mutex);
         bluealsa_clear_soft_volume_path(NULL);
         bool active = true;
         for (int waited_ms = 0; active && waited_ms < 1000; waited_ms += 50) {
@@ -239,6 +258,7 @@ void bt_dac_info_monitor_stop(void) {
         bt_dac_info_reset(); return;
     }
     bt_dac_info_active = false;
+    pthread_cond_broadcast(&bt_dac_monitor_cond);
     pid_t pid = bt_dac_info_monitor_pid;
     pthread_mutex_unlock(&bt_dac_monitor_mutex);
     if (pid > 0) {

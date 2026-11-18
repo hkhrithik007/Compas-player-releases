@@ -5,12 +5,13 @@
 #include <stdint.h>
 
 /* DSF (Sony DSD Stream File), DFF (Philips DSDIFF), native DSD WavPack,
- * and stereo SACD ISO (raw DSD or DST) container reader,
+ * and SACD ISO (raw DSD or DST) container reader,
  * converting the raw 1-bit DSD bitstream to PCM with dsd_filter.h's
  * lookup-table decimator. DSD64, DSD128 and DSD256 in the 44.1 kHz and 48 kHz
  * families are supported; output is twice the base rate (88.2 or 96 kHz)
- * with the ultrasonic noise-shaping energy filtered out. DSD512 and DST
- * (compressed DFF) are rejected at open. The output rate is therefore NOT
+ * with the ultrasonic noise-shaping energy filtered out. DSD512 is rejected
+ * at open. DST DFF and ISO support up to six channels; multichannel sources
+ * are downmixed to stereo PCM. The output rate is therefore NOT
  * the file's nominal DSD rate -- callers must use dsd_get_pcm_sample_rate().
  * dsd_set_dop() switches to passing the bits through as DoP instead. */
 
@@ -21,6 +22,8 @@ typedef struct dsd_decoder dsd_decoder_t;
 dsd_decoder_t * dsd_open_file(const char * path);
 
 unsigned int dsd_get_channels(const dsd_decoder_t * dec);
+/* Channels the DST decompressor runs on, 0 for uncompressed DSD. */
+unsigned int dsd_get_dst_channels(const dsd_decoder_t * dec);
 unsigned int dsd_get_source_sample_rate(const dsd_decoder_t * dec);
 unsigned int dsd_get_pcm_sample_rate(const dsd_decoder_t * dec);
 uint64_t dsd_get_total_pcm_frame_count(const dsd_decoder_t * dec);
@@ -38,6 +41,7 @@ bool dsd_seek_to_pcm_frame(dsd_decoder_t * dec, uint64_t frame_index);
  * reach the DAC untouched: any gain, EQ, fade or mix destroys them. The
  * sample rate, frame count, seek and read calls all use the current mode's
  * frames. */
+/* Zero for multichannel sources, which require PCM downmixing. */
 unsigned int dsd_get_dop_sample_rate(const dsd_decoder_t * dec);
 bool dsd_is_dop(const dsd_decoder_t * dec);
 

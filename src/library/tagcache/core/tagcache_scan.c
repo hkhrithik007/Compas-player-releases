@@ -3,6 +3,11 @@
 #include "tagcache_scan_intern.h"
 #include <strings.h>
 
+static _Atomic uint32_t stats_revision;
+
+uint32_t tagcache_stats_revision(void) { return atomic_load(&stats_revision); }
+void tagcache_stats_changed(void) { atomic_fetch_add(&stats_revision, 1); }
+
 bool updating;
 _Atomic bool update_failed;
 /* A scan starts as a read-only view.  Bits are set by lookups and are only
@@ -540,39 +545,42 @@ bool tagcache_delete_target_path(const char *path) {
 }
 
 static void update_stats(struct index_entry *idx, int mode, int32_t rating, int32_t count, int32_t last) {
-    if (mode == 0 || mode == 2) idx->tag_seek[tag_rating] = rating;
+    if (mode == 0 || mode >= 2) idx->tag_seek[tag_rating] = rating;
     if (mode == 1) {
         if (idx->tag_seek[tag_playcount] < INT32_MAX) idx->tag_seek[tag_playcount]++;
         idx->tag_seek[tag_lastplayed] = last;
     }
-    if (mode == 2) { idx->tag_seek[tag_playcount] = count; idx->tag_seek[tag_lastplayed] = last; }
+    if (mode >= 2) { idx->tag_seek[tag_playcount] = count; idx->tag_seek[tag_lastplayed] = last; }
 }
 
 /* waiter: see queue_numeric_update(); NULL for the ordinary asynchronous
  * setters. */
-static void set_song_stats(const char *path, int mode, int32_t rating, int32_t count, int32_t last, int *waiter) {
+static bool set_song_stats(const char *path, int mode, int32_t rating, int32_t count, int32_t last, int *waiter) {
     if (waiter) *waiter = 0;
-    if (!db_open || !path) return;
-    if (mode == 2 && !start_staging()) return;
+    if (!db_open || !path) return false;
+    if (mode == 2 && !start_staging()) return false;
+    bool updated = false;
     if (mode != 2) {
         int32_t slot = reader_find_path(path);
         struct index_entry idx;
         if (slot >= 0 && reader_index(slot, &idx) && !(idx.flag & FLAG_DELETED)) {
             update_stats(&idx, mode, rating, count, last);
-            queue_numeric_update(slot, &idx, waiter);
+            if (queue_numeric_update(slot, &idx, waiter)) { tagcache_stats_changed(); updated = true; }
             if (scan_initializing) scan_journal_stats(slot, &idx);
         }
     }
-    if (scan_view_ready) {
+    if (mode != 3 && scan_view_ready) {
         SCAN_SCOPE;
         int32_t slot = scan_find_path(path, false, -1);
         struct index_entry idx;
         if (slot >= 0 && reader_index(slot, &idx) && !(idx.flag & FLAG_DELETED)) {
             update_stats(&idx, mode, rating, count, last);
+            /* Staging is invisible to readers until publication changes the generation. */
             if (scan_write_index(slot, &idx)) scan_journal_stats(slot, &idx);
         }
     }
     reader_reset_cache();
+    return updated;
 }
 void tagcache_set_rating(const char *path, int32_t rating) { set_song_stats(path, 0, rating, 0, 0, NULL); }
 int tagcache_set_rating_durable_begin(const char *path, int32_t rating) {
@@ -586,4 +594,8 @@ int tagcache_set_rating_durable_begin(const char *path, int32_t rating) {
 void tagcache_add_play(const char *path, int32_t now) { set_song_stats(path, 1, 0, 0, now, NULL); }
 void tagcache_overlay_stats(const char *path, int32_t rating, int32_t count, int32_t last) {
     set_song_stats(path, 2, rating, count, last, NULL);
+}
+
+bool tagcache_set_stats(const char *path, int32_t rating, int32_t count, int32_t last) {
+    return set_song_stats(path, 3, rating, count, last, NULL);
 }

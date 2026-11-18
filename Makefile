@@ -277,6 +277,10 @@ LVGL_SCROLL_BLIT_PATCH := patches/lvgl/lvgl_scroll_blit.patch
 LVGL_STYLE_REDRAW_PATCH := patches/lvgl/lvgl_style_redraw.patch
 LVGL_MARQUEE_REDRAW_PATCH := patches/lvgl/lvgl_marquee_redraw.patch
 LVGL_BLUR_WALK_SKIP_PATCH := patches/lvgl/lvgl_blur_walk_skip.patch
+LVGL_OPAQUE_LAYER_CULL_PATCH := patches/lvgl/lvgl_opaque_layer_cull.patch
+LVGL_ANIM_IDLE_PAUSE_PATCH := patches/lvgl/lvgl_anim_idle_pause.patch
+LVGL_BAR_INDICATOR_CLIP_PATCH := patches/lvgl/lvgl_bar_indicator_clip.patch
+LVGL_INVALIDATION_HOOK_PATCH := patches/lvgl/lvgl_invalidation_hook.patch
 LVGL_TEXTAREA_ARABIC_PATCH := patches/lvgl/lvgl_textarea_arabic_canonical.patch
 LVGL_BIDI_LTR_FASTPATH_PATCH := patches/lvgl/lvgl_bidi_ltr_fastpath.patch
 LVGL_BINFONT_SAFETY_PATCH := patches/lvgl/lvgl_binfont_safety.patch
@@ -336,15 +340,13 @@ $(shell git clone --depth 1 https://github.com/mackron/dr_libs.git)
 # dr_libs is a fresh upstream clone (gitignored, not tracked), so vendored
 # fixes to it must be reapplied here rather than committed. This patch bounds
 # dr_wav's metadata chunk seek so a crafted WAV/AIFC chunk size cannot spin
-# drwav__seek_forward forever -- reachable in-process on the UI thread via
-# read_wav_metadata() when a malformed file is played. Applied right after the
-# clone (pristine tree, so it always applies cleanly); a loud warning rather
-# than a silent build if upstream ever drifts, since the miss is a security
-# hardening regression, not a compile error.
+# drwav__seek_forward forever. FLAC packing has its own tracked stamp below.
+# Applied right after the clone (pristine tree, so it always applies cleanly);
+# a loud warning rather than a silent build if upstream ever drifts.
 $(info Hardening dr_libs metadata parser...)
 DR_LIBS_PATCH_RESULT := $(shell patch -p1 --forward --fuzz=0 -i patches/audio/dr/dr_libs_metadata_hardening.patch >/dev/null 2>&1 && echo ok || echo FAILED)
 ifneq ($(DR_LIBS_PATCH_RESULT),ok)
-$(warning dr_libs metadata-hardening patch did not apply -- WAV/AIFF metadata DoS hardening is NOT in effect; check patches/audio/dr/dr_libs_metadata_hardening.patch against the current upstream dr_wav.h)
+$(warning dr_libs hardening patch did not apply -- WAV/AIFF metadata fixes are NOT in effect; check patches/audio/dr/dr_libs_metadata_hardening.patch against upstream dr_libs)
 endif
 endif
 
@@ -633,10 +635,19 @@ $(OPUSFILE_PATCH_STAMP): patches/audio/opusfile/opusfile_allocation_safety.patch
 # second build does not apply twice and a drifted tree fails loudly.
 # libopusfile's warning patch is ordered after the allocation patch.
 VENDOR_PATCH_APPLY = scripts/tools/patches/apply-tracked-patch.sh
+DR_FLAC_PATCH = patches/audio/dr/dr_flac_cuesheet_packing.patch
+DR_FLAC_STAMP = $(DR_LIBS_DIR)/.compas_cuesheet_packing
+$(DR_FLAC_STAMP): $(DR_FLAC_PATCH) $(DR_LIBS_DIR)/dr_flac.h
+	$(VENDOR_PATCH_APPLY) $(DR_LIBS_DIR) $(DR_FLAC_PATCH)
+	@touch $@
+DR_FLAC_USERS = $(patsubst src/%.c,%.o,$(wildcard src/audio/engine/*.c))
+$(addprefix $(BUILD_HOST_DIR)/,$(DR_FLAC_USERS)) $(addprefix $(BUILD_TARGET_DIR)/,$(DR_FLAC_USERS)): $(DR_FLAC_STAMP)
 ALAC_WARNING_PATCH = patches/audio/alac/alac_fourcc.patch
+ALAC_BOUNDS_PATCH = patches/audio/alac/alac_frame_bounds.patch
 ALAC_WARNING_STAMP = $(ALAC_DIR)/.compas_warning_fixes
-$(ALAC_WARNING_STAMP): $(ALAC_WARNING_PATCH) $(ALAC_DIR)/codec/ALACAudioTypes.h
+$(ALAC_WARNING_STAMP): $(ALAC_WARNING_PATCH) $(ALAC_BOUNDS_PATCH) $(ALAC_DIR)/codec/ALACAudioTypes.h
 	$(VENDOR_PATCH_APPLY) $(ALAC_DIR) $(ALAC_WARNING_PATCH)
+	$(VENDOR_PATCH_APPLY) $(ALAC_DIR) $(ALAC_BOUNDS_PATCH)
 	@touch $@
 FAAD2_WARNING_PATCH = patches/audio/faad2/faad2_ps_dec_init.patch
 FAAD2_WARNING_STAMP = $(FAAD2_DIR)/.compas_warning_fixes
@@ -724,20 +735,22 @@ $(TARGET_CODE_SECTION_FLAGS_STAMP): FORCE_TARGET_CODE_SECTION_FLAGS
 CFLAGS += -Isonic
 CFLAGS += $(EXTRA_CFLAGS)
 
-APP_SRCS = src/app/main.c src/ui/application/gui.c src/ui/library/library_selection_snapshot.c src/ui/library/library_az_index.c src/ui/network/subsonic/gui_subsonic.c src/ui/network/subsonic/gui_subsonic_settings.c src/ui/network/subsonic/gui_subsonic_download.c src/ui/network/subsonic/gui_subsonic_connect.c src/ui/network/subsonic/gui_subsonic_actions.c src/ui/network/subsonic/gui_subsonic_browse.c src/ui/network/subsonic/gui_subsonic_sync.c src/ui/network/subsonic/gui_subsonic_views.c src/ui/network/subsonic/gui_subsonic_menu.c src/ui/network/subsonic/gui_subsonic_sections.c src/ui/network/subsonic/gui_subsonic_genres.c src/ui/network/subsonic/gui_subsonic_covers.c src/ui/network/subsonic/gui_subsonic_album.c src/ui/network/subsonic/gui_subsonic_album_cover.c src/ui/network/subsonic/gui_subsonic_cover_flow.c src/ui/settings/gui_settings.c src/ui/settings/gui_settings_music.c src/ui/settings/gui_settings_display.c src/ui/settings/gui_settings_power.c src/ui/settings/gui_settings_system.c src/ui/network/gui_network.c src/ui/appearance/gui_theme.c src/ui/shell/gui_notifications.c src/ui/library/browse/gui_library.c src/ui/library/browse/gui_library_collections.c src/ui/library/browse/gui_library_sd.c src/ui/library/browse/gui_library_artist.c src/ui/library/browse/gui_library_browse.c src/ui/library/browse/gui_library_group_songs.c src/ui/library/browse/gui_group_songs_rows.c src/ui/library/browse/gui_group_songs_edit.c src/ui/library/browse/gui_library_scan.c src/ui/player/screen/gui_queue.c src/ui/player/screen/gui_player.c src/ui/player/screen/gui_track_info.c src/ui/plugins/gui_plugins.c src/ui/shell/gui_shell.c src/ui/shell/gui_navigation.c src/ui/library/collections/gui_books.c src/ui/library/browse/gui_file_manager.c src/ui/library/browse/gui_image_view.c src/ui/text/rendering/gui_text_input.c src/ui/player/screen/gui_lyrics.c src/ui/shell/gui_reload.c src/audio/engine/audio.c src/audio/engine/audio_dr_impl.c src/audio/engine/audio_decoder_open.c src/audio/engine/audio_decoder_io.c src/audio/engine/audio_waveform.c src/audio/engine/audio_mp3_index.c src/audio/engine/audio_output_sink.c src/audio/engine/audio_volume.c src/library/browser/files/file_browser.c src/library/browser/files/file_ops.c src/hardware/input/hw_buttons.c src/hardware/input/button_mapping.c src/hardware/input/input_device_utils.c src/library/metadata/parsing/metadata.c src/library/metadata/parsing/metadata_id3.c src/library/metadata/parsing/metadata_xiph_mp4.c src/library/metadata/parsing/metadata_iff.c src/library/metadata/scan/library_walk.c src/library/metadata/db/metadata_db.c src/core/persistence/settings.c src/core/ui/display/startup_splash.c src/core/system/lifecycle/screenshot.c src/core/system/runtime/app_version.c src/audio/decoders/aiff/aiff_decoder.c src/audio/decoders/dsd/dsd_filter.c src/audio/decoders/dsd/dsd_decoder.c src/audio/readers/sacd/sacd_reader.c src/audio/decoders/dst/dst_decoder.c src/library/sacd/sacd_iso.c src/audio/decoders/aac/aac_decoder.c src/audio/demux/mp4/mp4_demux.c src/audio/demux/caf/caf_demux.c src/audio/demux/ape/ape_demux.c src/audio/decoders/ape/ape_decoder.c src/audio/decoders/ape/ape_ffmpeg_core.c src/audio/effects/biquad_cookbook.c src/audio/effects/peq.c src/audio/effects/mseb.c src/audio/effects/soundstage.c src/audio/effects/soundstage_dsp.c src/audio/effects/soundstage_room.c src/audio/effects/soundstage_run.c src/audio/timing/audio_tempo.c src/ui/assets/assets.c src/ui/widgets/builders/screen_builders.c src/ui/assets/cover_card_preview.c src/hardware/power/battery.c src/network/wifi/wifi_status.c src/network/security/ca_bundle.c src/network/http/client/http_conn.c src/network/http/client/http_client.c src/network/download/download.c src/core/files/file_integrity.c src/network/http/stream/http_stream.c src/network/http/stream/http_stream_file.c src/network/services/subsonic_client.c src/library/artwork/decode/cover_decode.c src/library/artwork/cache/image_thumb.c src/library/text/lyrics/lyrics.c src/audio/decoders/asf/asf_demux.c src/audio/decoders/wma/wma_decoder.c src/audio/decoders/ogg/ogg_probe.c src/audio/decoders/ogg/opus_decoder.c src/audio/decoders/ogg/opusfile_alloc.c src/audio/decoders/wavpack/wavpack_decoder.c src/audio/decoders/caf/caf_decoder.c src/audio/decoders/vorbis/vorbis_decoder.c src/library/parsers/cue/cue_parser.c src/ui/text/rendering/fallback_font.c src/ui/text/rendering/gui_text_view.c \
-src/core/process/subprocess.c src/network/wifi/wifi_control.c src/network/bluetooth/control/bluetooth_control.c src/network/bluetooth/control/bt_codec_policy.c src/network/bluetooth/control/bt_devices.c src/network/bluetooth/control/bt_control_daemon.c src/network/bluetooth/control/bt_output_watch.c src/network/bluetooth/control/bt_transport_info.c src/network/bluetooth/control/bt_source_volume.c src/network/bluetooth/control/bt_debug_capture.c src/network/bluetooth/control/bt_dac_info.c src/network/hiby/hiby_sys_server.c src/hardware/indicators/backlight.c src/network/remote/import/remote_import_files.c src/network/airplay/airplay_control.c src/network/airplay/airplay_bridge.c src/network/airplay/airplay_metadata.c src/hardware/device/headphone_status.c src/hardware/device/device_config.c src/hardware/indicators/led_control.c src/hardware/power/charge_limiter.c src/core/system/lifecycle/idle_shutdown.c src/hardware/power/power_suspend.c src/core/text/text_reader.c src/hardware/usb/usb_mode_control.c src/hardware/usb/usb_dac_bridge.c src/hardware/usb/usb_audio_output.c src/core/updates/firmware_update.c src/core/updates/player_update.c src/core/system/lifecycle/reboot_handoff.c src/library/playlists/playlist_files.c src/library/playlists/favorite_writer.c src/network/firmware/firmware_ota.c src/network/store/plugins/plugin_store.c src/network/store/plugins/plugin_store_catalog.c src/network/store/plugins/plugin_store_card.c src/network/store/plugins/plugin_store_workers.c src/network/store/plugins/plugin_store_preview.c src/network/store/plugins/store_common.c src/network/store/catalog/emulator_store.c src/core/device/emulator_registry.c src/core/time/timezone_data.c src/core/time/timezone_apply.c src/core/device/hostname_apply.c src/network/services/dlna_control.c src/network/remote/control/remote_control.c src/network/remote/discovery/remote_control_discovery.c src/network/store/catalog/catalog_source_cache.c src/network/remote/discovery/remote_control_mdns.c src/plugins/manager/plugin_manager.c
+APP_SRCS = src/app/main.c src/ui/application/gui.c src/ui/library/library_selection_snapshot.c src/ui/library/library_az_index.c src/ui/network/subsonic/gui_subsonic.c src/ui/network/subsonic/gui_subsonic_settings.c src/ui/network/subsonic/gui_subsonic_download.c src/ui/network/subsonic/gui_subsonic_connect.c src/ui/network/subsonic/gui_subsonic_actions.c src/ui/network/subsonic/gui_subsonic_browse.c src/ui/network/subsonic/gui_subsonic_sync.c src/ui/network/subsonic/gui_subsonic_views.c src/ui/network/subsonic/gui_subsonic_menu.c src/ui/network/subsonic/gui_subsonic_sections.c src/ui/network/subsonic/gui_subsonic_genres.c src/ui/network/subsonic/gui_subsonic_covers.c src/ui/network/subsonic/gui_subsonic_album.c src/ui/network/subsonic/gui_subsonic_album_cover.c src/ui/network/subsonic/gui_subsonic_cover_flow.c src/ui/settings/gui_settings.c src/ui/settings/gui_settings_music.c src/ui/settings/gui_settings_display.c src/ui/settings/gui_settings_power.c src/ui/settings/gui_settings_system.c src/ui/network/gui_network.c src/ui/appearance/gui_theme.c src/ui/shell/gui_notifications.c src/ui/library/browse/gui_library.c src/ui/library/browse/gui_library_collections.c src/ui/library/browse/gui_favorite_albums.c src/ui/library/browse/gui_library_sd.c src/ui/library/browse/gui_library_usb_drive.c src/ui/library/browse/gui_library_artist.c src/ui/library/browse/gui_library_browse.c src/ui/library/browse/gui_all_songs_rating.c src/ui/library/browse/gui_album_rating.c src/ui/library/browse/gui_rating_lifecycle.c src/ui/library/browse/gui_library_group_songs.c src/ui/library/browse/gui_group_songs_rows.c src/ui/library/browse/gui_group_songs_edit.c src/ui/library/browse/gui_library_scan.c src/ui/player/screen/gui_queue.c src/ui/player/screen/gui_player.c src/ui/player/screen/gui_track_info.c src/ui/plugins/gui_plugins.c src/ui/shell/gui_shell.c src/ui/shell/gui_navigation.c src/ui/library/collections/gui_books.c src/ui/library/browse/gui_file_manager.c src/ui/library/browse/gui_image_view.c src/ui/text/rendering/gui_text_input.c src/ui/player/screen/gui_lyrics.c src/ui/shell/gui_reload.c src/audio/engine/audio.c src/audio/engine/audio_dr_impl.c src/audio/engine/audio_decoder_open.c src/audio/engine/audio_decoder_io.c src/audio/engine/audio_waveform.c src/audio/engine/audio_mp3_index.c src/audio/engine/audio_output_sink.c src/audio/engine/audio_volume.c src/library/browser/files/file_browser.c src/library/browser/files/file_ops.c src/hardware/input/hw_buttons.c src/hardware/input/button_mapping.c src/hardware/input/input_device_utils.c src/library/metadata/parsing/metadata.c src/library/metadata/parsing/metadata_id3.c src/library/metadata/parsing/metadata_xiph_mp4.c src/library/metadata/parsing/metadata_iff.c src/library/metadata/scan/library_walk.c src/library/metadata/db/metadata_db.c src/core/persistence/settings.c src/core/ui/display/startup_splash.c src/core/system/lifecycle/screenshot.c src/core/system/runtime/app_version.c src/audio/decoders/aiff/aiff_decoder.c src/audio/decoders/dsd/dsd_filter.c src/audio/decoders/dsd/dsd_decoder.c src/audio/readers/sacd/sacd_reader.c src/audio/decoders/dst/dst_decoder.c src/library/sacd/sacd_iso.c src/audio/decoders/aac/aac_decoder.c src/audio/demux/mp4/mp4_demux.c src/audio/demux/caf/caf_demux.c src/audio/demux/ape/ape_demux.c src/audio/decoders/ape/ape_decoder.c src/audio/decoders/ape/ape_ffmpeg_core.c src/audio/effects/biquad_cookbook.c src/audio/effects/peq.c src/audio/effects/mseb.c src/audio/effects/soundstage.c src/audio/effects/soundstage_dsp.c src/audio/effects/soundstage_room.c src/audio/effects/soundstage_run.c src/audio/timing/audio_tempo.c src/ui/assets/assets.c src/ui/widgets/builders/screen_builders.c src/ui/assets/cover_card_preview.c src/hardware/power/battery.c src/network/wifi/wifi_status.c src/network/security/ca_bundle.c src/network/http/client/http_conn.c src/network/http/client/http_client.c src/network/download/download.c src/core/files/file_integrity.c src/network/http/stream/http_stream.c src/network/http/stream/http_stream_file.c src/network/services/subsonic_client.c src/library/artwork/decode/cover_decode.c src/library/artwork/cache/image_thumb.c src/library/text/lyrics/lyrics.c src/audio/decoders/asf/asf_demux.c src/audio/decoders/wma/wma_decoder.c src/audio/decoders/ogg/ogg_probe.c src/audio/decoders/ogg/opus_decoder.c src/audio/decoders/ogg/opusfile_alloc.c src/audio/decoders/wavpack/wavpack_decoder.c src/audio/decoders/caf/caf_decoder.c src/audio/decoders/vorbis/vorbis_decoder.c src/library/parsers/cue/cue_parser.c src/ui/text/rendering/fallback_font.c src/ui/text/rendering/gui_text_view.c \
+src/core/process/subprocess.c src/network/wifi/wifi_control.c src/network/wifi/wifi_dhcp.c src/network/bluetooth/control/bluetooth_control.c src/network/bluetooth/control/bt_codec_policy.c src/network/bluetooth/control/bt_devices.c src/network/bluetooth/control/bt_control_daemon.c src/network/bluetooth/control/bt_output_watch.c src/network/bluetooth/control/bt_transport_info.c src/network/bluetooth/control/bt_source_volume.c src/network/bluetooth/control/bt_debug_capture.c src/network/bluetooth/control/bt_dac_info.c src/network/hiby/hiby_sys_server.c src/hardware/indicators/backlight.c src/network/remote/import/remote_import_files.c src/network/airplay/airplay_control.c src/network/airplay/airplay_bridge.c src/network/airplay/airplay_metadata.c src/hardware/device/headphone_status.c src/hardware/device/device_config.c src/hardware/indicators/led_control.c src/hardware/power/charge_limiter.c src/core/system/lifecycle/idle_shutdown.c src/hardware/power/power_suspend.c src/core/text/text_reader.c src/hardware/usb/usb_mode_control.c src/hardware/usb/wireless_adb.c src/hardware/usb/usb_dac_bridge.c src/hardware/usb/usb_audio_output.c src/core/updates/firmware_update.c src/core/updates/player_update.c src/core/system/lifecycle/reboot_handoff.c src/library/playlists/playlist_files.c src/library/playlists/rating_writer.c src/network/firmware/firmware_ota.c src/network/store/plugins/plugin_store.c src/network/store/plugins/plugin_store_catalog.c src/network/store/plugins/plugin_store_card.c src/network/store/plugins/plugin_store_workers.c src/network/store/plugins/plugin_store_preview.c src/network/store/plugins/store_common.c src/network/store/catalog/emulator_store.c src/core/device/emulator_registry.c src/core/time/timezone_data.c src/core/time/timezone_apply.c src/core/device/hostname_apply.c src/network/services/dlna_control.c src/network/remote/control/remote_control.c src/network/remote/discovery/remote_control_discovery.c src/network/store/catalog/catalog_source_cache.c src/network/remote/discovery/remote_control_mdns.c src/plugins/manager/plugin_manager.c
+APP_SRCS += src/core/persistence/native_audio_settings.c src/ui/settings/gui_native_audio.c src/ui/settings/gui_play_through.c
 APP_SRCS += src/ui/assets/gui_image_dsc.c
 APP_SRCS += src/plugins/manager/plugin_layout.c
 APP_SRCS += src/plugins/manager/plugin_events.c
 APP_SRCS += src/plugins/manager/plugin_list_screens.c
 APP_SRCS += src/plugins/manager/plugin_registries.c
-APP_SRCS += src/library/metadata/db/metadata_db_browse.c src/library/metadata/db/metadata_db_catalog.c src/library/metadata/db/metadata_db_library_lists.c
+APP_SRCS += src/library/metadata/db/album_rating.c src/library/metadata/db/metadata_db_browse.c src/library/metadata/db/metadata_db_catalog.c src/library/metadata/db/metadata_db_library_lists.c
 APP_SRCS += src/plugins/bindings/ui/plugin_ui_bindings.c
 APP_SRCS += src/plugins/bindings/audio/plugin_playback_bindings.c
 APP_SRCS += src/plugins/bindings/audio/plugin_soundstage_bindings.c
 APP_SRCS += src/plugins/bindings/io/plugin_file_bindings.c
 APP_SRCS += src/plugins/bindings/io/plugin_system_bindings.c
 APP_SRCS += src/plugins/manager/plugin_scan.c
+APP_SRCS += src/network/http/stream/icy_metadata.c
 APP_SRCS += src/plugins/manager/plugin_call.c
 APP_SRCS += src/ui/settings/setup/gui_setup.c src/ui/settings/setup/gui_setup_plugins.c src/ui/appearance/brand_marks.c src/core/time/timezone_location.c
 APP_SRCS += src/ui/settings/gui_about_info.c
@@ -748,10 +761,11 @@ APP_SRCS += src/ui/settings/controls/gui_external_controls.c
 APP_SRCS += src/ui/plugins/manage/gui_plugin_order_editor.c
 APP_SRCS += src/ui/player/settings/gui_equalizer.c
 APP_SRCS += src/ui/home/gui_home.c src/ui/home/home_background.c
-APP_SRCS += src/ui/widgets/builders/screen_builders_header.c src/ui/widgets/builders/screen_builders_rows.c src/ui/widgets/builders/screen_builders_menus.c src/ui/widgets/builders/screen_builders_overlays.c src/ui/widgets/builders/screen_builders_setting_slider.c
+APP_SRCS += src/ui/widgets/builders/screen_builders_header.c src/ui/widgets/builders/screen_builders_rows.c src/ui/widgets/builders/screen_builders_menus.c src/ui/widgets/builders/screen_builders_overlays.c src/ui/widgets/builders/screen_builders_setting_slider.c src/ui/widgets/builders/screen_builders_fill_slider.c
 APP_SRCS += src/network/radio/aic_radio.c src/network/radio/aic_radio_policy.c
 APP_SRCS += src/ui/updates/gui_updates.c
 APP_SRCS += src/ui/appearance/gui_accent.c src/ui/appearance/gui_color_picker.c
+APP_SRCS += src/ui/widgets/controls/star_rating.c src/ui/widgets/controls/star_rating_icons.c src/ui/widgets/controls/gui_rating_popup.c
 APP_SRCS += src/ui/appearance/fonts/gui_custom_font.c src/ui/widgets/lists/compact_list.c
 APP_SRCS += src/ui/settings/display/gui_display_timing_settings.c src/ui/settings/controls/gui_time_settings.c src/library/metadata/isolation/metadata_isolation.c
 APP_SRCS += src/ui/settings/input/gui_button_mapping.c src/ui/settings/controls/gui_volume_settings.c src/ui/settings/controls/gui_shell_settings.c src/ui/settings/controls/gui_setting_switches.c
@@ -761,7 +775,7 @@ APP_SRCS += src/ui/shell/gui_shell_drawer_motion.c
 APP_SRCS += src/ui/shell/gui_shell_topbar.c
 APP_SRCS += src/ui/shell/gui_shell_topbar_layout.c
 APP_SRCS += src/ui/shell/gui_shell_bluetooth.c
-APP_SRCS += src/ui/shell/gui_shell_bt_dac_session.c
+APP_SRCS += src/ui/shell/gui_shell_bt_dac_session.c src/ui/shell/gui_shell_usb_dac_session.c
 APP_SRCS += src/ui/shell/gui_shell_wifi.c
 APP_SRCS += src/ui/shell/gui_shell_gestures.c
 APP_SRCS += src/ui/shell/gui_shell_swipes.c
@@ -770,7 +784,7 @@ APP_SRCS += src/library/artwork/albumart/albumart_info.c
 APP_SRCS += src/core/persistence/settings_registry.c src/core/persistence/settings_reg_audio.c src/core/persistence/settings_reg_device.c
 APP_SRCS += src/network/remote/control/remote_plugins.c src/network/remote/control/remote_plugin_store.c src/ui/plugins/manage/gui_remote_plugins.c src/ui/plugins/manage/gui_remote_plugin_images.c
 APP_SRCS += src/network/remote/control/remote_settings.c src/network/remote/control/remote_settings_json.c src/ui/settings/controls/gui_remote_settings.c
-APP_SRCS += src/network/remote/control/remote_control_state.c src/network/remote/control/remote_http.c src/network/remote/control/remote_catalog.c src/network/remote/control/remote_library.c src/network/remote/control/remote_playlists.c
+APP_SRCS += src/network/remote/control/remote_control_state.c src/network/remote/control/remote_http.c src/network/remote/control/remote_catalog.c src/network/remote/control/remote_library.c src/network/remote/control/remote_playlists.c src/network/remote/control/remote_reply.c
 APP_SRCS += src/ui/settings/power/gui_power_hub.c src/ui/player/transport/player_seek_input.c src/plugins/bindings/audio/plugin_equalizer_bindings.c
 APP_SRCS += src/plugins/bindings/io/plugin_http_bindings.c src/plugins/lua/plugin_lua_runtime.c
 APP_SRCS += src/library/metadata/scan/library_scan.c src/ui/player/artwork/player_artwork_jobs.c src/ui/player/artwork/player_stream_cover.c src/ui/player/artwork/player_artwork_cache.c
@@ -778,7 +792,7 @@ APP_SRCS += src/plugins/bindings/ui/plugin_text_view_bindings.c src/ui/player/qu
 APP_SRCS += src/plugins/bindings/io/plugin_archive_bindings.c
 APP_SRCS += src/ui/library/library_thumbnails.c src/ui/library/library_thumbnails_cache.c src/ui/library/library_thumbnails_lazy.c src/ui/library/library_thumbnails_warmer.c src/ui/library/library_thumbnails_warm_artists.c src/ui/library/library_thumbnails_prewarm.c src/ui/library/library_thumbnail_placeholder.c
 APP_SRCS += src/ui/library/library_search.c
-APP_SRCS += src/ui/network/gui_network_wifi.c src/ui/network/gui_network_wifi_screen.c src/ui/network/gui_network_bt.c src/ui/network/gui_network_pairing.c src/ui/network/gui_network_receivers.c src/ui/network/gui_network_bt_dac.c src/ui/network/gui_network_usb.c src/ui/network/gui_network_services.c src/ui/network/gui_network_choice.c
+APP_SRCS += src/ui/network/gui_network_wifi.c src/ui/network/gui_network_wifi_screen.c src/ui/network/gui_network_bt.c src/ui/network/gui_network_pairing.c src/ui/network/gui_network_receivers.c src/ui/network/gui_network_bt_dac.c src/ui/network/gui_network_dac_screen.c src/ui/network/gui_network_usb_dac.c src/ui/network/gui_network_usb.c src/ui/network/gui_network_services.c src/ui/network/gui_network_choice.c
 APP_SRCS += src/ui/player/queue/player_queue_model.c src/ui/player/queue/player_queue_resume.c src/ui/player/queue/player_queue_controller.c src/ui/player/queue/player_queue_remote.c
 APP_SRCS += src/ui/player/transport/player_playback.c src/ui/player/screen/gui_player_metadata.c src/ui/player/screen/gui_player_track_source.c src/ui/player/screen/gui_player_more_menu.c src/ui/player/layout/player_count_row.c
 APP_SRCS += src/ui/library/browse/gui_folder_actions.c src/ui/library/playlists/gui_playlists.c src/ui/library/playlists/gui_playlist_target.c
@@ -794,7 +808,7 @@ APP_SRCS += src/core/device/app_registry.c src/core/device/app_approval.c src/co
 APP_SRCS += src/plugins/storage/plugin_reserved_dirs.c src/plugins/bindings/io/plugin_apps_bindings.c src/ui/plugins/apps/gui_apps.c
 APP_SRCS += src/core/updates/player_install.c src/bootloader/scan/scanner.c src/bootloader/selector/ui/controller/selector_request.c src/bootloader/install/internal_storage.c
 APP_SRCS += src/ui/text/fonts/ui_fonts.c
-APP_SRCS += src/core/storage/sd_fsck.c src/core/storage/sd_fsck_run.c
+APP_SRCS += src/core/storage/sd_fsck.c src/core/storage/sd_fsck_run.c src/core/storage/usb_drive.c src/core/storage/storage_roots.c
 APP_SRCS += src/plugins/json/plugin_json.c src/plugins/storage/plugin_storage.c src/plugins/lifecycle/plugin_disabled_list.c
 APP_SRCS += src/ui/plugins/manage/gui_plugin_manage.c src/ui/plugins/manage/gui_plugin_store.c src/ui/plugins/emulators/gui_emulators.c src/ui/plugins/emulators/gui_emulator_store.c src/ui/settings/lock/gui_lock_screen.c
 APP_SRCS += src/core/themes/theme_file.c src/ui/appearance/gui_themes.c
@@ -919,6 +933,7 @@ DBUS_SRCS = $(filter-out %-win.c %-win32.c %wince-glue.c $(DBUS_DIR)/dbus/dbus-s
 # are guarded with #ifndef HOST_BUILD for the same reason audio.c's own
 # Bluetooth-output code is.
 TARGET_ONLY_APP_SRCS = src/network/bluetooth/media/bt_dac_transport.c src/network/bluetooth/media/bt_media_player.c src/network/bluetooth/media/bt_remote_control.c src/network/bluetooth/control/bt_adapter_query.c src/network/bluetooth/control/bt_pairing_agent.c src/network/bluetooth/control/bt_pairing_prompt.c src/network/bluetooth/control/bt_dbus_util.c src/network/bluetooth/control/bt_link_key_watch.c src/audio/output/audio_output.c src/audio/output/usb_dsd_output.c
+TARGET_ONLY_APP_SRCS += src/core/math/fast_lrintf.c
 # Target-only (see TARGET_CFLAGS's own comment on why): provides
 # backtrace()/backtrace_symbols_fd() for main.c's SIGSEGV handler on musl,
 # which has no execinfo.h/backtrace() of its own.
@@ -1044,7 +1059,7 @@ $(HOST_BIN): $(HOST_OBJS) $(HOST_AUDIO_LIBS) $(HOST_VARIANT_STAMP)
 # on the tracked patch file (so a future change to the patch itself also
 # invalidates it), not just on $(LVGL_DIR) existing.
 $(LVGL_PATCH_STAMP): $(LVGL_FBDEV_C) $(LVGL_FBDEV_H) $(LVGL_PATCH) \
-                     $(LVGL_TINY_TTF) $(LVGL_TJPGDCNF) $(LVGL_LRU_RB) $(LVGL_LODEPNG) $(LVGL_OBJ_POS) $(LVGL_DRAW_IMAGE) $(LVGL_SW_TRANSFORM) $(LVGL_RUNTIME_FIXES_PATCH) $(LVGL_UI_PERF_TRACE_PATCH) $(LVGL_SCROLL_BLIT_PATCH) $(LVGL_STYLE_REDRAW_PATCH) $(LVGL_MARQUEE_REDRAW_PATCH) $(LVGL_BLUR_WALK_SKIP_PATCH) \
+                     $(LVGL_TINY_TTF) $(LVGL_TJPGDCNF) $(LVGL_LRU_RB) $(LVGL_LODEPNG) $(LVGL_OBJ_POS) $(LVGL_DRAW_IMAGE) $(LVGL_SW_TRANSFORM) $(LVGL_RUNTIME_FIXES_PATCH) $(LVGL_UI_PERF_TRACE_PATCH) $(LVGL_SCROLL_BLIT_PATCH) $(LVGL_STYLE_REDRAW_PATCH) $(LVGL_MARQUEE_REDRAW_PATCH) $(LVGL_BLUR_WALK_SKIP_PATCH) $(LVGL_OPAQUE_LAYER_CULL_PATCH) $(LVGL_ANIM_IDLE_PAUSE_PATCH) $(LVGL_BAR_INDICATOR_CLIP_PATCH) $(LVGL_INVALIDATION_HOOK_PATCH) \
                      $(LVGL_EVDEV_C) $(LVGL_EVDEV_FRAMES_PATCH) $(LVGL_TEXTAREA_ARABIC_PATCH) $(LVGL_BIDI_LTR_FASTPATH_PATCH) \
                      $(LVGL_BINFONT_LOADER) $(LVGL_FS_CORE) $(LVGL_BINFONT_SAFETY_PATCH) \
                      $(LVGL_BIN_DECODER) $(LVGL_BIN_DECODER_SAFETY_PATCH) scripts/tools/patches/apply-tracked-patch.sh \
@@ -1126,6 +1141,10 @@ $(LVGL_PATCH_STAMP): $(LVGL_FBDEV_C) $(LVGL_FBDEV_H) $(LVGL_PATCH) \
 	scripts/tools/patches/apply-tracked-patch.sh $(LVGL_DIR) $(LVGL_STYLE_REDRAW_PATCH); \
 	scripts/tools/patches/apply-tracked-patch.sh $(LVGL_DIR) $(LVGL_MARQUEE_REDRAW_PATCH); \
 	scripts/tools/patches/apply-tracked-patch.sh $(LVGL_DIR) $(LVGL_BLUR_WALK_SKIP_PATCH); \
+	scripts/tools/patches/apply-tracked-patch.sh $(LVGL_DIR) $(LVGL_OPAQUE_LAYER_CULL_PATCH); \
+	scripts/tools/patches/apply-tracked-patch.sh $(LVGL_DIR) $(LVGL_ANIM_IDLE_PAUSE_PATCH); \
+	scripts/tools/patches/apply-tracked-patch.sh $(LVGL_DIR) $(LVGL_BAR_INDICATOR_CLIP_PATCH); \
+	scripts/tools/patches/apply-tracked-patch.sh $(LVGL_DIR) $(LVGL_INVALIDATION_HOOK_PATCH); \
 	for f in $(LVGL_GENERATED_FONTS); do \
 	  target=$(LVGL_DIR)/src/font/$$f; golden=$(LVGL_GENERATED_FONTS_DIR)/$$f; \
 	  if cmp -s "$$target" "$$golden"; then \
@@ -1176,9 +1195,21 @@ $(BUILD_HOST_DIR)/alac/%.o: $(ALAC_DIR)/codec/%.cpp $(ALAC_WARNING_STAMP)
 	@mkdir -p $(dir $@)
 	$(CXX) $(ALAC_CXXFLAGS) -c $< -o $@
 
-$(BUILD_HOST_DIR)/mbedtls/%.o: $(MBEDTLS_DIR)/library/%.c
+# mbedTLS 3.6.2 assumes aggregate union initialization clears every member.
+# GCC 15+ needs this compatibility flag; older compilers reject it.
+HOST_MBEDTLS_ZERO_UNIONS := $(shell printf 'int x;' | $(CC) -x c -c -o /dev/null -fzero-init-padding-bits=unions - 2>/dev/null && printf '%s' '-fzero-init-padding-bits=unions')
+
+HOST_MBEDTLS_FLAGS_STAMP = $(BUILD_HOST_DIR)/.mbedtls_union_flags
+.PHONY: FORCE_HOST_MBEDTLS_FLAGS
+FORCE_HOST_MBEDTLS_FLAGS:
+$(HOST_MBEDTLS_FLAGS_STAMP): FORCE_HOST_MBEDTLS_FLAGS
 	@mkdir -p $(dir $@)
-	$(CC) $(HOST_CFLAGS) -c $< -o $@
+	@printf '%s\n' '$(HOST_MBEDTLS_ZERO_UNIONS)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(BUILD_HOST_DIR)/mbedtls/%.o: $(MBEDTLS_DIR)/library/%.c $(HOST_MBEDTLS_FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(HOST_CFLAGS) $(HOST_MBEDTLS_ZERO_UNIONS) -c $< -o $@
 
 $(BUILD_HOST_DIR)/cjson/%.o: $(CJSON_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -1396,7 +1427,7 @@ clean:
 # file: every .d this generates references targets/variables (BUILD_
 # TARGET_DIR, BUILD_HOST_DIR) that need to already be fully resolved.
 
--include $(shell find $(BUILD_TARGET_DIR) $(BUILD_HOST_DIR) -name '*.d' 2>/dev/null)
+-include $(shell find $(BUILD_TARGET_DIR) $(BUILD_HOST_DIR) -path '$(BUILD_TARGET_DIR)/tmp' -prune -o -type f -name '*.d' -print 2>/dev/null)
 
 $(BUILD_HOST_DIR)/sonic/%.o: sonic/%.c
 	@mkdir -p $(dir $@)

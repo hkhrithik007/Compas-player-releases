@@ -1,3 +1,4 @@
+#include "../widgets/controls/gui_rating_popup.h"
 /* See gui_reload.h for what this does and does not touch.
  *
  * gui_soft_reload()'s sequence, and why the order matters:
@@ -63,8 +64,8 @@
  *     plugin rows every time.
  * 10. Rebuild every screen, same order gui_init() builds them in.
  * 11. gui_navigation_init() -- re-registers the snapshot screens and
- *     restores nav_stack/nav_depth to Home, loading it. No separate
- *     "restore navigation" step is needed; this already does it.
+ *     restores Home, then a captured Settings or plugin-manager path.
+ *     Screens without a semantic reload ID fall back to Home.
  *
  * Never touches: audio_init(), settings_load(), volume/backlight/LED/
  * charge-limiter/timezone reapply, hostname_apply(), usb_mode detection,
@@ -121,28 +122,10 @@
 /* The optional cover flow module: absent when src/ui/widgets/cover_flow is removed. */
 extern void cover_flow_shutdown(void) __attribute__((weak));
 
-/* Diagnostic logging for UI reload steps. Append-only with fsync per line
- * to ensure entries are flushed to storage immediately to identify the
- * failure point if a crash occurs during reload. */
-#ifdef HOST_BUILD
-  #define RELOAD_DIAG_DIR "./music/.logs"
-#else
-  #define RELOAD_DIAG_DIR "/data/mnt/sd_0/.logs"
-#endif
-#define RELOAD_DIAG_PATH RELOAD_DIAG_DIR "/reload_diag.log"
+/* Reload steps go to reload_diag.log (fsync per line) when debug logging is
+ * on, so a crash mid-reload shows its last step. */
 static void reload_diag(const char * step) {
-    if (!db_log_enabled()) return;
-    (void) mkdir(RELOAD_DIAG_DIR, 0755);
-    int fd = open(RELOAD_DIAG_PATH, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-    if (fd < 0) return;
-    char line[160];
-    int len = snprintf(line, sizeof(line), "[pid=%ld] %s\n", (long) getpid(), step);
-    if (len > 0) {
-        if (len >= (int) sizeof(line)) len = (int) sizeof(line) - 1;
-        write(fd, line, (size_t) len);
-        fsync(fd);
-    }
-    close(fd);
+    if (db_log_enabled()) reload_diag_log("%s", step);
 }
 
 static int32_t reload_display_width(void) {
@@ -159,6 +142,8 @@ static int32_t reload_display_height(void) {
 
 static void gui_soft_reload_with_artwork(bool preserve_artwork,
                                          const gui_nav_reload_state_t * restore_state) {
+    gui_nav_reload_state_t settings_path;
+    if (!restore_state && gui_navigation_capture_settings_path(&settings_path)) restore_state = &settings_path;
     reload_diag("gui_soft_reload: begin");
     assets_invalidate_path_cache(); /* the rebuilt screens resolve their assets afresh */
     int32_t screen_width = reload_display_width();
@@ -209,6 +194,7 @@ static void gui_soft_reload_with_artwork(bool preserve_artwork,
     gui_apps_teardown();
     reload_diag("gui_queue_teardown: before");
     gui_queue_teardown();
+    gui_rating_popup_teardown();
     if (cover_flow_shutdown) cover_flow_shutdown();
     reload_diag("gui_plugins_teardown: before");
     gui_plugins_teardown();
@@ -349,7 +335,7 @@ static void reload_trigger_cb(lv_timer_t * timer) {
         last_reload_tick = lv_tick_get();
         return;
     }
-    if (gui_library_navigation_blocked()) {
+    if (gui_library_navigation_blocked() || gui_library_scan_active()) {
         /* A database scan can last minutes; polling it at the transition
          * cadence would waste UI-thread time throughout the scan. */
         lv_timer_set_period(timer, RELOAD_BUSY_RETRY_MS);

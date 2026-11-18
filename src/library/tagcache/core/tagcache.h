@@ -36,6 +36,8 @@
 #define TAGCACHE_GROUP_ALBUM 2
 #define TAGCACHE_ALBUM_SORT_REVERSE 4
 
+#define FLAG_TAGS_INCOMPLETE 0x02000000 /* RAM-only: optional tag read failed */
+
 typedef struct {
     int32_t id; /* 1-based stable slot id; deleted slots are never reused */
     int32_t flags; /* reader status flags, including incomplete optional tags */
@@ -44,7 +46,7 @@ typedef struct {
     int32_t first_seen;
     int32_t playcount;
     int32_t last_played;
-    int32_t rating; /* 1 = favorite, matching Rockbox's rating tag */
+    int32_t rating; /* see song_rating.h, matching Rockbox's rating tag */
     int32_t track_number;
     int32_t disc_number;
     int32_t release_year; /* -1 when absent; 0 for legacy rows not yet rescanned */
@@ -144,8 +146,9 @@ enum {
 /* Numeric fields are always returned; requested string fields are populated. */
 bool tagcache_song_fields_by_id(int32_t id, unsigned fields, tagcache_song_t *out);
 bool tagcache_song_fields_at_title_rank(int32_t rank, unsigned fields, tagcache_song_t *out);
-/* True when a requested optional tag could not be read for this song (left empty). */
-bool tagcache_song_tags_incomplete(const tagcache_song_t *song);
+/* The name the title order sorts by: the title tag, or the file name when it is empty.
+ * Needs TAGCACHE_FIELD_TITLE and TAGCACHE_FIELD_PATH. */
+const char *tagcache_song_display_title(const tagcache_song_t *song);
 bool tagcache_song_fields_at_recency_rank(int32_t rank, unsigned fields, tagcache_song_t *out);
 int32_t tagcache_live_count(void);
 int32_t tagcache_slot_count(void);
@@ -192,6 +195,8 @@ int tagcache_album_group_sorted_offset(int sort, const char *album, const char *
 /* Inverse lookup for a known canonical album-group rank, including reverse. */
 bool tagcache_album_group_sorted_rank(int sort, int canonical_rank, int *sorted_rank_out);
 bool tagcache_album_sort_available(int sort);
+/* False on the legacy reader, where reaching a far title rank rescans the catalog. */
+bool tagcache_title_ranks_indexed(void);
 
 int tagcache_group_count(int kind);
 bool tagcache_group_at(int kind, int index, tagcache_group_t * out);
@@ -216,9 +221,16 @@ int tagcache_set_rating_durable_begin(const char * path, int32_t rating);
  * worker to skip its commit delay, or flushes here in degraded mode. */
 bool tagcache_numeric_wait_durable(int waiter, int timeout_ms);
 void tagcache_add_play(const char * path, int32_t now);
+/* Flush queued numeric metadata changes to the current catalog generation. */
+bool tagcache_flush_numeric(void);
 /* Staging-only overlay for statistics moved from remote-state sidecars onto a scanned row. */
 void tagcache_overlay_stats(const char * path, int32_t rating, int32_t playcount, int32_t last_played);
+/* Applies a complete numeric tuple to a published row through the durable
+ * numeric writer. Does not create a row or alter scan staging. */
+bool tagcache_set_stats(const char *path, int32_t rating, int32_t playcount, int32_t last_played);
 int32_t tagcache_generation(void);
+/* Read under the database guard, like generation. Never reset on reopen. */
+uint32_t tagcache_stats_revision(void);
 /* 1: legacy raw-title ranks; 2: displayed-title ASCII ranks; 3: Unicode
  * collation; 4: Unicode collation with inverted Spanish punctuation ordering. */
 int tagcache_title_order_version(void);

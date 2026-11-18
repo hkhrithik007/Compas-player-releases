@@ -8,6 +8,10 @@
 #include "../../settings/power/gui_power_hub.h"
 #include "../../widgets/lists/compact_list.h"
 #include "../../../library/metadata/scan/library_scan_storage.h"
+#include "../../../library/title_order.h"
+
+/* True when All songs shows titles Z-A; always false in rating order. */
+bool all_songs_title_reversed(void);
 
 typedef struct group_song_entry_s {
     char * path;
@@ -48,6 +52,7 @@ void gui_library_refresh_music_screen(void);
 void gui_library_accent_changed(void);
 void gui_library_set_artist_images_enabled(bool enabled);
 typedef enum {
+    GUI_LIBRARY_SORT_ALL_SONGS,
     GUI_LIBRARY_SORT_FILES,
     GUI_LIBRARY_SORT_ALBUMS,
     GUI_LIBRARY_SORT_ARTIST_ALBUMS,
@@ -59,6 +64,8 @@ void gui_library_apply_sorting(gui_library_sort_scope_t scope);
 /* The Albums list as Cover Flow reuses it. The page is in the Albums screen's order
  * (rows have the album, its album artist and, as identity, a song for the cover). */
 int albums_fetch_page(void * ctx, int offset, int count, compact_list_page_row_t out_rows[]);
+/* Full displayed Albums row count, including rating section headers when active. */
+int gui_library_albums_paged_total(int normal_count);
 void gui_library_open_albums(void);
 /* An album by name and album artist: open it, or its long-press menu. Nothing if it is gone. */
 void gui_library_open_album(const char * name, const char * album_artist);
@@ -99,7 +106,6 @@ bool gui_library_open_now_playing_group(const char * path, bool album);
 void poll_az_index_drag(lv_timer_t * timer);
 void plugin_stream_tile_click_cb(lv_event_t * e);
 /* The screen came back on: a half-built Songs page goes back to its normal build pace at once. */
-void gui_library_screen_woke(void);
 void set_player_source_group_songs_direct(const group_song_entry_t * entries, int count, const char * title, int selected_index);
 
 bool search_close_if_active_for_screen(lv_obj_t * screen);
@@ -113,6 +119,9 @@ void gui_library_poll_now_playing_indicators(void);
 void gui_library_format_song_identity(const song_row_t * row,
                                       char * title, size_t title_size,
                                       char * subtitle, size_t subtitle_size);
+void gui_library_format_artist_album_subtitle(const char * artist, const char * album,
+                                              char * subtitle, size_t subtitle_size);
+int gui_library_collection_start_index(int count, bool shuffle);
 
 void poll_search_job(void);
 void play_remote_control_song(const char * song_path, const char * playlist_name, const char * artist_filter,
@@ -122,6 +131,8 @@ void play_remote_control_song(const char * song_path, const char * playlist_name
 bool gui_library_play_remote_collection(const remote_collection_play_request_t *request);
 void gui_library_cancel_remote_collection(void);
 void poll_sd_card_hotplug(void);
+/* USB drive plugged into the USB-C port: mounted automatically, toasts, cleanup on unplug. */
+void poll_usb_drive_hotplug(void);
 
 void gui_library_resume_fast_timers(void);
 void gui_library_reset_drag_state(void);
@@ -138,7 +149,10 @@ void gui_library_cancel_background_work(void);
 /* Frees the decoded thumbnail cache before an external session; rows refill it on demand. */
 void gui_library_release_memory_for_external_session(void);
 void gui_library_cancel_scan(void);
+bool gui_library_scan_active(void);
 
 /* Shared song detail line and source-format badge. */
 void gui_song_format_detail(char * out, size_t size, int seconds, const char * format);
 const char * gui_song_quality_asset(const char * suffix);
+
+int all_songs_paged_total(void);

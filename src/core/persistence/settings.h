@@ -76,8 +76,16 @@ typedef enum {
 #define KEYBOARD_LAYOUT_UKRAINIAN 8
 
 typedef struct {
+    bool native_play_through_folders;
+    bool native_play_through_albums;
+    bool native_audio_migrated;
+    int native_gain_mode; /* -1 until explicitly chosen; 0 Low, 1 High. */
+    char native_mseb[1024];
+    char native_soundstage[1024];
+    bool mono_audio;             /* Fold stereo to mono across all PCM playback. */
     float volume;              /* 0.0 - 1.0 */
     char last_track[512];      /* absolute path, empty if none */
+    struct { char path[512]; int scroll; } book_positions[16];
     double last_position;      /* seconds into last_track */
     int last_source_kind;      /* 0 = unknown/filesystem, 1 = All Songs, 2 = album */
     char last_source_name[128];/* album title when last_source_kind == 2 */
@@ -98,7 +106,7 @@ typedef struct {
      * the existing hardware-specific behavior for that gesture. */
     button_mapping_binding_t button_bindings[BUTTON_MAPPING_BUTTON_COUNT];
 
-    /* Settings -> Playback & Controls -> Buttons & Remote. When enabled,
+    /* Settings -> Playback -> Volume Lock (Screen Off). When enabled,
      * volume actions are blocked while the screen is off, including volume
      * assigned to another button. Remapped non-volume actions remain available.
      * Defaults off to preserve existing hardware behavior. */
@@ -107,6 +115,8 @@ typedef struct {
 
     uint32_t accent_color;     /* packed 0xRRGGBB, applied to sliders/switches app-wide */
     bool accent_dynamic;       /* "Match album art": the playing cover's color replaces accent_color while shown */
+    uint32_t accent_dynamic_color; /* Last effective album-art accent, separate from the manual pick. */
+    bool accent_dynamic_color_valid; /* Allows black (#000000) and distinguishes old settings without a cache. */
     bool startup_splash_tint;  /* Tint the built-in startup splash with the accent color. */
     bool titlebar_icon_tint;   /* Breeze title-bar icons take the accent instead of the text color. */
     bool crossfade_enabled;    /* if true, fade into the next queued track near the current one's end */
@@ -169,7 +179,7 @@ typedef struct {
     char subsonic_download_subfolder[SETTINGS_SUBSONIC_DOWNLOAD_SUBFOLDER_MAX]; /* relative to SD root; empty means SD root */
     int subsonic_download_layout; /* 0 Album Artist/Album, 1 Album Artist - Album. */
 
-    /* Saved Subsonic server profiles (the "Saved Servers" list). Tagcache
+    /* Saved Subsonic server profiles (the "Saved servers" list). Tagcache
      * cannot store these. The live list is the /usr/data sidecar
      * (subsonic_saved_servers.c, via metadata_db.h); this array is a
      * mirror loaded/saved with the rest of credentials so they survive an
@@ -194,7 +204,7 @@ typedef struct {
     /* Bluetooth output settings -- see bluetooth_control.h for the BlueALSA
      * 5 service behavior. */
     bool bt_volume_sync_enabled; /* Mirror hardware volume changes to the paired device. */
-    /* Runtime armed intent; incoming streams reserve output separately. */
+    /* Remembered armed intent across restarts; incoming streams reserve output separately. */
     bool bt_dac_mode_enabled;
     char bt_codec[16];           /* "auto"/"ldac_hq"/"ldac_sq"/"ssc"/"aptx"/"aac"/"sbc"/"sbc_xq" */
     /* Resample Bluetooth output with the speex converter instead of
@@ -258,9 +268,9 @@ typedef struct {
     bool dlna_renderer_enabled;
 
     /* Phone remote-control over Wi-Fi HTTP and paired Bluetooth RFCOMM -- see
-     * remote_control.h. Session-only: startup clears a previously saved true
-     * value. Default false; users explicitly choose when either transport
-     * can control playback and browse the library. A shared PIN protects the API. */
+     * remote_control.h. Remembered across restarts; default false, so users
+     * explicitly choose when either transport can control playback and browse
+     * the library. A shared PIN protects the API. */
     bool remote_control_enabled;
     /* Shared PIN required by phone clients after Remote Control is enabled.
      * Empty means the service should generate and persist one on first use.
@@ -303,7 +313,7 @@ typedef struct {
      * device charging overnight in a dark room. */
     bool led_indicator_enabled;
 
-    /* Settings -> System -> Developer Options -> "Enable debug logging" --
+    /* Settings -> System -> Advanced -> "Enable debug logging" --
      * writes a detailed, timestamped log of library database scans and
      * album art cache jobs (including lazy load) to .logs/database_artwork.log
      * on the SD card (see db_log.h), and also gates the USB DAC bridge's own
@@ -340,8 +350,10 @@ typedef struct {
     bool join_albums; /* opt-in: album artists sharing an album and folder show as "Various Artists" when the library is published */
     int file_sort_mode; /* 0 Name, 1 Newest Modified; directories stay first. */
     bool file_sort_reverse;
-    int album_sort_mode; /* 0 Name, 1 Recently Added, 2 Release Year, 3 Album Artist then Year (oldest first). */
+    int album_sort_mode; /* 0 Name, 1 Recently Added, 2 Release Year, 3 Album Artist then Year, 8 Rating (highest first). */
     bool album_sort_reverse;
+    bool all_songs_sort_reverse;
+    int all_songs_sort_mode; /* 0: title, 1: rating. */
     int artist_albums_sort_mode; /* Ordering within an Artist's Albums view. */
     bool artist_albums_sort_reverse;
     int album_artist_albums_sort_mode; /* Ordering within an Album Artist's Albums view. */
@@ -386,12 +398,15 @@ typedef struct {
      *
      * Startup behavior: if the user enabled ADB, it persists and is
      * re-applied on boot because it lives behind Developer Options as an
-     * explicit opt-in. Any other mode (Storage, USB DAC) resets to Storage
-     * on boot to prevent unexpected USB configurations or blocking local
-     * playback. */
+     * explicit opt-in. Other modes start as Storage; usb_dac_mode_enabled
+     * independently restores DAC only after host enumeration. */
     int usb_mode;
+    /* Wireless ADB (adbd on TCP 5555), off by default; see wireless_adb.h. */
+    bool wireless_adb_enabled;
+    /* Saved USB DAC intent, independent of the currently bound gadget. */
+    bool usb_dac_mode_enabled;
 
-    /* USB DAC overlay: leave device charging disabled while connected as a
+    /* USB DAC gadget: leave device charging disabled while connected as a
      * USB audio accessory. Enabled by default for iPhone compatibility. */
     bool usb_dac_disable_charging;
 
@@ -459,7 +474,7 @@ typedef struct {
      * via fallback_font_apply_size_tier(). Defaults to 1 (Medium). */
     int font_size_tier;
 
-    /* Settings -> Display -> Appearance -> Keyboard. Persistent layout enum;
+    /* Settings -> Display -> Keyboard. Persistent layout enum;
      * 0 = T9 and 1 = Latin QWERTY retain their original on-disk values.
      * Numeric fields always use the T9 numeric keypad. */
     int keyboard_layout;
@@ -498,7 +513,7 @@ typedef struct {
     /* False only on a fresh install or unfinished first-run setup. */
     bool setup_complete;
     bool setup_intro_played; /* Reset with settings; prevents replay during setup. */
-    int setup_step; /* Persisted IDs: 0 welcome, 1 language, 2 timezone, 3 Wi-Fi, 4 plugins, 5 scan, 6 complete, 7 layout; retained across restarts. */
+    int setup_step; /* Persisted IDs: 0 welcome, 1 language, 2 timezone, 3 Wi-Fi, 4 plugins, 5 scan, 6 complete, 7 layout, 8 gestures; retained across restarts. */
     /* Choices staged during first-run setup. Stored separately so restarting
      * at the scan step does not discard plugin or layout selections. */
     char setup_plugin_ids[SETTINGS_SETUP_PLUGIN_MAX][SETTINGS_SETUP_PLUGIN_ID_MAX];
@@ -541,6 +556,10 @@ void settings_save_drain(void);
  * saves, then waits for the newest queued snapshot and any active write to
  * finish. Call before deleting settings or exiting the process. */
 void settings_shutdown_flush(void);
+/* UI snapshot/latch followed by worker-only drain. */
+bool settings_shutdown_start(void);
+bool settings_shutdown_wait(void);
+bool settings_shutdown_ready(void);
 
 /* Reopen settings persistence after an aborted terminal transition. Call only
  * after settings_shutdown_flush() has returned and the terminal action failed. */
@@ -555,6 +574,8 @@ void settings_subsonic_server_upsert(player_settings_t * settings, const char * 
  * in /usr/data except the "mnt" directory (the SD card mount point), then
  * reboots into default settings. Host builds remove only the settings files. */
 void settings_factory_reset(void);
+/* Terminal worker only, after shutdown persistence has completed. */
+void settings_factory_reset_commit(void);
 
 
 extern player_settings_t current_settings;

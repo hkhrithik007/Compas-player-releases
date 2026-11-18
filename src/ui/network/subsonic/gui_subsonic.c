@@ -9,6 +9,27 @@
 #include "../../../network/services/subsonic_client.h"
 #include "../../../library/remote/subsonic/subsonic_cache.h"
 #include <stdio.h>
+#include <string.h>
+
+static bool subsonic_session_active;
+static char subsonic_session_server_key[SUBSONIC_CACHE_KEY_SIZE];
+
+bool gui_subsonic_session_active(void) {
+    if (!subsonic_session_active || !subsonic_session_server_key[0]) return false;
+    char current_key[SUBSONIC_CACHE_KEY_SIZE];
+    subsonic_server_t current = subsonic_server_from_settings();
+    subsonic_cache_server_key(&current, current_key);
+    return strcmp(current_key, subsonic_session_server_key) == 0;
+}
+
+void gui_subsonic_session_set_active(bool active) {
+    subsonic_session_active = active;
+    subsonic_session_server_key[0] = '\0';
+    if (active) {
+        subsonic_server_t current = subsonic_server_from_settings();
+        subsonic_cache_server_key(&current, subsonic_session_server_key);
+    }
+}
 
 /* Subsonic talks to a remote server, so the radio being on is not enough: this
  * asks for a real association. New connections and servers without a cache need
@@ -21,8 +42,37 @@ bool gui_subsonic_wifi_connected_guard(void) {
 }
 
 void subsonic_copy_request_error(char * dest, size_t size, const char * fallback) {
-    const char * error = subsonic_last_error();
-    snprintf(dest, size, "%s", error && error[0] ? error : fallback);
+    subsonic_error_t error = subsonic_last_error();
+    switch (error.kind) {
+    case SUBSONIC_ERROR_REQUEST_TOO_LONG:
+        snprintf(dest, size, "%s", TR("Request is too long"));
+        break;
+    case SUBSONIC_ERROR_REQUEST_FAILED:
+        snprintf(dest, size, TR("Server request failed: %s"),
+                 error.detail[0] ? error.detail : TR("network error"));
+        break;
+    case SUBSONIC_ERROR_HTTP_STATUS:
+        snprintf(dest, size, TR("Server returned HTTP %d"), error.number);
+        break;
+    case SUBSONIC_ERROR_EMPTY_RESPONSE:
+        snprintf(dest, size, "%s", TR("Server returned an empty response"));
+        break;
+    case SUBSONIC_ERROR_INVALID_JSON:
+        snprintf(dest, size, "%s", TR("Server returned invalid JSON"));
+        break;
+    case SUBSONIC_ERROR_NOT_SUBSONIC_JSON:
+        snprintf(dest, size, "%s", TR("Server response is not Subsonic JSON"));
+        break;
+    case SUBSONIC_ERROR_SERVER:
+        snprintf(dest, size, TR("Subsonic error %d"), error.number);
+        break;
+    case SUBSONIC_ERROR_INVALID_STATUS:
+        snprintf(dest, size, "%s", TR("Invalid Subsonic response status"));
+        break;
+    default:
+        snprintf(dest, size, "%s", fallback ? fallback : TR("Unexpected library response"));
+        break;
+    }
 }
 
 /* A foreground request owns the network and the busy screen. */
@@ -103,6 +153,16 @@ void gui_subsonic_handle_wifi_disabled(void) {
     gui_subsonic_sync_stop_network();
 }
 
+void gui_subsonic_global_open_artist(const char *id, const char *name) {
+    if (!id || !id[0] || !name || !name[0]) return;
+    start_subsonic_browse(SUBSONIC_BROWSE_ARTIST_ALBUMS, id, name);
+}
+
+void gui_subsonic_global_open_album(const char *id, const char *name) {
+    if (!id || !id[0] || !name || !name[0]) return;
+    subsonic_open_songs(SUBSONIC_LIST_ALBUM_SONGS, id, name);
+}
+
 void gui_subsonic_cancel_background_work(void) {
     gui_subsonic_handle_wifi_disabled();
     gui_subsonic_sync_shutdown();
@@ -110,4 +170,3 @@ void gui_subsonic_cancel_background_work(void) {
     gui_subsonic_downloads_join();
     gui_subsonic_browse_join();
 }
-

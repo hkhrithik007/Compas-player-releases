@@ -4,8 +4,7 @@
 
 #include <stdio.h>
 
-/* Single-control settings card: an optional toggle row, a divider and a
- * control area (caption + value, slider, range ends) in one row-style card. */
+/* Single-control settings column with an optional pill toggle. */
 
 /* A transparent, padding-free container. */
 static lv_obj_t * plain_box(lv_obj_t * parent) {
@@ -40,7 +39,7 @@ static lv_obj_t * two_ends_row(lv_obj_t * parent) {
  * centres an inner label row in it (flex centres along the main axis even
  * when the height is content-sized). Returns the inner row; the caller adds
  * the control at its right end. */
-static lv_obj_t * build_label_row(lv_obj_t * card, const char * text) {
+static lv_obj_t * build_label_row(lv_obj_t * card, const char * text, lv_obj_t ** out_label) {
     lv_obj_t * outer = plain_box(card);
     lv_obj_set_size(outer, lv_pct(100), LV_SIZE_CONTENT);
     lv_obj_add_style(outer, &native_row_min_style, 0);
@@ -51,60 +50,40 @@ static lv_obj_t * build_label_row(lv_obj_t * card, const char * text) {
     lv_obj_t * label = styled_label(row, text, GUI_FONT_ROLE_ROW, &style_theme_text_primary);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_obj_set_flex_grow(label, 1);
+    if (out_label) *out_label = label;
     return row;
 }
 
 static void build_toggle_row(lv_obj_t * card, const setting_slider_cfg_t * cfg, lv_obj_t ** out_switch) {
-    lv_obj_t * row = build_label_row(card, cfg->toggle_label);
+    lv_obj_t * label;
+    lv_obj_t * row = build_label_row(card, cfg->toggle_label, &label);
     lv_obj_t * sw = lv_switch_create(row);
     lv_obj_add_style(sw, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
     if (cfg->checked) lv_obj_add_state(sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(sw, cfg->switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_update_layout(card);
+    int32_t available = lv_obj_get_width(row) -
+                        lv_obj_get_style_pad_left(row, LV_PART_MAIN) -
+                        lv_obj_get_style_pad_right(row, LV_PART_MAIN) -
+                        lv_obj_get_style_pad_column(row, LV_PART_MAIN) - lv_obj_get_width(sw);
+    if (available > 0) {
+        lv_obj_set_flex_grow(label, 0);
+        lv_obj_set_width(label, available);
+    }
+    set_wrapped_label_two_line_height(label);
+    lv_obj_add_flag(label, LV_OBJ_FLAG_USER_2);
     *out_switch = sw;
 }
 
-static void build_divider(lv_obj_t * card) {
-    lv_obj_t * divider = plain_box(card);
-    lv_obj_set_size(divider, lv_pct(100), 1);
-    lv_obj_set_style_bg_color(divider, lv_color_hex(0x808080), 0);
-    lv_obj_set_style_bg_opa(divider, LV_OPA_30, 0);
-}
-
-static lv_obj_t * build_slider(lv_obj_t * parent, const setting_slider_cfg_t * cfg) {
-    lv_obj_t * slider = lv_slider_create(parent);
-    lv_obj_set_width(slider, lv_pct(100));
-    lv_obj_set_height(slider, SLIDER_TRACK_HEIGHT);
-    lv_slider_set_range(slider, cfg->min_index, cfg->max_index);
-    lv_slider_set_value(slider, cfg->index, LV_ANIM_OFF);
-    lv_obj_add_style(slider, gui_theme_accent_style(), LV_PART_INDICATOR);
-    lv_obj_add_style(slider, gui_theme_accent_knob_style(), LV_PART_KNOB);
-    lv_obj_set_style_width(slider, SLIDER_KNOB_SIZE, LV_PART_KNOB);
-    lv_obj_set_style_height(slider, SLIDER_KNOB_SIZE, LV_PART_KNOB);
-    lv_obj_set_style_margin_ver(slider, SLIDER_KNOB_SIZE / 4, 0);
-    lv_obj_add_event_cb(slider, cfg->slider_cb, LV_EVENT_ALL, NULL);
-    lv_obj_set_ext_click_area(slider, BOARD_SCALE_PX(26));
-    return slider;
-}
-
-/* Value shown for slider position `index`: the step's value, or the index
- * itself when the slider moves over raw values. */
-static void format_at(const setting_slider_t * s, int32_t index, char * buf, size_t size) {
-    s->fmt(buf, size, s->steps ? s->steps[index] : (int) index);
-}
-
-static void set_label_at(const setting_slider_t * s, lv_obj_t * label, int32_t index) {
-    char buf[32];
-    format_at(s, index, buf, sizeof(buf));
-    lv_label_set_text(label, buf);
-}
-
 void setting_slider_set_index(const setting_slider_t * s, int32_t index) {
-    set_label_at(s, s->value_label, index);
+    fill_slider_t fill = { .slider = s->slider, .label = s->value_label,
+                           .steps = s->steps, .fmt = s->fmt };
+    fill_slider_set_value(&fill, index);
 }
 
 void setting_slider_set_max_index(const setting_slider_t * s, int32_t max_index) {
     lv_slider_set_range(s->slider, lv_slider_get_min_value(s->slider), max_index);
-    set_label_at(s, s->max_label, max_index);
+    setting_slider_set_index(s, lv_slider_get_value(s->slider));
 }
 
 static void ui_set_greyed_child(lv_obj_t * obj, bool greyed) {
@@ -118,29 +97,7 @@ void ui_set_greyed(lv_obj_t * obj, bool greyed) {
 }
 
 void setting_slider_set_enabled(const setting_slider_t * s, bool enabled) {
-    ui_set_greyed(s->control, !enabled);
-}
-
-/* Control area: caption and value on one line, the slider, then the range ends. */
-static lv_obj_t * build_control_area(lv_obj_t * card, const setting_slider_cfg_t * cfg, setting_slider_t * s) {
-    lv_obj_t * area = plain_box(card);
-    lv_obj_set_size(area, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(area, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(area, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_hor(area, GUI_TEXT_INSET, 0);
-    lv_obj_set_style_pad_ver(area, GUI_TEXT_INSET / 2, 0);
-    lv_obj_set_style_pad_gap(area, GUI_ROW_GAP, 0);
-
-    lv_obj_t * head = two_ends_row(area);
-    lv_obj_t * caption = styled_label(head, cfg->caption, GUI_FONT_ROLE_SUBTEXT, &style_theme_text_muted);
-    lv_label_set_long_mode(caption, LV_LABEL_LONG_WRAP);
-    lv_obj_set_flex_grow(caption, 1);
-    s->value_label = styled_label(head, "", GUI_FONT_ROLE_ROW, &style_theme_text_primary);
-    s->slider = build_slider(area, cfg);
-    lv_obj_t * ends = two_ends_row(area);
-    s->min_label = styled_label(ends, "", GUI_FONT_ROLE_SUBTEXT, &style_theme_text_muted);
-    s->max_label = styled_label(ends, "", GUI_FONT_ROLE_SUBTEXT, &style_theme_text_muted);
-    return area;
+    fill_slider_set_greyed(s->control, !enabled);
 }
 
 /* Row-style card shell: a column that grows with its content. */
@@ -158,7 +115,7 @@ static lv_obj_t * build_row_card(lv_obj_t * parent) {
 
 lv_obj_t * build_setting_label_card(lv_obj_t * parent, const char * label, lv_obj_t ** out_row) {
     lv_obj_t * card = build_row_card(parent);
-    *out_row = build_label_row(card, label);
+    *out_row = build_label_row(card, label, NULL);
     return card;
 }
 
@@ -181,18 +138,28 @@ lv_obj_t * build_setting_toggle_card(lv_obj_t * parent, const char * label, cons
 
 setting_slider_t build_setting_slider(lv_obj_t * parent, const setting_slider_cfg_t * cfg) {
     setting_slider_t s = { .steps = cfg->steps, .fmt = cfg->fmt };
-    s.card = build_row_card(parent);
+    s.card = plain_box(parent);
+    lv_obj_set_size(s.card, ui_list_row_width(), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s.card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s.card, GUI_ROW_GAP, 0);
     if (cfg->toggle_label) {
-        build_toggle_row(s.card, cfg, &s.toggle);
-        build_divider(s.card);
+        pill_list_item_t toggle = {
+            .label = cfg->toggle_label, .accessory = PILL_ACCESSORY_TOGGLE,
+            .toggle_initial_state = cfg->checked, .on_toggle_change = cfg->switch_cb,
+            .out_toggle_img = &s.toggle,
+        };
+        add_pill_list_rows(s.card, &toggle, 1);
     }
-    s.control = build_control_area(s.card, cfg, &s);
-    set_label_at(&s, s.value_label, cfg->index);
-    set_label_at(&s, s.min_label, cfg->min_index);
-    set_label_at(&s, s.max_label, cfg->max_index);
+    fill_slider_t fill = build_fill_slider(s.card, &(fill_slider_cfg_t) {
+        .width = lv_pct(100), .height = FILL_SLIDER_HEIGHT, .radius = FILL_SLIDER_RADIUS,
+        .min = cfg->min_index, .max = cfg->max_index, .value = cfg->index,
+        .caption = cfg->caption, .steps = cfg->steps, .fmt = cfg->fmt,
+        .event_cb = cfg->slider_cb,
+        .symmetrical = !cfg->steps && cfg->min_index < 0 && cfg->max_index > 0,
+    });
+    s.control = s.slider = fill.slider;
+    s.value_label = fill.label;
     if (cfg->toggle_label && !cfg->checked && !cfg->control_always_on) setting_slider_set_enabled(&s, false);
-    lv_obj_remove_flag(s.card, LV_OBJ_FLAG_GESTURE_BUBBLE);
-    register_swipe_dead_zone(s.card);
     return s;
 }
 
@@ -211,4 +178,15 @@ lv_obj_t * build_settings_body(lv_obj_t * scr) {
     lv_obj_set_scroll_dir(body, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_OFF);
     return body;
+}
+
+void setting_slider_sync(const setting_slider_t *s, bool enabled, int32_t index) {
+    if (s->toggle) lv_obj_set_state(s->toggle, LV_STATE_CHECKED, enabled);
+    setting_slider_set_enabled(s, enabled);
+    setting_slider_set_index(s, index);
+}
+
+void setting_toggle_size(lv_obj_t *toggle, int32_t width, int32_t height, int32_t hit_padding) {
+    lv_obj_set_size(toggle, width, height);
+    lv_obj_set_ext_click_area(toggle, hit_padding);
 }

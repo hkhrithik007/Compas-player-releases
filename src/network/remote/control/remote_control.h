@@ -60,18 +60,24 @@ bool remote_control_consume_import_request(bool *out_start);
 void remote_control_set_import_state(remote_import_state_t state, const char *error);
 void remote_control_get_import_state(remote_import_state_t *state, char *error, size_t error_size);
 
+typedef enum {
+    REMOTE_DAC_NONE = 0,
+    REMOTE_DAC_BLUETOOTH = 1,
+    REMOTE_DAC_USB = 2,
+} remote_dac_mode_t;
+
 /* Push a fresh now-playing snapshot for /api/status. Thread-safe snapshot copy.
  * path is the currently-playing file on disk. play_mode is gui.c's play_mode_t
  * cast to int (0=Sequential, 1=Repeat All, 2=Repeat One,
  * 3=Shuffle with repeat, 4=Shuffle once).
- * favorite is the player's cached heart state for that track. accent_rgb is
+ * stars is the player's cached rating for that track. accent_rgb is
  * the effective UI accent copied by the UI-thread caller; the network thread
- * only reads its published snapshot. dac_mode means the enabled Bluetooth
- * receiver owns playback; its cached stream replaces local track state. */
+ * only reads its published snapshot. dac_mode identifies the receiver that
+ * owns playback; its cached stream replaces local track state. */
 void remote_control_notify_status(bool playing, bool paused, const char * title, const char * artist,
                                    const char * album, const char * path, int position_seconds,
-                                   int duration_seconds, float volume, int play_mode, bool favorite,
-                                   uint32_t accent_rgb, bool dac_mode);
+                                   int duration_seconds, float volume, int play_mode, int stars,
+                                   uint32_t accent_rgb, remote_dac_mode_t dac_mode);
 void remote_control_notify_library_sorting(int albums, int artists, int album_artists);
 bool remote_control_consume_library_sorting(int *scope, int *mode);
 bool remote_control_consume_collection(remote_collection_play_request_t *request);
@@ -100,19 +106,18 @@ bool remote_control_consume_queue_index(int64_t * out_index, char * out_catalog_
                                          size_t revision_size);
 bool remote_control_consume_queue_remove(int * out_offset, uint64_t * out_revision);
 bool remote_control_consume_queue_clear(uint64_t * out_revision);
-/* POST /api/queue/move and /api/queue/play: Up Next offsets checked against
- * the published revision; the UI rechecks the revision before applying. */
+/* Queue requests use displayed indices after HTTP offset normalization.
+ * The UI rechecks the published revision before applying. */
 bool remote_control_consume_queue_move(int * out_from, int * out_to, uint64_t * out_revision);
 bool remote_control_consume_queue_play(int * out_offset, uint64_t * out_revision);
 /* POST /api/folders/play: absolute path of a playable file to play with its
  * folder as the queue. */
 bool remote_control_consume_folder_play(char * out_path, size_t path_size);
-/* A favorites request changed some song's flag; the UI reloads its
- * now-playing heart. */
+/* A rating or favorites request changed a song; reload its now-playing rating. */
 bool remote_control_consume_favorite_changed(void);
 
 /* Snapshot the live playback queue for GET /api/queue. */
-void remote_control_sync_queue(const char * const * paths, int count, uint64_t revision);
+bool remote_control_sync_queue(const char * const * paths, int count, int current, int pending, uint64_t revision);
 
 /* Consume requested song id to play. Scope strings (playlist, artist,
  * album_artist, album) narrow the context for building the playback queue. */

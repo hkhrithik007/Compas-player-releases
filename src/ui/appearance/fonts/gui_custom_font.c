@@ -36,7 +36,7 @@ static void populate_custom_font_screen(void) {
 
     /* 1. Default (built-in Montserrat) option */
     bool default_selected = (strcmp(active_name, "Default") == 0 || !current_settings.custom_font[0]);
-    add_pill_option_row(custom_font_list, TR("Default (Built-in)"),
+    add_pill_option_row(custom_font_list, TR("Default (built-in)"),
                         default_selected, custom_font_option_cb, (void *) (intptr_t) -1);
 
     /* 2. Discovered fonts from <SD>/Fonts */
@@ -89,7 +89,7 @@ static void custom_font_apply_timer_cb(lv_timer_t * timer) {
     gui_settings_refresh_font_geometry();
     compact_list_refresh_all();
     gui_lyrics_refresh_layout();
-    quick_drawer_mark_snapshot_dirty();
+    gui_shell_refresh_drawer_font_geometry();
     nav_reset_to_home();
     screen_builders_refresh_font_geometry(lv_screen_active());
     lv_obj_invalidate(lv_screen_active());

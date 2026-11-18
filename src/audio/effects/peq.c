@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,7 +27,7 @@
  * precision float's ~144dB dynamic range is already far beyond 16-bit
  * audio's own ~96dB -- standard practice for audio biquad EQs (e.g. JUCE's
  * dsp module defaults to float for exactly this filter family), not a real
- * quality tradeoff on this content. compute_band_coeffs() below still does
+ * quality tradeoff on this content. compute_band_coeffs_for_band() below still does
  * its own setup math in double (pow/cos/sin, once per band per change, not
  * per sample) and only narrows to float in the one assignment into this
  * struct. */
@@ -42,7 +43,9 @@ static peq_band_t bands[PEQ_NUM_BANDS];
 static biquad_coeffs_t coeffs[PEQ_NUM_BANDS];
 static biquad_state_t state[PEQ_NUM_BANDS][PEQ_MAX_CHANNELS];
 static bool last_call_was_s32 = false;
+static int last_processed_channels;
 static atomic_bool bypass = false;
+static atomic_bool mono_enabled = false;
 static double preamp_db = 0.0;
 /* UI/plugin writes are atomic; the smoothed value belongs to the PCM owner. */
 static _Atomic float stereo_width_target = 1.0f;
@@ -78,14 +81,41 @@ static bool crossfeed_prime = false;
  * it, so UI/control threads never write the low-pass. */
 static atomic_bool crossfeed_discontinuity = false;
 static unsigned int coeffs_sample_rate = 0;
-static bool coeffs_dirty = true;
 
-/* Cached linear preamp factor (10^(preamp_db / 20.0)), updated whenever
- * preamp_db changes to avoid recomputing pow() during audio processing. */
+/* The UI edits bands[] and preamp_db; peq_publish() hands a consistent copy to
+ * the audio thread, which reads only live (taken at the start of a block).
+ * Without it a block could see a half-written band, and a change made while
+ * the audio thread was recomputing could be lost. */
+typedef struct {
+    peq_band_t bands[PEQ_NUM_BANDS];
+    double preamp_db;
+} peq_params_t;
+static pthread_mutex_t published_mutex = PTHREAD_MUTEX_INITIALIZER;
+static peq_params_t published; /* guarded by published_mutex */
+static atomic_uint published_gen;
+/* Audio thread only from here on. */
+static unsigned int live_gen;
+static peq_params_t live;
+static bool live_coeffs_stale = true;
+/* 10^(live.preamp_db / 20), so pow() never runs per sample. */
 static float cached_preamp_linear = 1.0f;
 
-static void update_preamp_linear_cache(void) {
-    cached_preamp_linear = (float) pow(10.0, preamp_db / 20.0);
+static void peq_publish(void) {
+    pthread_mutex_lock(&published_mutex);
+    memcpy(published.bands, bands, sizeof(bands));
+    published.preamp_db = preamp_db;
+    atomic_fetch_add_explicit(&published_gen, 1, memory_order_release);
+    pthread_mutex_unlock(&published_mutex);
+}
+
+static void take_published(void) {
+    if (atomic_load_explicit(&published_gen, memory_order_acquire) == live_gen) return;
+    pthread_mutex_lock(&published_mutex);
+    live = published;
+    live_gen = atomic_load_explicit(&published_gen, memory_order_relaxed);
+    pthread_mutex_unlock(&published_mutex);
+    cached_preamp_linear = (float) pow(10.0, live.preamp_db / 20.0);
+    live_coeffs_stale = true;
 }
 
 /* Peak limiter -- stereo-linked (one shared gain-reduction envelope across
@@ -144,7 +174,6 @@ static void set_defaults(bool reset_crossfeed) {
         peq_set_crossfeed(0.0);
         peq_set_crossfeed_angle(0);
     }
-    update_preamp_linear_cache();
 }
 
 static void compute_band_coeffs_for_band(const peq_band_t * band,
@@ -175,9 +204,6 @@ static void compute_band_coeffs_for_band(const peq_band_t * band,
     output->a2 = (float) k.a2;
 }
 
-static void compute_band_coeffs(int index, unsigned int sample_rate) {
-    compute_band_coeffs_for_band(&bands[index], sample_rate, &coeffs[index]);
-}
 
 static void get_response_db(const double * frequencies_hz, double * response_db,
                              size_t count, unsigned int sample_rate, bool include_preamp) {
@@ -204,8 +230,8 @@ static void get_response_db(const double * frequencies_hz, double * response_db,
     }
 
     double preamp = include_preamp && isfinite(preamp_db) ? preamp_db : 0.0;
-    if (preamp > 300.0) preamp = 300.0;
-    if (preamp < -300.0) preamp = -300.0;
+    if (preamp > 30.0) preamp = 30.0;
+    if (preamp < -30.0) preamp = -30.0;
     const double nyquist = (double) sample_rate / 2.0;
     for (size_t i = 0; i < count; i++) {
         double f = frequencies_hz[i];
@@ -251,37 +277,70 @@ void peq_get_filter_response_db(const double * frequencies_hz, double * response
 }
 
 static void recompute_all_coeffs(unsigned int sample_rate) {
-    for (int i = 0; i < PEQ_NUM_BANDS; i++) compute_band_coeffs(i, sample_rate);
+    for (int i = 0; i < PEQ_NUM_BANDS; i++) compute_band_coeffs_for_band(&live.bands[i], sample_rate, &coeffs[i]);
     cached_attack_coeff = (float) exp(-1.0 / (LIMITER_ATTACK_SEC * (double) sample_rate));
     cached_release_coeff = (float) exp(-1.0 / (LIMITER_RELEASE_SEC * (double) sample_rate));
     cached_limiter_snap = 1.0f - 1.5e-7f / (1.0f - cached_release_coeff);
     coeffs_sample_rate = sample_rate;
-    coeffs_dirty = false;
+    live_coeffs_stale = false;
 }
 
 void peq_init(void) {
     set_defaults(true);
     memset(state, 0, sizeof(state));
     peq_load();
+    peq_publish();
 }
 
 void peq_reset_to_defaults(void) {
     set_defaults(true);
-    coeffs_dirty = true;
+    peq_publish();
 }
 
 void peq_reset_equalizer(void) {
     set_defaults(false);
-    coeffs_dirty = true;
+    peq_publish();
 }
 
 bool peq_get_bypass(void) { return bypass; }
 void peq_set_bypass(bool b) { bypass = b; }
 
+static double clamp_gain(double db) {
+    return db < -30.0 ? -30.0 : db > 30.0 ? 30.0 : db;
+}
+
+static bool band_params_valid(double f, double g, double q) {
+    return isfinite(f) && f >= 1.0 && f <= 24000.0 && isfinite(g) &&
+           isfinite(q) && q >= 0.01 && q <= 100.0;
+}
+
+static bool parse_finite(const char *s, double *out) {
+    char *end;
+    double value = strtod(s, &end);
+    if (end == s) return false;
+    while (*end == ' ' || *end == '\t' || *end == '\r') end++;
+    if (*end || !isfinite(value)) return false;
+    *out = value;
+    return true;
+}
+
 double peq_get_preamp_db(void) { return preamp_db; }
 void peq_set_preamp_db(double db) {
-    preamp_db = db;
-    update_preamp_linear_cache();
+    if (!isfinite(db)) return;
+    preamp_db = clamp_gain(db);
+    peq_publish();
+}
+
+bool peq_get_mono(void) {
+    return atomic_load_explicit(&mono_enabled, memory_order_relaxed);
+}
+
+void peq_set_mono(bool enabled) {
+    atomic_store_explicit(&mono_enabled, enabled, memory_order_relaxed);
+}
+
+static float effective_width(bool eq_off) {
+    return peq_get_mono() ? 0.0f : eq_off ? 1.0f : (float) peq_get_stereo_width();
 }
 
 double peq_get_stereo_width(void) {
@@ -533,21 +592,23 @@ const peq_band_t * peq_get_band(int index) {
 
 void peq_set_band(int index, double freq_hz, double gain_db, double q) {
     if (index < 0 || index >= PEQ_NUM_BANDS) return;
+    if (!band_params_valid(freq_hz, gain_db, q)) return;
     bands[index].freq_hz = freq_hz;
-    bands[index].gain_db = gain_db;
+    bands[index].gain_db = clamp_gain(gain_db);
     bands[index].q = q;
-    coeffs_dirty = true;
+    peq_publish();
 }
 
 void peq_set_band_type(int index, peq_band_type_t type) {
     if (index < 0 || index >= PEQ_NUM_BANDS) return;
     bands[index].type = type;
-    coeffs_dirty = true;
+    peq_publish();
 }
 
 void peq_set_band_enabled(int index, bool enabled) {
     if (index < 0 || index >= PEQ_NUM_BANDS) return;
     bands[index].enabled = enabled;
+    peq_publish();
 }
 
 /* The manual filters must not resume with histories from before MSEB took
@@ -600,11 +661,15 @@ static inline float limiter_next(float peak, float ceiling, float attack, float 
     }
 CONVERT_GROUP(s16_to_float, int16_t, float, , (float))
 CONVERT_GROUP(s32_to_float, int32_t, float, , (float))
-CONVERT_GROUP(float_to_s16, float, int16_t, , (int16_t))
-CONVERT_GROUP(float_to_s32, float, int32_t, , (int32_t))
+static void float_to_s16(int16_t * dst, const float * src, size_t count) {
+    for (size_t k = 0; k < count; ++k) dst[k] = (int16_t) lrintf(src[k]);
+}
+static void float_to_s32(int32_t * dst, const float * src, size_t count) {
+    for (size_t k = 0; k < count; ++k) dst[k] = (int32_t) lrintf(src[k]);
+}
 
 
-/* Per-block settings of the EQ -> crossfeed -> width chain. */
+/* Per-block settings for EQ, crossfeed and final width. */
 typedef struct {
     int channels;
     bool eq_off, cross_active, width_active;
@@ -613,7 +678,7 @@ typedef struct {
 } chain_t;
 
 static void chain_begin(chain_t * c, int channels, bool eq_off, bool cross_active,
-                        bool width_active, float cross_target, unsigned int sample_rate,
+                        bool width_active, float width, float cross_target, unsigned int sample_rate,
                         float ceiling) {
     unsigned int rate_for_ramp = sample_rate ? sample_rate : 48000;
     c->channels = channels;
@@ -622,7 +687,7 @@ static void chain_begin(chain_t * c, int channels, bool eq_off, bool cross_activ
     c->width_active = width_active;
     c->preamp = eq_off ? 1.0f : cached_preamp_linear;
     c->cross_target = cross_target;
-    c->width = eq_off ? 1.0f : (float) peq_get_stereo_width();
+    c->width = width;
     c->ceiling = ceiling;
     stereo_width_coeffs(stereo_width_current, &c->width_direct, &c->width_cross);
     c->width_step = 2.0f / (STEREO_WIDTH_RAMP_SEC * (float) rate_for_ramp);
@@ -633,42 +698,74 @@ static void chain_begin(chain_t * c, int channels, bool eq_off, bool cross_activ
     }
 }
 
-/* Preamp and the enabled bands for one channel's sample. */
-static float chain_bands(const chain_t * c, float sample, int ch) {
-    sample *= c->preamp;
-    for (int band = 0; band < PEQ_NUM_BANDS; band++) {
-        if (c->eq_off || !bands[band].enabled) continue;
+/* One band over a whole chunk, one channel at a time (stride = channel count).
+ * Coefficients and state stay in registers for the whole run instead of being
+ * reloaded per sample; the maths and its order per sample are unchanged. */
+static void band_run(const biquad_coeffs_t * k, biquad_state_t * s, float * f, size_t frames,
+                     size_t stride) {
+    const float b0 = k->b0, b1 = k->b1, b2 = k->b2, a1 = k->a1, a2 = k->a2;
+    float x1 = s->x1, x2 = s->x2, y1 = s->y1, y2 = s->y2;
+    for (size_t i = 0; i < frames; i++, f += stride) {
+        float x0 = *f;
+        float y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+        *f = y0;
+    }
+    s->x1 = x1;
+    s->x2 = x2;
+    s->y1 = y1;
+    s->y2 = y2;
+}
 
-        biquad_coeffs_t * k = &coeffs[band];
-        biquad_state_t * s = &state[band][ch];
+/* Stereo: both channels' independent recurrences in one loop, so the FPU works
+ * on one while the other's previous result is still in flight. */
+static void band_run_stereo(const biquad_coeffs_t * k, biquad_state_t * l, biquad_state_t * r,
+                            float * f, size_t frames) {
+    const float b0 = k->b0, b1 = k->b1, b2 = k->b2, a1 = k->a1, a2 = k->a2;
+    float lx1 = l->x1, lx2 = l->x2, ly1 = l->y1, ly2 = l->y2;
+    float rx1 = r->x1, rx2 = r->x2, ry1 = r->y1, ry2 = r->y2;
+    for (size_t i = 0; i < frames; i++, f += 2) {
+        float lx0 = f[0], rx0 = f[1];
+        float ly0 = b0 * lx0 + b1 * lx1 + b2 * lx2 - a1 * ly1 - a2 * ly2;
+        float ry0 = b0 * rx0 + b1 * rx1 + b2 * rx2 - a1 * ry1 - a2 * ry2;
+        lx2 = lx1; lx1 = lx0; ly2 = ly1; ly1 = ly0;
+        rx2 = rx1; rx1 = rx0; ry2 = ry1; ry1 = ry0;
+        f[0] = ly0;
+        f[1] = ry0;
+    }
+    l->x1 = lx1; l->x2 = lx2; l->y1 = ly1; l->y2 = ly2;
+    r->x1 = rx1; r->x2 = rx2; r->y1 = ry1; r->y2 = ry2;
+}
 
-        float x0 = sample;
-        float y0 = k->b0 * x0 + k->b1 * s->x1 + k->b2 * s->x2
-                 - k->a1 * s->y1 - k->a2 * s->y2;
-
-        s->x2 = s->x1;
-        s->x1 = x0;
-        s->y2 = s->y1;
-        s->y1 = y0;
-
-        sample = y0;
+/* Preamp -> bands -> crossfeed over interleaved float frames, in place, one
+ * band at a time over the whole chunk. Crossfeed is a frequency-dependent
+ * opposite-channel mix; width is a broadband mid/side matrix applied after the
+ * soundstage. */
+static void chain_chunk(chain_t * c, float * f, size_t frames) {
+    const size_t ch = (size_t) c->channels;
+    const size_t samples = frames * ch;
+    for (size_t i = 0; i < samples; i++) f[i] *= c->preamp;
+    for (int band = 0; band < PEQ_NUM_BANDS && !c->eq_off; band++) {
+        if (!live.bands[band].enabled) continue;
+        if (ch == 2) {
+            band_run_stereo(&coeffs[band], &state[band][0], &state[band][1], f, frames);
+            continue;
+        }
+        for (size_t k = 0; k < ch; k++) band_run(&coeffs[band], &state[band][k], f + k, frames, ch);
     }
     /* Discard non-finite samples to prevent NaN or Inf from poisoning the
      * limiter gain or cascading through biquad filters. */
-    return isfinite(sample) ? sample : 0.0f;
-}
-
-/* Preamp -> bands -> crossfeed -> width over interleaved float frames, in
- * place. Crossfeed is a frequency-dependent opposite-channel mix; width is a
- * broadband mid/side matrix. */
-static void chain_chunk(chain_t * c, float * f, size_t frames) {
-    for (size_t i = 0; i < frames; i++) {
-        float * frame = f + i * (size_t) c->channels;
-        for (int ch = 0; ch < c->channels; ch++) frame[ch] = chain_bands(c, frame[ch], ch);
-        if (c->cross_active)
-            crossfeed_frame(frame, c->cross_target, c->cross_step, c->ceiling);
-        if (c->width_active)
-            stereo_width_frame(frame, c->width, c->width_step, &c->width_direct, &c->width_cross);
+    bool reset = false;
+    for (size_t i = 0; i < samples; i++) {
+        if (!isfinite(f[i])) { f[i] = 0.0f; reset = true; }
+    }
+    if (reset) memset(state, 0, sizeof(state));
+    if (c->cross_active) {
+        for (size_t i = 0; i < frames; i++)
+            crossfeed_frame(f + i * ch, c->cross_target, c->cross_step, c->ceiling);
     }
 }
 
@@ -716,7 +813,14 @@ static void process_chunks(void * buf, bool s32, size_t frames, chain_t * c, boo
         size_t n = frames - off < STAGE_CHUNK ? frames - off : STAGE_CHUNK;
         chunk_in(buf, s32, off * ch, n * ch, f);
         if (use_chain) chain_chunk(c, f, n);
-        if (stage && !soundstage_frames(f, n, ceiling) && limiter_gain == 1.0f) {
+        bool stage_changed = stage && soundstage_frames(f, n, ceiling);
+        /* Fold after spatial effects so both output channels stay equal. */
+        if (c->width_active) {
+            for (size_t i = 0; i < n; i++)
+                stereo_width_frame(f + i * ch, c->width, c->width_step,
+                                   &c->width_direct, &c->width_cross);
+        }
+        if (stage && !stage_changed && limiter_gain == 1.0f) {
             chunk_out(buf, s32, off * ch, n * ch, f);
             continue;
         }
@@ -729,7 +833,7 @@ static void process_chunks(void * buf, bool s32, size_t frames, chain_t * c, boo
 /* What a block needs, decided before any sample is touched. */
 typedef struct {
     bool eq_off, cross_active, width_active, use_chain, stage;
-    float cross_target;
+    float cross_target, width;
 } plan_t;
 
 /* Fills the plan and settles the idle state. Returns false when the block
@@ -739,28 +843,19 @@ static bool plan_block(plan_t * p, size_t frame_count, int channels, unsigned in
     /* The soundstage is independent of bypass and of MSEB ownership. */
     p->stage = soundstage_begin_block(sample_rate, channels, s32, frame_count);
     p->eq_off = mseb_active || atomic_load_explicit(&bypass, memory_order_relaxed);
-    /* Bypass disables the EQ controls and stereo width, while Crossfeed has
-     * its own setting and remains available. Keep this early return when no
-     * Crossfeed is active so an inactive signal stays bit-perfect. */
+    p->width = effective_width(p->eq_off);
+    p->width_active = channels == 2 && (p->width != 1.0f || stereo_width_current != 1.0f);
     p->cross_target = (float) peq_get_crossfeed();
     p->cross_active = channels == 2 && (p->cross_target != 0.0f || crossfeed_mix != 0.0f);
-    if (p->eq_off && !p->cross_active && !p->stage) {
-        limiter_gain = 1.0f;
-        stereo_width_current = 1.0f;
+    if (!p->cross_active) {
         crossfeed_clear_audio_state();
         crossfeed_drop_discontinuity();
-        return false;
-    }
-    float width = p->eq_off ? 1.0f : (float) peq_get_stereo_width();
-    p->width_active = channels == 2 && (width != 1.0f || stereo_width_current != 1.0f);
-    if (p->eq_off) stereo_width_current = 1.0f;
-    if (!p->cross_active) crossfeed_clear_audio_state();
-    crossfeed_consume_discontinuity(p->cross_active);
+    } else crossfeed_consume_discontinuity(true);
     bool any_enabled = false;
     for (int i = 0; i < PEQ_NUM_BANDS; i++) {
-        if (!p->eq_off && bands[i].enabled) { any_enabled = true; break; }
+        if (!p->eq_off && live.bands[i].enabled) { any_enabled = true; break; }
     }
-    p->use_chain = any_enabled || (!p->eq_off && preamp_db != 0.0) || p->width_active ||
+    p->use_chain = any_enabled || (!p->eq_off && live.preamp_db != 0.0) || p->width_active ||
                    p->cross_active;
     if (!p->use_chain && !p->stage) {
         limiter_gain = 1.0f;
@@ -772,11 +867,15 @@ static bool plan_block(plan_t * p, size_t frame_count, int channels, unsigned in
 /* Shared body of peq_process and peq_process_s32; MSEB has already run. */
 static void process_block(void * buf, bool s32, size_t frame_count, int channels,
                           unsigned int sample_rate, bool mseb_active) {
+    if (channels < 1 || channels > PEQ_MAX_CHANNELS) return;
+    take_published();
     sync_mseb_ownership(mseb_active);
     plan_t plan;
     if (!plan_block(&plan, frame_count, channels, sample_rate, s32, mseb_active)) return;
 
-    if (last_call_was_s32 != s32) {
+    if (last_call_was_s32 != s32 || channels != last_processed_channels) {
+        last_processed_channels = channels;
+        limiter_gain = 1.0f;
         memset(state, 0, sizeof(state));
         crossfeed_lp[0] = 0.0f;
         crossfeed_lp[1] = 0.0f;
@@ -785,14 +884,11 @@ static void process_block(void * buf, bool s32, size_t frame_count, int channels
         last_call_was_s32 = s32;
     }
 
-    if (coeffs_dirty || sample_rate != coeffs_sample_rate) recompute_all_coeffs(sample_rate);
-
-    if (channels < 1) return;
-    if (channels > PEQ_MAX_CHANNELS) channels = PEQ_MAX_CHANNELS;
+    if (live_coeffs_stale || sample_rate != coeffs_sample_rate) recompute_all_coeffs(sample_rate);
 
     chain_t chain;
     chain_begin(&chain, channels, plan.eq_off, plan.cross_active, plan.width_active,
-                plan.cross_target, sample_rate, s32 ? LIMITER_CEILING_S32 : LIMITER_CEILING);
+                plan.width, plan.cross_target, sample_rate, s32 ? LIMITER_CEILING_S32 : LIMITER_CEILING);
     process_chunks(buf, s32, frame_count, &chain, plan.use_chain, plan.stage);
 }
 
@@ -828,26 +924,20 @@ bool peq_load_from_path(const char * path) {
             continue;
         }
         if (strcmp(key, "preamp") == 0) {
-            preamp_db = atof(value);
-            update_preamp_linear_cache();
+            double parsed;
+            if (parse_finite(value, &parsed)) preamp_db = clamp_gain(parsed);
             continue;
         }
 
         if (strcmp(key, "stereo_width") == 0) {
-            char * end;
-            double parsed = strtod(value, &end);
-            bool parsed_number = end != value;
-            while (*end == ' ' || *end == '\t' || *end == '\r') end++;
-            if (parsed_number && *end == '\0' && isfinite(parsed)) loaded_width = parsed;
+            double parsed;
+            if (parse_finite(value, &parsed)) loaded_width = parsed;
             continue;
         }
 
         if (strcmp(key, "crossfeed") == 0) {
-            char * end;
-            double parsed = strtod(value, &end);
-            bool parsed_number = end != value;
-            while (*end == ' ' || *end == '\t' || *end == '\r') end++;
-            if (parsed_number && *end == '\0' && isfinite(parsed)) loaded_crossfeed = parsed;
+            double parsed;
+            if (parse_finite(value, &parsed)) loaded_crossfeed = parsed;
             continue;
         }
 
@@ -868,11 +958,15 @@ bool peq_load_from_path(const char * path) {
         int index;
         char field[16];
         if (sscanf(key, "band%d_%15s", &index, field) == 2 && index >= 0 && index < PEQ_NUM_BANDS) {
-            if (strcmp(field, "freq") == 0) bands[index].freq_hz = atof(value);
-            else if (strcmp(field, "gain") == 0) bands[index].gain_db = atof(value);
-            else if (strcmp(field, "q") == 0) bands[index].q = atof(value);
-            else if (strcmp(field, "type") == 0) bands[index].type = (peq_band_type_t) atoi(value);
-            else if (strcmp(field, "enabled") == 0) bands[index].enabled = (strcmp(value, "1") == 0);
+            double parsed;
+            if (!parse_finite(value, &parsed)) continue;
+            peq_band_t band = bands[index];
+            if (strcmp(field, "freq") == 0) band.freq_hz = parsed;
+            else if (strcmp(field, "gain") == 0) band.gain_db = clamp_gain(parsed);
+            else if (strcmp(field, "q") == 0) band.q = parsed;
+            else if (strcmp(field, "type") == 0) band.type = (peq_band_type_t) atoi(value);
+            else if (strcmp(field, "enabled") == 0) band.enabled = (strcmp(value, "1") == 0);
+            if (band_params_valid(band.freq_hz, band.gain_db, band.q)) bands[index] = band;
         }
     }
 
@@ -880,7 +974,7 @@ bool peq_load_from_path(const char * path) {
     peq_set_stereo_width(loaded_width);
     peq_set_crossfeed(loaded_crossfeed);
     peq_set_crossfeed_angle(loaded_crossfeed_angle);
-    coeffs_dirty = true;
+    peq_publish();
     return true;
 }
 

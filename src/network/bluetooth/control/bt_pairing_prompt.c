@@ -40,6 +40,7 @@ void bt_pairing_agent_allow_pairing_for(unsigned int ms) {
            !atomic_compare_exchange_weak(&pairing_deadline, &current, deadline)) {}
     atomic_store(&pairing_ever_opened, true);
     atomic_store(&discoverable_wanted, true); /* the dispatch thread sends it, never this caller */
+    bt_agent_wake();
 }
 
 bool bt_agent_take_discoverable_request(void) {
@@ -75,6 +76,7 @@ static struct {
     char mac[BT_RC_TRUST_MAC_SIZE]; /* empty when the device path had none */
     uint32_t passkey, id, deadline;
     bool answered, accept;
+    char pin[17];
 } confirm;
 static struct {
     bool active;
@@ -111,6 +113,7 @@ bool bt_agent_confirm_begin(DBusConnection * c, DBusMessage * msg, const char * 
     snprintf(confirm.name, sizeof(confirm.name), "%s", name);
     if (!bt_rc_trust_mac_from_path(device, confirm.mac)) confirm.mac[0] = '\0';
     confirm.passkey = passkey;
+    confirm.pin[0] = 0;
     confirm.id = next_ui_id();
     confirm.deadline = bt_agent_monotonic_tenths() + BT_AGENT_CONFIRM_TIMEOUT_TENTHS;
     confirm.answered = confirm.accept = false;
@@ -141,6 +144,8 @@ void bt_agent_display_begin(DBusConnection * c, const char * device, const char 
 struct ui_due {
     DBusMessage * msg;
     bool accept;
+    bool pin_request;
+    char pin[17];
     char accepted_mac[BT_RC_TRUST_MAC_SIZE];
     char path[BT_AGENT_PATH_MAX];
     bool check_paired;
@@ -151,6 +156,8 @@ static void take_confirm_due(struct ui_due * due) {
     if (confirm.msg && (confirm.answered || deadline_passed(confirm.deadline))) {
         due->msg = confirm.msg;
         due->accept = confirm.answered && confirm.accept;
+        due->pin_request = confirm.passkey == UINT32_MAX;
+        memcpy(due->pin, confirm.pin, sizeof(due->pin));
         if (due->accept) {
             snprintf(due->accepted_mac, sizeof(due->accepted_mac), "%s", confirm.mac);
         }
@@ -176,8 +183,13 @@ static void confirm_reply(DBusConnection * c, const struct ui_due * due) {
         /* The user compared the codes on the player's own screen: that is the trust decision. It
          * is applied by the link key of this very pairing (see bt_rc_trust_arm_grant), also when
          * the device was bonded before (the phone forgot the player and pairs again). */
-        if (due->accepted_mac[0]) bt_rc_trust_arm_grant(due->accepted_mac);
-        bt_agent_send_empty_reply(c, due->msg);
+        if (due->pin_request) {
+            const char *pin = due->pin;
+            bt_agent_send_basic_reply(c, due->msg, DBUS_TYPE_STRING, &pin);
+        } else {
+            if (due->accepted_mac[0]) bt_rc_trust_arm_grant(due->accepted_mac);
+            bt_agent_send_empty_reply(c, due->msg);
+        }
     } else {
         bt_agent_send_error_reply(c, due->msg, "org.bluez.Error.Rejected", "Pairing rejected");
     }
@@ -191,7 +203,7 @@ static void display_check(DBusConnection * c, const char * path) {
     pthread_mutex_unlock(&ui_mutex);
 }
 
-/* Dispatch thread, every loop turn. Sends the reply to a request the UI answered or that timed
+/* Dispatch thread, every loop turn (see bt_agent_ui_next_wake_ms). Sends the reply to a request the UI answered or that timed
  * out, and drops a displayed code that expired or whose device finished pairing. */
 void bt_agent_ui_service(DBusConnection * c) {
     struct ui_due due;
@@ -204,9 +216,25 @@ void bt_agent_ui_service(DBusConnection * c) {
     if (due.check_paired) display_check(c, due.path);
 }
 
+/* Dispatch thread. Time until the earliest confirmation or displayed-code deadline; an answer
+ * from the UI wakes the thread on its own (see answer_confirmation). */
+int bt_agent_ui_next_wake_ms(void) {
+    uint32_t now = bt_agent_monotonic_tenths();
+    int32_t soonest = INT32_MAX;
+    pthread_mutex_lock(&ui_mutex);
+    if (confirm.msg && (int32_t) (confirm.deadline - now) < soonest) soonest = (int32_t) (confirm.deadline - now);
+    if (display.active) {
+        if ((int32_t) (display.deadline - now) < soonest) soonest = (int32_t) (display.deadline - now);
+        if ((int32_t) (display.next_check - now) < soonest) soonest = (int32_t) (display.next_check - now);
+    }
+    pthread_mutex_unlock(&ui_mutex);
+    if (soonest == INT32_MAX) return -1;
+    return soonest > 0 ? soonest * 100 : 0;
+}
+
 bool bt_pairing_agent_pending_confirmation(char * name, size_t name_size, uint32_t * passkey, uint32_t * request_id) {
     pthread_mutex_lock(&ui_mutex);
-    bool pending = confirm.msg && !confirm.answered;
+    bool pending = confirm.msg && !confirm.answered && confirm.passkey != UINT32_MAX;
     if (pending) {
         if (name && name_size) snprintf(name, name_size, "%s", confirm.name);
         if (passkey) *passkey = confirm.passkey;
@@ -216,11 +244,38 @@ bool bt_pairing_agent_pending_confirmation(char * name, size_t name_size, uint32
     return pending;
 }
 
+bool bt_pairing_agent_pending_pin(char *name, size_t size, uint32_t *id) {
+    pthread_mutex_lock(&ui_mutex);
+    bool pending = confirm.msg && !confirm.answered && confirm.passkey == UINT32_MAX;
+    if (pending) {
+        if (name && size) snprintf(name, size, "%s", confirm.name);
+        if (id) *id = confirm.id;
+    }
+    pthread_mutex_unlock(&ui_mutex);
+    return pending;
+}
+
+void bt_pairing_agent_answer_pin(uint32_t id, const char *pin) {
+    size_t n = pin ? strlen(pin) : 0;
+    bool valid = n > 0 && n <= 16;
+    for (size_t i = 0; valid && i < n; ++i)
+        if ((unsigned char)pin[i] < 32 || (unsigned char)pin[i] > 126) valid = false;
+    pthread_mutex_lock(&ui_mutex);
+    if (confirm.msg && !confirm.answered && confirm.id == id && confirm.passkey == UINT32_MAX) {
+        confirm.answered = true;
+        confirm.accept = valid;
+        if (valid) memcpy(confirm.pin, pin, n + 1);
+        bt_agent_wake();
+    }
+    pthread_mutex_unlock(&ui_mutex);
+}
+
 void bt_pairing_agent_answer_confirmation(uint32_t request_id, bool accept) {
     pthread_mutex_lock(&ui_mutex);
-    if (confirm.msg && !confirm.answered && confirm.id == request_id) {
+    if (confirm.msg && !confirm.answered && confirm.id == request_id && confirm.passkey != UINT32_MAX) {
         confirm.answered = true;
         confirm.accept = accept;
+        bt_agent_wake();
     }
     pthread_mutex_unlock(&ui_mutex);
 }
@@ -241,7 +296,8 @@ void bt_pairing_agent_cancel_prompts(void) {
     pthread_mutex_lock(&ui_mutex);
     if (confirm.msg && !confirm.answered) {
         confirm.answered = true;
-        confirm.accept = false; /* the dispatch thread replies Rejected within a tick */
+        confirm.accept = false; /* the dispatch thread replies Rejected right away */
+        bt_agent_wake();
     }
     display.active = false;
     pthread_mutex_unlock(&ui_mutex);

@@ -19,6 +19,9 @@
 
 static uint8_t * current_reflection_bytes = NULL;
 static lv_image_dsc_t current_reflection_dsc;
+static cover_file_id_t current_reflection_file;
+static player_frost_params_t current_reflection_params;
+static unsigned int current_reflection_epoch;
 static struct {
     bool valid;
     const uint8_t * cover_bytes;
@@ -98,7 +101,7 @@ static bool reflection_matches(const player_frost_params_t * params) {
 
 /* Clear all LVGL references before releasing reflection storage. The quick
  * drawer can hold its own image source for this same descriptor. */
-void drop_current_reflection(void) {
+static void release_current_reflection(bool cache) {
     bool had_state = current_reflection_bytes || current_reflection_dsc.data ||
                      current_reflection_key.valid;
     if (player_background_img) {
@@ -111,7 +114,15 @@ void drop_current_reflection(void) {
     memset(&current_reflection_dsc, 0, sizeof(current_reflection_dsc));
     memset(&current_reflection_key, 0, sizeof(current_reflection_key));
     if (had_state) gui_shell_refresh_quick_drawer_cover();
-    free(old);
+    if (cache)
+        player_reflection_cache_put(&current_reflection_file, &current_reflection_params,
+                                    old, current_reflection_epoch, 0, NULL);
+    else free(old);
+    current_reflection_file.valid = false;
+}
+
+void drop_current_reflection(void) {
+    release_current_reflection(false);
 }
 
 static void set_current_reflection_key(const player_frost_params_t * params) {
@@ -338,18 +349,16 @@ void gui_player_refresh_frosted_background(void) {
            (unsigned long long) player_cover_generation(), params.blur_radius,
            params.blur_passes, params.darken_num, params.darken_den);
 #endif
-    drop_current_reflection();
-    current_reflection_bytes = player_reflection_cache_get(player_cover_file(), &params);
-    if (!current_reflection_bytes)
-        current_reflection_bytes = player_compute_reflection_bytes_cancelable(player_cover_bytes(), player_cover_edge(),
-                                                                               params.blur_radius,
-                                                                               params.blur_passes,
-                                                                               params.darken_num,
-                                                                               params.darken_den,
-                                                                               params.tint_rgb,
-                                                                               params.tint_weight,
-                                                                               NULL, NULL);
-    set_current_reflection_key(&params);
+    unsigned int epoch = player_reflection_cache_epoch();
+    uint8_t * replacement = player_reflection_cache_get(player_cover_file(), &params);
+    if (replacement) {
+        player_backdrop_adopt_reflection(replacement, &params, epoch);
+    } else {
+        /* Keep the last displayed reflection while the shared artwork worker
+         * builds a replacement. The cover worker's result is checked against
+         * both the cover and live frost generation before adoption. */
+        player_cover_request_reflection_refresh();
+    }
 
     /* TRANSP, not COVER -- player_background_img (the frosted image, about
      * to be shown) fully covers this panel; keeping the panel's own paint
@@ -358,7 +367,7 @@ void gui_player_refresh_frosted_background(void) {
      * analogous wrapper (dark_overlay in gui_lyrics.c) is deliberately kept
      * transparent for exactly this reason -- its own comment explains
      * darkness is already baked into its backdrop image. */
-    player_panel_show_reflection();
+    if (current_reflection_bytes) player_panel_show_reflection();
 
     attach_current_reflection();
     gui_shell_refresh_quick_drawer_cover();
@@ -367,9 +376,13 @@ void gui_player_refresh_frosted_background(void) {
 
 /* Takes ownership of a reflection computed by the cover decode worker and
  * shows it: the tail of the cover poll's result application. */
-void player_backdrop_adopt_reflection(uint8_t * reflection, const player_frost_params_t * params) {
-    drop_current_reflection();
+void player_backdrop_adopt_reflection(uint8_t * reflection, const player_frost_params_t * params,
+                                     unsigned int epoch) {
+    release_current_reflection(true);
     current_reflection_bytes = reflection;
+    current_reflection_file = *player_cover_file();
+    current_reflection_params = *params;
+    current_reflection_epoch = epoch;
     set_current_reflection_key(params);
 
     /* TRANSP, not COVER -- see gui_player_refresh_frosted_background()'s

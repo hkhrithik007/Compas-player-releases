@@ -27,16 +27,31 @@ bool join_albums_request;
 bool join_republish_request;
 
 void reader_context_init(reader_context_t *context) {
-    memset(context, 0, sizeof(*context));
-    context->query_fd = context->artist_names_fd = context->master_fd = context->title_fd = context->recency_fd = context->path_fd = -1;
-    for (int i = 0; i < TAG_COUNT; i++) context->tag_fd[i] = -1;
-    for (int i = 0; i < 3; i++)
-        context->group_fd[i] = context->members_fd[i] = context->album_order_fd[i] = context->album_inverse_fd[i] = -1;
-    for (int i = 0; i < 2; i++) context->rank_fd[i] = -1;
-    context->fds_ready = true;
+    context->entries = context->live = context->commitid = context->generation = 0;
     context->serial = 1;
+    context->loaded_index_version = context->title_order_version = 0;
+    context->master_fd = -1;
+    for (int i = 0; i < TAG_COUNT; i++) {
+        context->tag_fd[i] = -1;
+        context->tag_size[i] = 0;
+    }
+    context->fds_ready = true;
+    context->requires_indexes = context->legacy_active = false;
+    context->compact_sort = context->compact_order = context->sort_failed = false;
+    context->query_fd = context->artist_names_fd = context->title_fd = context->recency_fd = context->path_fd = -1;
+    for (int i = 0; i < 2; i++) context->rank_fd[i] = -1;
+    for (int i = 0; i < 3; i++) {
+        context->group_fd[i] = context->members_fd[i] = -1;
+        context->group_n[i] = 0;
+        context->album_order_fd[i] = context->album_inverse_fd[i] = -1;
+    }
+    context->sort_kind = 0;
     context->album_year_known_count = -1;
+    context->join_bits = NULL;
     context->query_cache_valid = false;
+    context->query_cache_block = 0;
+    for (int i = 0; i < READER_SORT_CACHE_ROWS; i++)
+        context->sort_cache_valid[i] = false;
 }
 
 int32_t tagcache_generation(void) { return db_open ? disk_gen : 0; }
@@ -238,10 +253,6 @@ bool tagcache_song_fields_at_title_rank(int32_t rank, unsigned fields, tagcache_
     return song_fields_at_rank(false, rank, fields, out);
 }
 
-bool tagcache_song_tags_incomplete(const tagcache_song_t *song) {
-    return song && (song->flags & FLAG_TAGS_INCOMPLETE);
-}
-
 bool tagcache_song_fields_at_recency_rank(int32_t rank, unsigned fields, tagcache_song_t *out) {
     return song_fields_at_rank(true, rank, fields, out);
 }
@@ -288,6 +299,8 @@ bool tagcache_song_at_recency_rank(int32_t rank, tagcache_song_t *out) {
 
 int tagcache_group_count(int kind) { return db_open && kind >= 0 && kind < 3 ? (reader_legacy_active ? legacy_group_count(kind) : reader_group_n[kind]) : 0; }
 bool tagcache_group_at(int kind, int index, tagcache_group_t *out) { return db_open && reader_group_at(kind, index, out); }
+bool tagcache_title_ranks_indexed(void) { return db_open && !reader_legacy_active; }
+
 bool tagcache_album_sort_available(int sort) {
     sort &= ~TAGCACHE_ALBUM_SORT_REVERSE;
     if (!db_open) return false;

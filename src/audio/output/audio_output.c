@@ -1,5 +1,6 @@
 #include "audio_output.h"
 #include "usb_dsd_output.h"
+#include "../effects/peq.h"
 #include "../../core/system/logging/debug_log.h"
 #include "../../core/process/subprocess.h"
 #include "../../hardware/device/headphone_status.h"
@@ -20,6 +21,7 @@
 
 #include <tinyalsa/asoundlib.h>
 #include <tinyalsa/mixer.h>
+#include <sys/prctl.h>
 #define ALSA_CARD 0
 #define ALSA_DEVICE 0
 
@@ -272,8 +274,9 @@ static void apply_dac_preferences(bool dop) {
 }
 
 /* The codec's DoP switch. It must be set while no stream is running: on for
- * a DoP stream before its first write, off again before any PCM stream is
- * prepared, or the DAC reads PCM as DSD (noise). The control reads back 0
+ * a DoP stream before its first write (before hw_params on R3 II 2025), off
+ * again before any PCM stream opens, or the DAC reads PCM as DSD (noise).
+ * The control reads back 0
  * whatever was written, so the last value written is tracked here instead;
  * -1 forces the first write, which also clears a switch left on by a
  * crashed process. Written only by the output owner thread; atomic because
@@ -458,6 +461,15 @@ static bool open_device(unsigned int channels, unsigned int sample_rate, bool lo
         config.start_threshold = config.period_size * config.period_count;
         config.stop_threshold = config.period_size * config.period_count;
 
+        /* The stock R3 II 2025 card consumes DOP_EN during hw_params, so
+         * arm DoP before pcm_open() negotiates the stream. Other boards keep
+         * the existing post-open path. */
+#if defined(BOARD_R3II_2025) && !defined(HOST_BUILD)
+        if (dop && !set_dop_switch(true)) {
+            dop_refused_rate = sample_rate;
+            return false;
+        }
+#endif
         alsa_pcm = pcm_open(ALSA_CARD, ALSA_DEVICE, PCM_OUT, &config);
         if (!alsa_pcm || !pcm_is_ready(alsa_pcm)) {
             DBG_LOG("audio_output: pcm_open failed (format=%d): %s\n", (int) config.format,
@@ -466,7 +478,14 @@ static bool open_device(unsigned int channels, unsigned int sample_rate, bool lo
             alsa_pcm = NULL;
             /* DoP has no narrower fallback: 16 bits cannot hold a marker
              * and 16 DSD bits. The caller falls back to PCM conversion. */
-            if (dop) dop_refused_rate = sample_rate;
+            if (dop) {
+                dop_refused_rate = sample_rate;
+#if defined(BOARD_R3II_2025) && !defined(HOST_BUILD)
+                /* Clear the mode flag for the next PCM hw_params. A failed
+                 * clear is retried before the next PCM open. */
+                (void) set_dop_switch(false);
+#endif
+            }
             if (!want_s24 || dop) return false;
             /* Fall back to S16_LE if S24_LE hw_params negotiation fails, and record
              * the unsupported format so subsequent chunks do not re-probe. */
@@ -489,8 +508,9 @@ static bool open_device(unsigned int channels, unsigned int sample_rate, bool lo
                 return false;
             }
         }
-        /* The stream is open but not yet prepared (that happens on the first
-         * write), so the codec picks up the switch before any DoP word. */
+        /* On other boards the stream is open but not yet prepared (that
+         * happens on the first write), so the codec picks up the switch here.
+         * The R3 II 2025 write above already armed it before hw_params. */
         if (dop && !set_dop_switch(true)) {
             dop_refused_rate = sample_rate;
             pcm_close(alsa_pcm);
@@ -892,6 +912,7 @@ void audio_output_set_usb_dsd_mode(int mode) {
 }
 
 bool audio_output_dsd_passthrough_requested(unsigned int rate) {
+    if (peq_get_mono()) return false;
     pthread_mutex_lock(&config_mutex);
     output_target_t target = requested_target;
     bool usb_allowed = requested_usb_dsd_mode != 0 && rate != usb_dsd_refused_rate;
@@ -1122,6 +1143,7 @@ static bool output_port_worker_pending = false;
 static int output_port_worker_value;
 
 static void * volume_worker_main(void * unused) {
+    (void) prctl(PR_SET_NAME, "volume_out");
     (void) unused;
     for (;;) {
         pthread_mutex_lock(&volume_worker_mutex);

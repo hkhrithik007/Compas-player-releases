@@ -37,8 +37,17 @@ typedef enum {
     METADATA_DB_ALBUM_SORT_RECENT = 1,
     METADATA_DB_ALBUM_SORT_YEAR = 2,
     METADATA_DB_ALBUM_SORT_ALBUM_ARTIST_YEAR = 3,
-    METADATA_DB_ALBUM_SORT_REVERSE = 4
+    METADATA_DB_ALBUM_SORT_REVERSE = 4,
+    METADATA_DB_ALBUM_SORT_RATING = 8
 } metadata_db_album_sort_t;
+
+static inline bool album_sort_mode_valid(int mode) {
+    return (mode >= 0 && mode <= 3) || mode == METADATA_DB_ALBUM_SORT_RATING;
+}
+static inline bool album_sort_mode_has_reverse(int mode) {
+    return album_sort_mode_valid(mode) && mode != METADATA_DB_ALBUM_SORT_RATING;
+}
+
 
 typedef enum {
     METADATA_DB_LOAD_SUCCESS_NORMAL,
@@ -83,6 +92,8 @@ metadata_db_load_outcome_t metadata_db_get_load_outcome(void);
  * when a rebuild owns the lock. */
 int32_t metadata_db_get_generation(void);
 bool metadata_db_try_get_generation(int32_t * out_generation);
+uint32_t metadata_db_get_incarnation(void);
+bool metadata_db_try_get_incarnation(uint32_t *out_incarnation);
 /* Copies the already-loaded persistent catalog identity without waiting for a
  * database operation or performing storage I/O. Returns false with an empty
  * output when the database/identity is unavailable or busy. */
@@ -268,10 +279,11 @@ bool metadata_db_walk_group_songs(metadata_db_group_kind_t kind, const char * na
  * a worker thread: the database lock is not held while visit runs, nor across the
  * whole scan. Returns false when visit stopped it, the database was replaced
  * mid-walk, cancel (optional) was set, or memory ran out; the matches seen so
- * far were still visited. */
+ * far were still visited. Unreadable/incomplete rows are skipped; optional
+ * complete is true only after an exhaustive walk without skipped rows. */
 bool metadata_db_walk_genre_songs(const char * genre, int max_songs,
                                   bool (*visit)(const song_row_t * song, void * user), void * user,
-                                  const atomic_bool * cancel);
+                                  const atomic_bool * cancel, bool *complete);
 
 bool metadata_db_get_song_by_id(int64_t id, song_row_t * out_row);
 bool metadata_db_get_song_by_path(const char * path, song_row_t * out_row);
@@ -313,6 +325,12 @@ typedef enum {
     METADATA_DB_AZ_ALBUM,
     METADATA_DB_AZ_ALL_SONGS
 } metadata_db_az_kind_t;
+/* Worker builder: false means the catalog changed or a probe failed. Each
+ * probe owns the guard separately. A non-NULL available declines legacy
+ * catalogs; generation identifies the returned table, including empty ones. */
+bool metadata_db_build_az_table(metadata_db_az_kind_t kind, bool reverse, int out_table[27],
+                                int32_t *generation, bool *available);
+void metadata_db_get_az_table_sorted(metadata_db_az_kind_t kind, bool reverse, int out_table[27]);
 void metadata_db_get_album_az_table_sorted(metadata_db_album_sort_t sort, int out_table[27]);
 void metadata_db_get_az_table(metadata_db_az_kind_t kind, int out_table[27]);
 
@@ -406,7 +424,15 @@ int metadata_db_group_walk_page(metadata_db_group_walk_t * walk, bool by_albums,
 int metadata_db_get_albums_page_sorted(const char * artist_filter, metadata_db_album_sort_t sort,
                                       int offset, int max_rows, group_row_t * out_rows);
 int metadata_db_album_canonical_to_sorted(metadata_db_album_sort_t sort, int canonical_rank);
+/* Canonical album ranks grouped by rating 5..0, preserving canonical name order
+ * inside each group. Sections are counts for stars 0..5. */
+bool metadata_db_load_album_rating_order(int **out_ranks, int out_sections[6],
+                                         int *out_count, int32_t *out_generation);
+int metadata_db_get_albums_at_canonical_ranks(const int *ranks, int count, group_row_t *out_rows);
 bool metadata_db_album_sort_available(metadata_db_album_sort_t sort);
+/* Non-blocking form for pointer/scroll callbacks. Returns false when the DB
+ * guard could not be acquired; *out_available is set only on true. */
+bool metadata_db_try_album_sort_available(metadata_db_album_sort_t sort, bool *out_available);
 
 /* Exact Artist/Album-Artist drill-down variants. Unlike the legacy remote
  * helper above, these filter only the requested tag column. */
@@ -433,22 +459,23 @@ int metadata_db_get_albums_for_group_sorted(metadata_db_group_kind_t kind, const
                                             metadata_db_album_sort_t sort, int offset, int max_rows,
                                             group_row_t * out_rows);
 
-/* Per-song favorite flag, keyed by path. Local scan rows store this as the
- * Rockbox rating tag. Paths that are not tagcache rows (remote:// plugin
+/* Per-song rating in stars (0..5), keyed by path. Unknown paths return 0.
+ * Local scan rows use the rating tag with the encoding in song_rating.h. Paths that are not tagcache rows (remote:// plugin
  * tracks, Subsonic stream URLs, unscanned files) persist in a sidecar so
- * the heart and play count accumulate across plays. Favorites / Most Played
+ * ratings and play counts persist across plays. Favorites / Most Played
  * screens still list only rows present in the local library. */
-bool metadata_db_song_favorite_is_set(const char * path);
-void metadata_db_song_favorite_set(const char * path, bool is_favorite);
+int metadata_db_song_rating_get(const char * path);
+void metadata_db_song_rating_set(const char * path, int stars);
 /* Same write, but returns only after it is on disk: the tagcache numeric
  * flush for library rows (waited for outside the database lock), the
  * sidecar save otherwise. False when it did not persist. Slower; for
  * callers that must confirm the write. */
-bool metadata_db_song_favorite_set_durable(const char * path, bool is_favorite);
+bool metadata_db_song_rating_set_durable(const char * path, int stars);
 
-/* Enumerates every favorited path that's also still in the current media
- * cache, alphabetically. */
-void metadata_db_load_favorite_songs(char *** out_paths, int * out_count);
+/* Enumerates songs rated 3 stars or more in the local library, ordered by stars
+ * descending, then path. */
+/* Optional owned stars array, parallel to the returned paths. */
+void metadata_db_load_favorite_songs(char *** out_paths, int * out_count, int ** out_stars);
 
 /* Bumps path's play count by one and stamps last_played. Local library
  * rows update tagcache; any other path creates/updates a sidecar row with
@@ -531,5 +558,16 @@ typedef struct {
     bool verify_tls;
 } subsonic_server_row_t;
 void metadata_db_load_subsonic_servers(subsonic_server_row_t ** out_rows, int * out_count);
+
+
+/* The rating order needs indexed title ranks; a legacy catalog has them after
+ * its next scan, as with the album sorts. Never waits: false while the
+ * database is busy too, so UI callers retry later. */
+bool metadata_db_try_rating_order_available(void);
+/* Rating buckets in descending order, title ranks stable within each bucket. */
+bool metadata_db_load_rating_order(int **out_ranks, int out_sections[6],
+                                   int *out_count, int32_t *out_generation);
+int metadata_db_get_songs_at_title_ranks(const int *ranks, int count,
+                                        song_row_t *out_rows);
 
 #endif /* METADATA_DB_H */

@@ -33,6 +33,7 @@ lv_obj_t * quick_drawer_volume_container = NULL;
 #if defined(BOARD_TEMPOTEC_V1)
 lv_obj_t * quick_drawer_brightness_container = NULL;
 #endif
+bool quick_drawer_many_tiles = false;
 lv_obj_t * quick_drawer_volume_icon = NULL;
 lv_obj_t * quick_drawer_eq_button = NULL;
 lv_obj_t * quick_drawer_volume_track = NULL;
@@ -55,11 +56,12 @@ lv_obj_t * quick_drawer_toggle_name[QUICK_DRAWER_TOGGLE_SLOTS];
 const int quick_drawer_column_label_x[] = { 39, 143, 251, 358 };
 #endif
 void quick_drawer_size_toggle_caption(lv_obj_t * label) {
-#if defined(BOARD_TEMPOTEC_V1)
-    /* Keep the four primary controls on one caption line; long translations
+#if BOARD_COMPACT_UI
+    /* Keep compact controls on one caption line; long translations
      * scroll within their own cell instead of colliding with the state row. */
     lv_obj_set_style_text_letter_space(label, -1, 0);
-    lv_obj_set_height(label, lv_font_get_line_height(gui_theme_font(GUI_FONT_ROLE_SUBTEXT)));
+    lv_obj_set_height(label, lv_font_get_line_height(
+        lv_obj_get_style_text_font(label, LV_PART_MAIN)));
     row_label_enable_marquee(label);
 #else
     (void) label;
@@ -159,11 +161,12 @@ lv_obj_t * quick_drawer_expansion_handle = NULL;
 lv_obj_t * quick_drawer_card = NULL;
 lv_obj_t * quick_drawer_airplay_icon = NULL;
 lv_obj_t * quick_drawer_bt_dac_icon = NULL;
+lv_obj_t * quick_drawer_usb_dac_icon = NULL;
 lv_obj_t * quick_drawer_dlna_icon = NULL;
 lv_obj_t * quick_drawer_gapless_icon = NULL;
 lv_obj_t * quick_drawer_rc_icon = NULL;
 lv_obj_t * quick_drawer_car_mode_icon = NULL;
-lv_obj_t * quick_drawer_plugin_icon[PLUGIN_MAX_QUICK_TOGGLES];
+lv_obj_t * quick_drawer_plugin_icon[PLUGIN_QUICK_TOGGLE_CAPACITY];
 int quick_drawer_plugin_toggle_count = 0;
 void quick_drawer_volume_event_cb(lv_event_t * e) {
     if (!ui_customization_drawer_volume_visible()) return;
@@ -221,6 +224,40 @@ void quick_drawer_set_toggle_state_text(int index, bool enabled, const char * te
     lv_obj_set_style_text_color(quick_drawer_toggle_state[index], color, 0);
     quick_drawer_mark_snapshot_dirty();
 }
+/* Icon top to the caption's baseline, its lowest drawn pixel. */
+static int32_t quick_drawer_row_content(void) {
+#if defined(BOARD_TEMPOTEC_V1)
+    const lv_font_t * font = gui_theme_font(GUI_FONT_ROLE_SUBTEXT);
+#else
+    const lv_font_t * font = fallback_font_ui_12();
+#endif
+    return QUICK_DRAWER_TOGGLE_ICON_PX + QUICK_DRAWER_TOGGLE_CAPTION_GAP +
+           lv_font_get_line_height(font) - font->base_line;
+}
+
+/* Without the state line, one gap separates the panel edge, every row and
+ * the handle: row 1 sits centred above the handle, and each expanded row
+ * starts where the collapsed handle was. */
+static int32_t quick_drawer_row_gap(void) {
+    return (QUICK_DRAWER_HANDLE_Y - QUICK_DRAWER_PANEL_Y - quick_drawer_row_content()) / 2;
+}
+
+int32_t quick_drawer_row1_top(void) {
+    if (QUICK_DRAWER_SHOW_STATE) return QUICK_DRAWER_ROW1_TOP;
+    return QUICK_DRAWER_PANEL_Y + quick_drawer_row_gap();
+}
+
+#if !defined(BOARD_TEMPOTEC_V1)
+int32_t quick_drawer_row_pitch(void) {
+    if (QUICK_DRAWER_SHOW_STATE) return QUICK_DRAWER_TOGGLE_ROW_PITCH;
+    return quick_drawer_row_content() + quick_drawer_row_gap();
+}
+
+int32_t quick_drawer_expansion_top(void) {
+    return QUICK_DRAWER_SHOW_STATE ? BOARD_SCALE_PY(211) : QUICK_DRAWER_HANDLE_Y;
+}
+#endif
+
 void quick_drawer_set_toggle_state(int index, bool enabled) {
     quick_drawer_set_toggle_state_text(index, enabled, NULL);
 }
@@ -274,10 +311,12 @@ static const char * const qd_toggle_on_asset[QD_TOGGLE_COUNT] = {
     "pull_down/fade_s.png",
     "pull_down/airplay_s.png",
     "pull_down/bt_dac_s.png",
+    "pull_down/usb_dac_s.png",
     "pull_down/dlna_s.png",
     "pull_down/gapless_play_s.png",
     "pull_down/hibylink_s.png",
     "pull_down/car_mode_s.png",
+    "power_action/power.png",
 };
 static const char * const qd_toggle_off_asset[QD_TOGGLE_COUNT] = {
     "pull_down/wifi.png",
@@ -286,10 +325,12 @@ static const char * const qd_toggle_off_asset[QD_TOGGLE_COUNT] = {
     "pull_down/fade.png",
     "pull_down/airplay.png",
     "pull_down/bt_dac.png",
+    "pull_down/usb_dac.png",
     "pull_down/dlna.png",
     "pull_down/gapless_play.png",
     "pull_down/hibylink.png",
     "pull_down/car_mode.png",
+    "power_action/power.png",
 };
 static asset_decoded_image_t qd_toggle_on_img[QD_TOGGLE_COUNT];
 /* Decoded only when the off artwork is square (see toggle_corners_opaque()). */
@@ -299,8 +340,8 @@ static bool quick_drawer_toggle_force_src;
 /* Row 3's tiles come from plugin.register_quick_toggle() rather than the
  * fixed table above, so their "on" artwork is decoded per registered toggle
  * (same accent recolor, just a runtime icon path). */
-static asset_decoded_image_t qd_plugin_toggle_on_img[PLUGIN_MAX_QUICK_TOGGLES];
-static asset_decoded_image_t qd_plugin_toggle_off_img[PLUGIN_MAX_QUICK_TOGGLES];
+static asset_decoded_image_t qd_plugin_toggle_on_img[PLUGIN_QUICK_TOGGLE_CAPACITY];
+static asset_decoded_image_t qd_plugin_toggle_off_img[PLUGIN_QUICK_TOGGLE_CAPACITY];
 
 /* Every toggle tile is round, but some artwork is drawn on an opaque square:
  * the stock theme1 AirPlay, DLNA, Gapless, HibyLink, MSEB and Gain pairs,
@@ -336,10 +377,19 @@ static void mask_toggle_circle(lv_draw_buf_t * buf) {
     }
 }
 
+/* Remember plain-path images too, so accent changes do not decode them again. */
+static const char * qd_toggle_off_path[QD_TOGGLE_COUNT];
+static const char * qd_plugin_toggle_off_path[PLUGIN_QUICK_TOGGLE_CAPACITY];
+
 /* Off artwork stays a plain asset path unless it needs rounding. */
-static void load_toggle_off_image(asset_decoded_image_t * image, const char * relative_path) {
+static void load_toggle_off_image(asset_decoded_image_t * image, const char * relative_path,
+                                  const char ** loaded_path) {
+    const char * resolved = relative_path ? asset_path(relative_path) : NULL;
+    if (resolved && *loaded_path && strcmp(resolved, *loaded_path) == 0) return;
+    *loaded_path = NULL;
     asset_decoded_image_close(image);
     if (!relative_path || !asset_decoded_image_open(image, relative_path)) return;
+    *loaded_path = resolved;
     lv_draw_buf_t * buf = (lv_draw_buf_t *) image->decoder.decoded;
     if (!toggle_corners_opaque(buf)) {
         asset_decoded_image_close(image);
@@ -347,7 +397,7 @@ static void load_toggle_off_image(asset_decoded_image_t * image, const char * re
     }
     mask_toggle_circle(buf);
 }
-static void recolor_toggle_on_accent(lv_draw_buf_t * buf, lv_color_t accent) {
+static void recolor_toggle_on_accent(lv_draw_buf_t * buf, const uint8_t * keys, lv_color_t accent) {
     if (!buf || !buf->data || !buf->header.w || !buf->header.h ||
         buf->header.cf != LV_COLOR_FORMAT_ARGB8888) return;
     uint32_t w = buf->header.w;
@@ -357,9 +407,7 @@ static void recolor_toggle_on_accent(lv_draw_buf_t * buf, lv_color_t accent) {
         lv_color32_t * row = (lv_color32_t *) (buf->data + y * stride);
         for (uint32_t x = 0; x < w; x++) {
             if (row[x].alpha == 0) continue; /* outside the circle -- leave transparent */
-            uint8_t t = row[x].red;
-            if (row[x].green < t) t = row[x].green;
-            if (row[x].blue < t) t = row[x].blue;
+            uint8_t t = keys[y * w + x];
             row[x].red   = (uint8_t) (accent.red   + ((uint16_t) (255 - accent.red)   * t) / 255);
             row[x].green = (uint8_t) (accent.green + ((uint16_t) (255 - accent.green) * t) / 255);
             row[x].blue  = (uint8_t) (accent.blue  + ((uint16_t) (255 - accent.blue)  * t) / 255);
@@ -368,39 +416,45 @@ static void recolor_toggle_on_accent(lv_draw_buf_t * buf, lv_color_t accent) {
 }
 static void prepare_toggle_on_image(asset_decoded_image_t * image, const char * relative_path,
                                     lv_color_t accent) {
-    if (!asset_decoded_image_prepare_retint(image, relative_path)) return;
+    bool fresh;
+    if (!asset_decoded_image_prepare_retint(image, relative_path, false, &fresh)) return;
     lv_draw_buf_t * buf = (lv_draw_buf_t *) image->decoder.decoded;
     /* Round first: the recolor below would paint opaque corners in the accent. */
-    mask_toggle_circle(buf);
-    recolor_toggle_on_accent(buf, accent);
+    if (fresh) mask_toggle_circle(buf);
+    recolor_toggle_on_accent(buf, image->tint_keys, accent);
 }
 static void close_quick_drawer_toggle_images(void) {
     for (int i = 0; i < QD_TOGGLE_COUNT; i++) {
         asset_decoded_image_close(&qd_toggle_on_img[i]);
         asset_decoded_image_close(&qd_toggle_off_img[i]);
+        qd_toggle_off_path[i] = NULL;
     }
-    for (int i = 0; i < PLUGIN_MAX_QUICK_TOGGLES; i++) {
+    for (int i = 0; i < PLUGIN_QUICK_TOGGLE_CAPACITY; i++) {
         asset_decoded_image_close(&qd_plugin_toggle_on_img[i]);
         asset_decoded_image_close(&qd_plugin_toggle_off_img[i]);
+        qd_plugin_toggle_off_path[i] = NULL;
     }
 }
 void load_quick_drawer_toggle_images(void) {
     lv_color_t accent = accent_lv_color();
     for (int i = 0; i < QD_TOGGLE_COUNT; i++) {
-        prepare_toggle_on_image(&qd_toggle_on_img[i], qd_toggle_on_asset[i], accent);
-        load_toggle_off_image(&qd_toggle_off_img[i], qd_toggle_off_asset[i]);
+        if (i != QD_TOGGLE_POWER_OFF)
+            prepare_toggle_on_image(&qd_toggle_on_img[i], qd_toggle_on_asset[i], accent);
+        load_toggle_off_image(&qd_toggle_off_img[i], qd_toggle_off_asset[i], &qd_toggle_off_path[i]);
     }
     int plugin_count = plugin_manager_get_quick_toggle_count();
-    if (plugin_count > PLUGIN_MAX_QUICK_TOGGLES) plugin_count = PLUGIN_MAX_QUICK_TOGGLES;
-    for (int i = 0; i < PLUGIN_MAX_QUICK_TOGGLES; i++) {
+    if (plugin_count > PLUGIN_QUICK_TOGGLE_CAPACITY) plugin_count = PLUGIN_QUICK_TOGGLE_CAPACITY;
+    for (int i = 0; i < PLUGIN_QUICK_TOGGLE_CAPACITY; i++) {
         if (i >= plugin_count) {
             asset_decoded_image_close(&qd_plugin_toggle_on_img[i]);
             asset_decoded_image_close(&qd_plugin_toggle_off_img[i]);
+            qd_plugin_toggle_off_path[i] = NULL;
             continue;
         }
         prepare_toggle_on_image(&qd_plugin_toggle_on_img[i],
                                 plugin_manager_get_quick_toggle_icon_selected(i), accent);
-        load_toggle_off_image(&qd_plugin_toggle_off_img[i], plugin_manager_get_quick_toggle_icon(i));
+        load_toggle_off_image(&qd_plugin_toggle_off_img[i], plugin_manager_get_quick_toggle_icon(i),
+                              &qd_plugin_toggle_off_path[i]);
     }
 }
 
@@ -408,6 +462,7 @@ void load_quick_drawer_toggle_images(void) {
  * state only when its artwork needed rounding. Either falls back to the plain
  * asset path if no decoded copy exists. */
 const void * quick_drawer_toggle_src(qd_toggle_t t, bool on) {
+    if (t == QD_TOGGLE_POWER_OFF) on = false;
     const void * src = asset_decoded_image_source(on ? &qd_toggle_on_img[t] : &qd_toggle_off_img[t]);
     return src ? src : (const void *) asset_path(on ? qd_toggle_on_asset[t] : qd_toggle_off_asset[t]);
 }
@@ -416,7 +471,7 @@ const void * quick_drawer_toggle_src(qd_toggle_t t, bool on) {
  * paths come from the registration rather than a compile-time table. */
 const void * quick_drawer_plugin_toggle_src(int index, bool on) {
     const void * src = NULL;
-    if (index >= 0 && index < PLUGIN_MAX_QUICK_TOGGLES)
+    if (index >= 0 && index < PLUGIN_QUICK_TOGGLE_CAPACITY)
         src = asset_decoded_image_source(on ? &qd_plugin_toggle_on_img[index] : &qd_plugin_toggle_off_img[index]);
     if (src) return src;
     return asset_path(on ? plugin_manager_get_quick_toggle_icon_selected(index)
@@ -484,8 +539,9 @@ void gui_shell_refresh_quick_drawer_expansion_toggles(void) {
         lv_obj_t * icon;
         bool on;
     } toggles[] = {
-        { QD_TOGGLE_AIRPLAY, quick_drawer_airplay_icon, current_settings.wifi_dac_mode_enabled },
-        { QD_TOGGLE_BT_DAC, quick_drawer_bt_dac_icon, current_settings.bt_dac_mode_enabled },
+        { QD_TOGGLE_AIRPLAY, quick_drawer_airplay_icon, gui_network_airplay_active() },
+        { QD_TOGGLE_BT_DAC, quick_drawer_bt_dac_icon, gui_network_bt_dac_active() },
+        { QD_TOGGLE_USB_DAC, quick_drawer_usb_dac_icon, gui_network_usb_dac_active() },
         { QD_TOGGLE_DLNA, quick_drawer_dlna_icon, current_settings.dlna_renderer_enabled },
         { QD_TOGGLE_GAPLESS, quick_drawer_gapless_icon, current_settings.gapless_enabled },
         { QD_TOGGLE_RC, quick_drawer_rc_icon, current_settings.remote_control_enabled },
@@ -590,7 +646,7 @@ bool quick_drawer_sleep_timer_is_active(void) {
     return sleep_timer_active;
 }
 
-/* For Settings > Sleep Timer's "Show Time Remaining" button (build_sleep_
+/* For Settings > Sleep Timer's "Show time remaining" button (build_sleep_
  * timer_screen(), gui_settings.c) -- same
  * remaining time poll_sleep_timer() below acts on. 0 when not armed, never negative. */
 int quick_drawer_sleep_timer_remaining_seconds(void) {
@@ -628,20 +684,33 @@ void gui_shell_refresh_quick_drawer_volume_visibility(void) {
         if (!brightness_row[i]) continue;
         lv_obj_set_flag(brightness_row[i], LV_OBJ_FLAG_HIDDEN, !collapsed);
     }
+#else
+    {
+        lv_obj_t * brightness_row[] = { quick_drawer_brightness_track, quick_drawer_brightness_icon,
+                                        quick_drawer_brightness_label };
+        bool hide = quick_drawer_many_tiles && quick_drawer_expansion_y > 0;
+        for (size_t i = 0; i < sizeof(brightness_row) / sizeof(brightness_row[0]); i++)
+            if (brightness_row[i]) lv_obj_set_flag(brightness_row[i], LV_OBJ_FLAG_HIDDEN, hide);
+    }
 #endif
     lv_obj_t * row[] = { quick_drawer_volume_container, quick_drawer_volume_icon, quick_drawer_volume_track,
                          quick_drawer_volume_label };
     for (size_t i = 0; i < sizeof(row) / sizeof(row[0]); i++) {
         if (!row[i]) continue;
+        if (ui_customization_drawer_volume_visible() &&
+            (!quick_drawer_many_tiles || quick_drawer_expansion_y == 0)
 #if defined(BOARD_TEMPOTEC_V1)
-        if (ui_customization_drawer_volume_visible() && quick_drawer_expansion_y == 0)
-#else
-        if (ui_customization_drawer_volume_visible())
+            && quick_drawer_expansion_y == 0
 #endif
+            )
             lv_obj_remove_flag(row[i], LV_OBJ_FLAG_HIDDEN);
         else
             lv_obj_add_flag(row[i], LV_OBJ_FLAG_HIDDEN);
     }
+    if (quick_drawer_eq_button)
+        lv_obj_set_flag(quick_drawer_eq_button, LV_OBJ_FLAG_HIDDEN,
+            !ui_customization_effective().drawer_eq_visible ||
+            (quick_drawer_many_tiles && quick_drawer_expansion_y > 0));
     quick_drawer_mark_snapshot_dirty();
 }
 static void brightness_hw_apply_pending(void) {
@@ -660,6 +729,10 @@ void quick_drawer_brightness_changed_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t * slider = (lv_obj_t *) lv_event_get_target(e);
     int32_t percent = lv_slider_get_value(slider);
+    if (code == LV_EVENT_VALUE_CHANGED || code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST)
+        gui_settings_sync_brightness((int)percent);
+    if (quick_drawer_brightness_track && slider != quick_drawer_brightness_track)
+        lv_slider_set_value(quick_drawer_brightness_track, percent, LV_ANIM_OFF);
 
     if (code == LV_EVENT_PRESSED) {
         brightness_drag_active = true;
@@ -688,12 +761,16 @@ void quick_drawer_brightness_changed_cb(lv_event_t * e) {
  * inside the expansion box. State text and color are left to the caller. */
 void quick_drawer_make_toggle_labels(int slot, int32_t x, int32_t row_y,
                                             const char * name_text) {
+    int32_t label_w = QUICK_DRAWER_TOGGLE_CELL_W;
+#if BOARD_COMPACT_UI && !defined(BOARD_TEMPOTEC_V1)
+    x -= (label_w - QUICK_DRAWER_TOGGLE_ICON_PX) / 2;
+#endif
     lv_obj_t * name = lv_label_create(quick_drawer_expansion_box);
     quick_drawer_toggle_name[slot] = name;
     lv_label_set_text(name, name_text);
     lv_obj_add_style(name, &style_theme_text_primary, 0);
     lv_obj_set_style_text_font(name, fallback_font_ui_12(), 0);
-    lv_obj_set_width(name, QUICK_DRAWER_TOGGLE_CELL_W);
+    lv_obj_set_width(name, label_w);
     quick_drawer_size_toggle_caption(name);
 #if defined(BOARD_TEMPOTEC_V1)
     lv_obj_set_height(name, 2 * lv_font_get_line_height(&lv_font_montserrat_12));
@@ -704,8 +781,9 @@ void quick_drawer_make_toggle_labels(int slot, int32_t x, int32_t row_y,
 
     lv_obj_t * state = lv_label_create(quick_drawer_expansion_box);
     quick_drawer_toggle_state[slot] = state;
-    lv_obj_set_width(state, QUICK_DRAWER_TOGGLE_CELL_W);
-#if defined(BOARD_TEMPOTEC_V1)
+    lv_obj_set_flag(state, LV_OBJ_FLAG_HIDDEN, !QUICK_DRAWER_SHOW_STATE);
+    lv_obj_set_width(state, label_w);
+#if BOARD_COMPACT_UI
     lv_obj_set_height(state, lv_font_get_line_height(&lv_font_montserrat_12));
     lv_label_set_long_mode(state, LV_LABEL_LONG_DOT);
 #endif
@@ -736,9 +814,8 @@ static void quick_drawer_place_widget(lv_obj_t * obj, lv_obj_t * parent,
     lv_obj_set_flag(obj, LV_OBJ_FLAG_HIDDEN, !visible);
 }
 
-/* Repositions existing objects in semantic order. The first row remains
- * visible when the drawer is collapsed; two revealed rows hold four more each. */
-_Static_assert(UI_DRAWER_COUNT + PLUGIN_MAX_QUICK_TOGGLES <= UI_ORDER_MAX,
+/* Keep the first four tiles visible and reveal additional four-column rows. */
+_Static_assert(UI_DRAWER_COUNT + PLUGIN_QUICK_TOGGLE_CAPACITY <= UI_ORDER_MAX,
                "Quick Drawer order cannot hold every plugin toggle");
 void quick_drawer_reflow_customization(void) {
     if (!quick_drawer || !quick_drawer_expansion_box) return;
@@ -773,17 +850,22 @@ void quick_drawer_reflow_customization(void) {
         }
     }
 
-#if defined(BOARD_TEMPOTEC_V1)
+    quick_drawer_many_tiles = count > 12;
+#if !defined(BOARD_TEMPOTEC_V1)
+    lv_obj_remove_flag(quick_drawer_expansion_box, LV_OBJ_FLAG_SCROLLABLE);
+#endif
     int expansion_rows = count > 4 ? (count - 4 + 3) / 4 : 0;
+#if defined(BOARD_TEMPOTEC_V1)
+    int32_t row_pitch = QUICK_DRAWER_TOGGLE_ROW_PITCH;
+    row_pitch -= BOARD_SCALE_PY(60);
     quick_drawer_expansion_full = quick_drawer_expansion_visible_height(
         QUICK_DRAWER_TOGGLE_ROW_PITCH * expansion_rows);
 #else
-    int expansion_rows = count <= 4 ? 0 : count <= 8 ? 1 : 2;
-    quick_drawer_expansion_full = QUICK_DRAWER_TOGGLE_ROW_PITCH * expansion_rows;
+    int32_t row_pitch = quick_drawer_row_pitch();
+    quick_drawer_expansion_full = row_pitch * expansion_rows;
 #endif
-    if (quick_drawer_expansion_handle) {
+    if (quick_drawer_expansion_handle)
         lv_obj_set_flag(quick_drawer_expansion_handle, LV_OBJ_FLAG_HIDDEN, !expansion_rows);
-    }
 
     for (int i = 0; i < count; ++i) {
 #if defined(BOARD_TEMPOTEC_V1)
@@ -794,14 +876,13 @@ void quick_drawer_reflow_customization(void) {
                                  ? count - 4 - (row - 1) * 4 : 4);
         int32_t x = quick_drawer_toggle_column_x(column, row_count);
         /* Expanded captions are single-line, so later rows can sit closer. */
-        int32_t y = row == 0 ? QUICK_DRAWER_ROW1_TOP
-                             : (row - 1) * (QUICK_DRAWER_TOGGLE_ROW_PITCH - BOARD_SCALE_PY(60));
+        int32_t y = row == 0 ? quick_drawer_row1_top()
+                             : (row - 1) * row_pitch;
 #else
         int row = i / 4, column = i % 4;
-        int row_count = count - row * 4 < 4 ? count - row * 4 : 4;
-        int32_t x = quick_drawer_toggle_column_x(column, row_count);
-        int32_t y = row == 0 ? QUICK_DRAWER_ROW1_TOP :
-                    row == 1 ? 0 : QUICK_DRAWER_TOGGLE_ROW_PITCH;
+        int32_t x = quick_drawer_toggle_column_x(column, 4);
+        int32_t y = row == 0 ? quick_drawer_row1_top() :
+                    (row - 1) * row_pitch;
 #endif
         lv_obj_t * parent = row == 0 ? quick_drawer : quick_drawer_expansion_box;
         int32_t caption_y = y + QUICK_DRAWER_TOGGLE_ICON_PX + QUICK_DRAWER_TOGGLE_CAPTION_GAP;
@@ -814,7 +895,8 @@ void quick_drawer_reflow_customization(void) {
         lv_obj_set_width(items[i].name, row > 0 ? compact_label_w : QUICK_DRAWER_TOGGLE_CELL_W);
         /* One scrolling caption and, in expanded rows, a close status line
          * without reserving an empty second caption line. */
-        int32_t caption_h = lv_font_get_line_height(gui_theme_font(GUI_FONT_ROLE_SUBTEXT));
+        int32_t caption_h = lv_font_get_line_height(
+            lv_obj_get_style_text_font(items[i].name, LV_PART_MAIN));
         lv_obj_set_height(items[i].name, caption_h);
         row_label_enable_marquee(items[i].name);
         if (row > 0) state_y = caption_y + caption_h + BOARD_SCALE_PY(5);
@@ -822,17 +904,68 @@ void quick_drawer_reflow_customization(void) {
         lv_obj_set_height(items[i].state, lv_font_get_line_height(&lv_font_montserrat_12));
         lv_label_set_long_mode(items[i].state, LV_LABEL_LONG_DOT);
         int32_t label_x = x + label_inset;
+#elif BOARD_COMPACT_UI
+        int32_t compact_label_w = QUICK_DRAWER_TOGGLE_CELL_W;
+        int32_t label_x = x - (compact_label_w - QUICK_DRAWER_TOGGLE_ICON_PX) / 2;
+        lv_obj_set_width(items[i].name, compact_label_w);
+        lv_obj_set_width(items[i].state, compact_label_w);
+        quick_drawer_size_toggle_caption(items[i].name);
+        lv_obj_set_height(items[i].state,
+            lv_font_get_line_height(lv_obj_get_style_text_font(items[i].state, LV_PART_MAIN)));
+        lv_label_set_long_mode(items[i].state, LV_LABEL_LONG_DOT);
 #endif
 #if defined(BOARD_TEMPOTEC_V1)
         int32_t icon_x = x + (QUICK_DRAWER_TOGGLE_CELL_W - QUICK_DRAWER_TOGGLE_ICON_PX) / 2;
         quick_drawer_place_widget(items[i].icon, parent, icon_x, y, true);
         quick_drawer_place_widget(items[i].name, parent, row > 0 ? label_x : x, caption_y, true);
-        quick_drawer_place_widget(items[i].state, parent, label_x, state_y, true);
+        quick_drawer_place_widget(items[i].state, parent, label_x, state_y, QUICK_DRAWER_SHOW_STATE);
+#elif BOARD_COMPACT_UI
+        quick_drawer_place_widget(items[i].icon, parent, x, y, true);
+        quick_drawer_place_widget(items[i].name, parent, label_x, caption_y, true);
+        quick_drawer_place_widget(items[i].state, parent, label_x, state_y, QUICK_DRAWER_SHOW_STATE);
 #else
         quick_drawer_place_widget(items[i].icon, parent, x, y, true);
         quick_drawer_place_widget(items[i].name, parent, x, caption_y, true);
-        quick_drawer_place_widget(items[i].state, parent, x, state_y, true);
+        quick_drawer_place_widget(items[i].state, parent, x, state_y, QUICK_DRAWER_SHOW_STATE);
 #endif
+    }
+    if (quick_drawer_many_tiles) {
+        lv_obj_update_layout(quick_drawer);
+        int32_t row_content_height = 0;
+        for (int i = 4; i < count; ++i) {
+            int32_t bottom = LV_MAX(lv_obj_get_y(items[i].name) + lv_obj_get_height(items[i].name),
+                                    lv_obj_get_y(items[i].state) + lv_obj_get_height(items[i].state));
+            row_content_height = LV_MAX(row_content_height, bottom - lv_obj_get_y(items[i].icon));
+        }
+#if defined(BOARD_TEMPOTEC_V1)
+        /* Four full-size rows cannot fit this panel. Keep its scroll viewport
+         * and enough pitch for the actual font, without shrinking the icons. */
+        int32_t fitted_pitch = LV_MAX(row_pitch, row_content_height + BOARD_SCALE_PY(5));
+        quick_drawer_expansion_full = LV_MIN(fitted_pitch * expansion_rows,
+            BOARD_SCALE_PY(59) + BOARD_SCALE_PY(726) - BOARD_SCALE_PY(272) -
+            lv_obj_get_height(quick_drawer_expansion_handle));
+#else
+        /* Spend trailing padding first. Only shorten the pitch when the
+         * last caption and the handle cannot fit inside this board's panel. */
+        int32_t available = BOARD_SCALE_PY(59) + BOARD_SCALE_PY(726) -
+                            BOARD_SCALE_PY(219) - lv_obj_get_height(quick_drawer_expansion_handle);
+        int32_t fitted_pitch = row_pitch;
+        if (expansion_rows > 1)
+            fitted_pitch = LV_MIN(row_pitch, (available - row_content_height) / (expansion_rows - 1));
+        if (fitted_pitch < row_content_height) {
+            /* A shorter pitch would overlap captions with the next icon.
+             * Reuse the compact drawer's scroll fallback for this font/board. */
+            fitted_pitch = LV_MAX(row_pitch, row_content_height + BOARD_SCALE_PY(5));
+            lv_obj_add_flag(quick_drawer_expansion_box, LV_OBJ_FLAG_SCROLLABLE);
+        }
+        quick_drawer_expansion_full = LV_MIN(row_pitch * expansion_rows, available);
+#endif
+        for (int i = 4; i < count; ++i) {
+            int32_t shift = ((i - 4) / 4) * (row_pitch - fitted_pitch);
+            lv_obj_set_y(items[i].icon, lv_obj_get_y(items[i].icon) - shift);
+            lv_obj_set_y(items[i].name, lv_obj_get_y(items[i].name) - shift);
+            lv_obj_set_y(items[i].state, lv_obj_get_y(items[i].state) - shift);
+        }
     }
     /* Keep omitted toggles hidden even if a timer or a state refresh updates
      * their image or caption later. */
@@ -856,9 +989,7 @@ void quick_drawer_reflow_customization(void) {
 #endif
 
     lv_obj_set_height(quick_drawer_expansion_box, 0);
-#if defined(BOARD_TEMPOTEC_V1)
     lv_obj_scroll_to_y(quick_drawer_expansion_box, 0, LV_ANIM_OFF);
-#endif
     quick_drawer_toggle_force_src = true;
     gui_shell_refresh_quick_drawer_expansion_toggles();
     quick_drawer_toggle_force_src = false;
@@ -950,11 +1081,12 @@ void quick_drawer_teardown_widgets(void) {
     quick_drawer_card = NULL;
     quick_drawer_airplay_icon = NULL;
     quick_drawer_bt_dac_icon = NULL;
+    quick_drawer_usb_dac_icon = NULL;
     quick_drawer_dlna_icon = NULL;
     quick_drawer_gapless_icon = NULL;
     quick_drawer_rc_icon = NULL;
     quick_drawer_car_mode_icon = NULL;
-    for (int i = 0; i < PLUGIN_MAX_QUICK_TOGGLES; i++) quick_drawer_plugin_icon[i] = NULL;
+    for (int i = 0; i < PLUGIN_QUICK_TOGGLE_CAPACITY; i++) quick_drawer_plugin_icon[i] = NULL;
     quick_drawer_plugin_toggle_count = 0;
     quick_drawer_motion_teardown_state();
     gui_shell_gestures_reset_expansion_flags();

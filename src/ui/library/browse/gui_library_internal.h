@@ -167,6 +167,7 @@ extern lv_obj_t * genres_list;
 extern lv_obj_t * group_songs_list;
 extern lv_obj_t * group_songs_screen;
 extern lv_obj_t * group_songs_search_list;
+void gui_library_group_songs_list_changed(void);
 extern char * group_songs_source_title;
 extern lv_obj_t * group_songs_title_label;
 void invalidate_library_views_after_publication(library_rescan_mode_t completed_mode,
@@ -213,10 +214,8 @@ extern gui_popup_t sd_mount_failed_popup;
 
 /* gui_library_artist.c */
 void album_artist_collection_long_press_cb(int index);
-void album_artist_collection_more_click_cb(int index);
 extern lv_obj_t * album_collection_menu_backdrop;
 extern lv_obj_t * album_collection_menu_popup;
-void album_more_click_cb(int index);
 void album_row_long_press_cb(int index);
 bool artist_album_rederive_row(int index, compact_list_page_row_t * row, void * ctx);
 void artist_album_row_click_cb(int index);
@@ -226,7 +225,6 @@ bool artist_albums_show_all_songs_internal(bool push_screen, const char * artist
                                                     metadata_db_group_kind_t artist_kind);
 void artist_albums_snapshot(metadata_db_group_kind_t * kind, char * name, size_t name_size, int * group_count);
 void artist_collection_long_press_cb(int index);
-void artist_collection_more_click_cb(int index);
 extern int artist_open_song_hint;
 bool artist_songs_busy(void);
 void artist_songs_ready_timer(void);
@@ -253,6 +251,7 @@ extern atomic_int album_orphans;
 void album_prefetch_cancel(void);
 void album_prefetch_start(const group_row_t * group, const char * artist_filter);
 extern songs_bar_t all_songs_bar;
+int songs_title_fetch_page(void *ctx, int offset, int count, compact_list_page_row_t out_rows[]);
 int all_songs_fetch_page(void * ctx, int offset, int count, compact_list_page_row_t out_rows[]);
 void all_songs_tile_cb(lv_event_t * e);
 int artists_fetch_page(void * ctx, int offset, int count, compact_list_page_row_t out_rows[]);
@@ -266,6 +265,7 @@ lv_obj_t * build_genres_screen(void);
 lv_obj_t * build_recently_added_screen(void);
 void cancel_album_load(void);
 int count_genres_from_database(void);
+void gui_library_genre_count_refresh(void);
 void format_song_identity(const song_row_t * row, char * out, size_t size);
 extern lv_obj_t * genre_albums_list;
 void genre_albums_row_click_cb(int index);
@@ -335,10 +335,12 @@ void playlist_start_selected(bool shuffle);
 extern int playlist_start_source;
 void populate_group_songs_rows(void);
 void refresh_group_songs_from_database(void);
+void gui_library_refresh_most_played(void);
 void group_songs_replace_refreshed_entries(group_song_entry_t * entries, int count);
 void refresh_group_songs_now_playing_indicator(void);
 void refresh_group_thumbnail_binding(void);
 void set_group_songs_entries_owned(group_song_entry_t * entries, int count);
+uint64_t group_songs_entries_generation_get(void);
 void show_group_songs_editable(const char * name, const group_song_entry_t * entries, int count,
                                        const char * editable_m3u_path, bool music_submenu);
 void show_group_songs_take_ownership(const char * name, group_song_entry_t * entries, int count,
@@ -355,9 +357,9 @@ void gui_library_scan_join_for_shutdown(void);
 void library_prompt_card_changed(void);
 void library_prompt_requeue_visible(void);
 extern _Atomic bool library_rescan_active; /* read by the thumbnail warmer thread and the remote settings */
+extern bool library_rescan_success_pending;
 void library_rescan_free_target_paths(void);
 extern library_rescan_mode_t library_rescan_mode;
-extern bool library_rescan_success_pending;
 extern gui_busy_handle_t library_rescan_token;
 extern void (*library_setup_scan_complete)(bool success);
 extern lv_obj_t * library_update_prompt_body;
@@ -368,3 +370,31 @@ extern gui_popup_t refresh_all_covers_popup;
 extern gui_popup_t refresh_all_metadata_popup;
 void reload_library_on_sd_reinsert(bool announce_loaded);
 void start_library_cover_reload_album(const char * album, const char * album_artist);
+
+void show_favorite_albums(void);
+void group_songs_show_favorites(void);
+void favorite_albums_teardown(void);
+
+bool all_songs_rating_mode(void);
+bool all_songs_rating_active(void);
+int all_songs_rating_rank_at(int row, int *song_pos);
+int all_songs_rating_display_row(int rank);
+/* Worker-safe; -1 requests the ordinary title-order provider. */
+int all_songs_rating_fetch_page(void *ctx, int offset, int count, compact_list_page_row_t rows[]);
+void all_songs_rating_play(int song_pos);
+void all_songs_rating_start(void);
+void all_songs_rearm(void);
+void all_songs_rating_teardown(void);
+
+bool albums_rating_mode(void);
+bool albums_rating_active(void);
+bool albums_rating_snapshot_loaded(void);
+int albums_rating_total(void);
+bool albums_rating_resolve_row(int row, group_row_t *out);
+int albums_rating_display_row(int canonical_rank);
+int albums_rating_fetch_page(void *ctx, int offset, int count, compact_list_page_row_t rows[]);
+void albums_rating_start(void);
+void albums_rating_rearm(void);
+void albums_rating_teardown(void);
+
+group_song_entry_t *group_song_entries_take_paths(char **paths, int count);

@@ -91,7 +91,7 @@ static bool storage_writable(void) {
 static void update_title(void) {
     if (!title_label) return;
     if (!file_browser_is_selecting(browser)) {
-        lv_label_set_text(title_label, TR("File Manager"));
+        lv_label_set_text(title_label, TR("File manager"));
         return;
     }
     int count = (int) file_browser_selected_count(browser);
@@ -394,6 +394,11 @@ static void menu_button_cb(lv_event_t * e) {
             add_menu_row(rows, &count, TR("Delete"), MENU_DELETE);
         }
         add_menu_row(rows, &count, TR("Select all"), MENU_SELECT_ALL);
+    } else if (file_browser_at_storage_list(browser)) {
+        /* Storages are not files: nothing to paste into, select or create. */
+        add_menu_row(rows, &count, file_browser_shows_hidden(browser) ? TR("Hide hidden files")
+                                                                     : TR("Show hidden files"),
+                     MENU_TOGGLE_HIDDEN);
     } else {
         if (clipboard_count) {
             snprintf(paste_label, sizeof(paste_label),
@@ -434,7 +439,7 @@ static void build_screen(void) {
     screen = lv_obj_create(NULL);
     lv_obj_add_style(screen, &style_theme_screen_bg, 0);
     lv_obj_add_event_cb(screen, screen_delete_cb, LV_EVENT_DELETE, NULL);
-    title_label = build_screen_header(screen, TR("File Manager"), back_cb, asset_path("navigation/more.png"),
+    title_label = build_screen_header(screen, TR("File manager"), back_cb, asset_path("navigation/more.png"),
                                       menu_button_cb);
     const file_browser_options_t options = {
         .on_select = on_file_browser_selected,
@@ -442,6 +447,7 @@ static void build_screen(void) {
         .on_index_select = on_file_browser_index_selected,
         .on_open_other = open_other_cb,
         .on_selection = selection_changed_cb,
+        .storage_roots = true,
     };
     browser = file_browser_create(screen, FILE_MANAGER_ROOT, &options);
     finalize_screen_navigation(screen);

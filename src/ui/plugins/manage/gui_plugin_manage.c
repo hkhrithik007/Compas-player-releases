@@ -122,7 +122,7 @@ static void plugin_manage_toggle_cb(lv_event_t * e) {
     bool restore_checked = !manage_entries[index].disabled;
     if (restore_checked) lv_obj_add_state(toggle_img, LV_STATE_CHECKED);
     else lv_obj_clear_state(toggle_img, LV_STATE_CHECKED);
-    show_info_toast(TR("Couldn't save -- plugin change was not applied"));
+    show_info_toast(TR("Couldn't save. The plugin change was not applied"));
 }
 
 lv_obj_t * gui_plugin_manage_build_screen(void) {
@@ -131,7 +131,7 @@ lv_obj_t * gui_plugin_manage_build_screen(void) {
     static pill_list_item_t items[2 + PLUGIN_MANAGE_MAX_ROWS];
     items[0] = (pill_list_item_t){ TR("Plugin Store"), PILL_ACCESSORY_CHEVRON, false,
                                     gui_plugin_store_row_cb, NULL, NULL };
-    items[1] = (pill_list_item_t){ TR("Refresh Plugins"), PILL_ACCESSORY_NONE, false,
+    items[1] = (pill_list_item_t){ TR("Refresh plugins"), PILL_ACCESSORY_NONE, false,
                                     plugin_manage_reload_row_cb, NULL, NULL };
     int count = 2;
     for (int i = 0; i < manage_entry_count; i++) {
@@ -145,7 +145,7 @@ lv_obj_t * gui_plugin_manage_build_screen(void) {
         };
     }
 
-    lv_obj_t * scr = build_pill_list_screen(TR("Plugin Manager"), generic_back_cb, items, count,
+    lv_obj_t * scr = build_pill_list_screen(TR("Plugins"), generic_back_cb, items, count,
                                              gui_theme_accent_style(), 6, 100);
     lv_obj_add_event_cb(scr, plugin_manage_screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
     finalize_screen_navigation(scr);

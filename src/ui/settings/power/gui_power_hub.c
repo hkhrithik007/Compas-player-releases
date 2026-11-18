@@ -1,3 +1,4 @@
+#include "../../network/gui_network.h"
 #include "gui_power_hub.h"
 
 #include "../../../hardware/indicators/backlight.h"
@@ -6,6 +7,7 @@
 #include "../../shell/gui_notifications.h"
 #include "../gui_settings.h"
 #include "../../shell/gui_shell.h"
+#include "../../player/screen/gui_player.h"
 #include "../../appearance/gui_theme.h"
 #include "../../text/i18n/i18n.h"
 #include "../../../core/system/lifecycle/idle_shutdown.h"
@@ -231,9 +233,31 @@ static void power_restart_selector_long_press_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED) return;
     power_restart_selector_long_press_fired = true;
     power_action_pending = -1;
+    if (gui_player_queue_write_busy()) {
+        show_info_toast(TR("Queue checkpoint is still saving"));
+        return;
+    }
     char error[128] = {0};
     if (!idle_shutdown_reboot_to_bootloader(error, sizeof(error)))
         show_error_toast(error[0] ? error : TR("Could not restart into the boot selector"));
+}
+
+static void power_finish(int action) {
+    if (gui_player_queue_write_busy()) {
+        show_info_toast(TR("Queue checkpoint is still saving"));
+        return;
+    }
+    (void) gui_shell_bt_dac_shutdown(false);
+    if (action == 0) idle_shutdown_now();
+    else idle_shutdown_reboot_now();
+}
+
+/* USB DAC teardown runs off the UI thread, so power is removed once it is done. */
+static void power_dac_shutdown_cb(lv_timer_t * timer) {
+    if (!gui_network_usb_dac_shutdown()) return;
+    int action = (int) (intptr_t) lv_timer_get_user_data(timer);
+    lv_timer_delete(timer);
+    power_finish(action);
 }
 
 static void power_action_clicked_cb(lv_event_t * e) {
@@ -253,13 +277,12 @@ static void power_action_clicked_cb(lv_event_t * e) {
         if (power_action_pending != action) {
             power_action_pending = action;
             lv_label_set_text(power_action_status, action == 0
-                ? TR("Tap Power off again to confirm") : TR("Tap Restart again to confirm"));
+                ? TR("Tap power off again to confirm") : TR("Tap restart again to confirm"));
             return;
         }
         power_action_hide();
-        (void) gui_shell_bt_dac_shutdown(false);
-        if (action == 0) idle_shutdown_now();
-        else idle_shutdown_reboot_now();
+        if (gui_network_usb_dac_shutdown()) power_finish(action);
+        else lv_timer_create(power_dac_shutdown_cb, 100, (void *) (intptr_t) action);
         return;
     }
     power_action_hide();
@@ -280,7 +303,7 @@ void start_power_off_countdown(void) {
     if (quick_drawer_sleep_timer_is_active()) {
         lv_label_set_text_fmt(power_action_status, TR("Sleep timer: %d min remaining"), (remaining + 59) / 60);
     } else {
-        lv_label_set_text(power_action_status, TR("Sleep timer: Off"));
+        lv_label_set_text(power_action_status, TR("Sleep timer: off"));
     }
     if (power_action_overlay.popup) lv_obj_scroll_to_y(power_action_overlay.popup, 0, LV_ANIM_OFF);
     /* Snapshot+blur whatever screen is currently behind the overlay fresh

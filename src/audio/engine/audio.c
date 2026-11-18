@@ -873,6 +873,9 @@ typedef struct {
     bool cur_replaygain_applied;
     decoder_t nxt_dec;
     bool nxt_open;
+    /* Staged-next generation whose prefetch was refused as too demanding;
+     * not retried. 0 means none (staged generations start at 1). */
+    uint64_t nxt_refused_generation;
     bool nxt_format_matches;
     float nxt_replaygain_linear_local;
     bool nxt_replaygain_applied_local;
@@ -1237,6 +1240,7 @@ static bool session_start_track(playback_session_t * s, const startup_request_t 
 
 /* Releases the per-track playback helpers once the playback loop is left. */
 static void session_after_track_loop(playback_session_t * s) {
+    if (s->should_restart) audio_output_clear_pending();
     audio_clear_ab_switch();
     ab_switch_free_job(s->ab_active);
     s->ab_active = NULL;
@@ -1252,6 +1256,8 @@ static void session_after_track_loop(playback_session_t * s) {
 static void session_end_track(playback_session_t * s) {
     close_decoder_if_open(&s->nxt_dec, &s->nxt_open);
     if (s->cur_open) { decoder_close(&s->cur_dec); s->cur_open = false; }
+    if (s->natural_eof) audio_output_drain_pending();
+    else audio_output_clear_pending();
     close_device();
     free(s->cur_path_local);
     s->cur_path_local = NULL;
@@ -1366,7 +1372,7 @@ static void chunk_adopt_mp3_index_locked(playback_session_t * s, chunk_cmd_t * c
 /* Decides this chunk's seek (speed change, pending or deferred seek) and
  * requests an MP3 seek index where one is still needed. Enters and returns
  * locked. */
-static void chunk_resolve_seek_locked(playback_session_t * s, chunk_cmd_t * c) {
+static void chunk_take_seek_request_locked(playback_session_t *s, chunk_cmd_t *c) {
     /* A speed change uses the normal seek machinery. Explicit or
      * deferred user seeks retain priority over this rewind-to-audible
      * position, including MP3 seeks waiting for the index. */
@@ -1381,6 +1387,12 @@ static void chunk_resolve_seek_locked(playback_session_t * s, chunk_cmd_t * c) {
             : seek_pending_frame;
     }
     if (seek_pending) seek_pending = false;
+    if (c->do_seek) audio_output_clear_pending();
+
+}
+
+static void chunk_resolve_seek_locked(playback_session_t * s, chunk_cmd_t * c) {
+    chunk_take_seek_request_locked(s, c);
 
     if (c->do_seek && c->seek_frame > 0 && mp3_needs_seek_index(&s->cur_dec) &&
         !s->cur_dec.mp3_seek_points && !s->cur_dec.mp3_seek_index_attempted) {
@@ -1865,7 +1877,7 @@ static pb_step_t track_end_or_handoff(playback_session_t * s, const chunk_cmd_t 
      * off to it -- seamlessly if the format matches (device stays open),
      * or with a brief reopen if it doesn't. */
     if (!s->nxt_open && chunk_staged_path(c) != NULL) {
-        if (decoder_open_next(&s->nxt_dec, chunk_staged_path(c))) {
+        if (decoder_open_next(&s->nxt_dec, chunk_staged_path(c), s->cur_generation)) {
             s->nxt_open = true;
             s->nxt_frames_consumed = 0;
             s->nxt_replaygain_linear_local = c->staged_next.replaygain_linear;
@@ -1974,14 +1986,17 @@ static void blend_prepare(playback_session_t * s, const chunk_cmd_t * c, blend_w
     b->in_blend_window = c->xfade_on && chunk_staged_path(c) != NULL && !decoder_is_dop(&s->cur_dec) &&
                            b->frames_remaining > 0 && b->frames_remaining <= b->crossfade_frames;
 
-    if (b->in_blend_window && !s->nxt_open) {
-        if (decoder_open_next(&s->nxt_dec, chunk_staged_path(c))) {
+    if (b->in_blend_window && !s->nxt_open &&
+        s->nxt_refused_generation != c->staged_next.generation) {
+        if (decoder_open_next(&s->nxt_dec, chunk_staged_path(c), s->cur_generation)) {
             s->nxt_open = true;
             s->nxt_frames_consumed = 0;
             s->nxt_replaygain_linear_local = c->staged_next.replaygain_linear;
             s->nxt_replaygain_applied_local = c->staged_next.replaygain_applied;
             s->nxt_format_matches = (s->nxt_dec.channels == s->cur_dec.channels && s->nxt_dec.sample_rate == s->cur_dec.sample_rate);
         } else {
+            if (s->nxt_dec.open_error == AUDIO_ERROR_TOO_DEMANDING)
+                s->nxt_refused_generation = c->staged_next.generation;
             DBG_LOG("audio: failed to prefetch next track (%s)\n",
                     safe_path_tail(chunk_staged_path(c)));
         }
@@ -2719,6 +2734,7 @@ static void play_file_request(const char * path, double start_seconds,
                          bool has_replaygain, double replaygain_gain_db,
                          bool has_replaygain_peak, double replaygain_peak, bool read_tags, int gain_mode) {
     pthread_mutex_lock(&audio_mutex);
+    http_stream_cancel_generation(playback_generation);
     ab_switch_clear_locked();
     free(restart_path);
     restart_path = strdup(path);
@@ -3032,6 +3048,7 @@ void audio_toggle_pause(void) {
 
 void audio_stop(void) {
     pthread_mutex_lock(&audio_mutex);
+    http_stream_cancel_generation(playback_generation);
     ab_switch_clear_locked();
     ab_loop_enabled = false;
     stop_requested = true;

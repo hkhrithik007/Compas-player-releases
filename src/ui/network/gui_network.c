@@ -6,6 +6,11 @@
 
 static lv_obj_t * wireless_screen;
 
+bool gui_network_dac_mode_active(void) {
+    return current_settings.wifi_dac_mode_enabled || gui_network_bt_dac_active() ||
+           gui_network_usb_dac_active();
+}
+
 void configure_network_row_line(lv_obj_t * label, int32_t width, const lv_font_t * font) {
     lv_obj_set_width(label, width);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
@@ -123,7 +128,7 @@ int rotate_to_front(int position, int front) {
  * enable/toggle path (screen may already be open when Wi-Fi goes away). */
 bool wifi_feature_guard(void) {
     if (gui_shell_wifi_effective_enabled()) return true;
-    show_error_toast(TR("Enable WiFi to access"));
+    show_error_toast(TR("Enable Wi-Fi to access"));
     return false;
 }
 

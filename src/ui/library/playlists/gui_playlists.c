@@ -19,6 +19,8 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,7 +44,6 @@ static playlist_name_target_mode_t playlist_name_target_mode;
 static uint64_t playlist_name_target_generation;
 static char **playlists_m3u_paths;
 static int playlists_m3u_count;
-static bool playlist_row_long_press_fired;
 static gui_popup_t playlist_delete_popup;
 static lv_obj_t *playlist_context_menu_popup;
 static lv_obj_t *playlist_context_menu_backdrop;
@@ -50,6 +51,36 @@ static char playlist_action_path[PATH_MAX];
 static gui_playlists_open_row_cb_t open_row_cb;
 static gui_playlists_reload_edited_cb_t reload_edited_cb;
 static gui_playlists_ensure_dir_cb_t ensure_dir_cb;
+typedef struct {
+    pthread_t thread;
+    atomic_bool done;
+    bool added;
+    bool duplicate;
+    uint64_t generation;
+    char playlist[PATH_MAX];
+    char song[PATH_MAX];
+} playlist_add_job_t;
+static playlist_add_job_t *playlist_add_job;
+static void *playlist_add_worker(void *data) {
+    playlist_add_job_t *job = data;
+    job->added = playlist_files_add_if_absent(job->playlist, job->song, &job->duplicate);
+    atomic_store_explicit(&job->done, true, memory_order_release);
+    return NULL;
+}
+static void playlist_add_poll(lv_timer_t *timer) {
+    playlist_add_job_t *job = playlist_add_job;
+    if (!job || !atomic_load_explicit(&job->done, memory_order_acquire)) return;
+    pthread_join(job->thread, NULL);
+    playlist_add_job = NULL;
+    if (job->duplicate) show_error_toast(TR("Song already added"));
+    else if (job->added) show_info_toast(TR("Added to playlist"));
+    else show_error_toast(TR("Failed to add to playlist"));
+    gui_playlist_target_snapshot_t target;
+    gui_playlist_target_copy(&target);
+    if (target.generation == job->generation && lv_screen_active() == add_to_playlist_screen) nav_pop();
+    free(job);
+    lv_timer_delete(timer);
+}
 static void populate_add_to_playlist_screen(void);
 static void populate_playlists_screen(void);
 static void new_playlist_row_cb(lv_event_t *event);
@@ -59,7 +90,7 @@ static void build_playlist_context_menu_popup(void);
 
 static lv_obj_t *build_add_to_playlist_screen(void) {
     lv_obj_t *title_label;
-    return build_subsonic_list_screen(TR("Add to Playlist"), &title_label, &add_to_playlist_list);
+    return build_subsonic_list_screen(TR("Add to playlist"), &title_label, &add_to_playlist_list);
 }
 
 static void playlist_picker_path_free_cb(lv_event_t * e) {
@@ -88,7 +119,7 @@ static lv_obj_t * build_picker_row(const char * text, lv_style_t * text_style) {
 
 static void populate_add_to_playlist_screen(void) {
     lv_obj_clean(add_to_playlist_list);
-    lv_obj_t * new_row = build_picker_row(TR("+ New Playlist"), gui_theme_accent_style());
+    lv_obj_t * new_row = build_picker_row(TR("+ New playlist"), gui_theme_accent_style());
     lv_obj_add_event_cb(new_row, new_playlist_row_cb, LV_EVENT_CLICKED, NULL);
 
     char ** paths;
@@ -136,8 +167,7 @@ static void playlist_rename_done_cb(const char * name, void * data) {
 }
 
 static void hide_playlist_context_menu_popup(void) {
-    if (playlist_context_menu_popup) lv_obj_add_flag(playlist_context_menu_popup, LV_OBJ_FLAG_HIDDEN);
-    if (playlist_context_menu_backdrop) lv_obj_add_flag(playlist_context_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
+    if (playlist_context_menu_backdrop) gui_popup_backdrop_hide(playlist_context_menu_backdrop);
 }
 
 static void playlist_context_menu_backdrop_cb(lv_event_t * e) {
@@ -148,7 +178,7 @@ static void playlist_context_menu_backdrop_cb(lv_event_t * e) {
 static void playlist_context_menu_rename_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     hide_playlist_context_menu_popup();
-    show_text_entry(TR("Rename Playlist"), basename_of(playlist_action_path), false, false, playlist_rename_done_cb, NULL);
+    show_text_entry(TR("Rename playlist"), basename_of(playlist_action_path), false, false, playlist_rename_done_cb, NULL);
 }
 
 static void playlist_context_menu_delete_cb(lv_event_t * e) {
@@ -169,8 +199,8 @@ static void playlist_context_menu_cancel_cb(lv_event_t * e) {
 
 static void build_playlist_context_menu_popup(void) {
     const menu_popup_row_t rows[] = {
-        { TR("Rename Playlist"), playlist_context_menu_rename_cb, false, false, NULL },
-        { TR("Delete Playlist"), playlist_context_menu_delete_cb, true, false, NULL },
+        { TR("Rename playlist"), playlist_context_menu_rename_cb, false, false, NULL },
+        { TR("Delete playlist"), playlist_context_menu_delete_cb, true, false, NULL },
         { TR("Cancel"), playlist_context_menu_cancel_cb, false, true, NULL },
     };
     playlist_context_menu_popup = build_menu_popup(rows, (int) (sizeof(rows) / sizeof(rows[0])),
@@ -180,14 +210,11 @@ static void build_playlist_context_menu_popup(void) {
 
 static void playlist_row_long_press_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED) return;
-    playlist_row_long_press_fired = true;
     int i = (int) (intptr_t) lv_event_get_user_data(e);
     if (i < 0 || i >= playlists_m3u_count) return;
     snprintf(playlist_action_path, sizeof(playlist_action_path), "%s", playlists_m3u_paths[i]);
-    lv_obj_remove_flag(playlist_context_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
+    gui_popup_backdrop_show(playlist_context_menu_backdrop);
     lv_obj_remove_flag(playlist_context_menu_popup, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(playlist_context_menu_backdrop);
-    lv_obj_move_foreground(playlist_context_menu_popup);
 }
 
 /* System rows (Favorites ... Recently Added) are never deletable/renamable
@@ -196,7 +223,6 @@ static void playlist_row_long_press_cb(lv_event_t * e) {
 static void add_system_playlist_row(const char * label, int index) {
     lv_obj_t * row = build_wide_list_row(playlists_list, label, true);
     lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(row, ui_clear_flag_on_press_cb, LV_EVENT_PRESSED, &playlist_row_long_press_fired);
     lv_obj_add_event_cb(row, playlist_row_click_cb, LV_EVENT_CLICKED, (void *) (intptr_t) index);
 }
 
@@ -218,8 +244,7 @@ static void add_user_playlist_row(int i) {
         lv_obj_add_flag(lv_obj_get_child(row, 1), LV_OBJ_FLAG_FLOATING);
     }
     lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(row, ui_clear_flag_on_press_cb, LV_EVENT_PRESSED, &playlist_row_long_press_fired);
-    lv_obj_add_event_cb(row, playlist_row_click_cb, LV_EVENT_CLICKED, (void *) (intptr_t) (4 + i));
+    lv_obj_add_event_cb(row, playlist_row_click_cb, LV_EVENT_SHORT_CLICKED, (void *) (intptr_t) (GUI_PLAYLIST_SYSTEM_COUNT + i));
     lv_obj_add_event_cb(row, playlist_row_long_press_cb, LV_EVENT_LONG_PRESSED, (void *) (intptr_t) i);
 }
 
@@ -233,16 +258,17 @@ static void populate_playlists_screen(void) {
     /* Persistent cache of PLAYLISTS_DIR only -- see rescan_playlists(). */
     metadata_db_load_all_playlists(&playlists_m3u_paths, &playlists_m3u_count);
 
-    lv_obj_t * create = build_wide_list_row(playlists_list, TR("+ New Playlist"), true);
+    lv_obj_t * create = build_wide_list_row(playlists_list, TR("+ New playlist"), true);
     lv_obj_add_style(create, &style_theme_card_bg, 0);
     lv_obj_add_flag(create, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(create, new_playlist_row_cb, LV_EVENT_CLICKED, (void *) 1);
     build_list_section(playlists_list, TR("System playlists"));
 
-    add_system_playlist_row(TR("Favorites"), 0);
-    add_system_playlist_row(TR("Most Played"), 1);
+    add_system_playlist_row(TR("Top rated"), GUI_PLAYLIST_ROW_FAVORITES);
+    add_system_playlist_row(TR("Top rated albums"), GUI_PLAYLIST_ROW_FAVORITE_ALBUMS);
+    add_system_playlist_row(TR("Most played"), 1);
     add_system_playlist_row(TR("Queue"), 2);
-    add_system_playlist_row(TR("Recently Added"), 3);
+    add_system_playlist_row(TR("Recently added"), 3);
 
     build_list_section(playlists_list, TR("User playlists"));
     if (!playlists_m3u_count)
@@ -306,7 +332,8 @@ static void create_named_playlist(const char * text, playlist_name_target_mode_t
     const char * song_path = mode == PLAYLIST_NAME_TARGET_SONG ? target->song_path : "";
     bool ok = playlist_files_create(PLAYLISTS_DIR, text, song_path, created_path, sizeof(created_path));
     if (ok) metadata_db_playlist_insert_one(created_path);
-    show_error_toast(ok ? TR("Playlist created") : TR("Failed to create playlist"));
+    if (ok) show_info_toast(TR("Playlist created"));
+    else show_error_toast(TR("Failed to create playlist"));
     if (!ok) return;
     gui_playlist_target_clear_folder();
     playlist_name_target_mode = PLAYLIST_NAME_TARGET_NONE;
@@ -360,7 +387,7 @@ static void new_playlist_row_cb(lv_event_t *event) {
     }
     gui_playlist_target_copy(&target);
     playlist_name_target_generation = target.generation;
-    show_text_entry(TR("Playlist Name"), "", false, false, new_playlist_name_done_cb, NULL);
+    show_text_entry(TR("Playlist name"), "", false, false, new_playlist_name_done_cb, NULL);
 }
 
 static void existing_playlist_row_cb(lv_event_t *event) {
@@ -373,37 +400,49 @@ static void existing_playlist_row_cb(lv_event_t *event) {
                                                     target.generation, add_to_playlist_screen);
         return;
     }
-    if (playlist_files_contains(path, target.song_path)) {
-        show_error_toast(TR("Song already added"));
-        nav_pop();
-        return;
+    if (playlist_add_job) return;
+    playlist_add_job_t *job = calloc(1, sizeof(*job));
+    if (!job) { show_error_toast(TR("Failed to add to playlist")); return; }
+    snprintf(job->playlist, sizeof(job->playlist), "%s", path);
+    job->generation = target.generation;
+    snprintf(job->song, sizeof(job->song), "%s", target.song_path);
+    atomic_init(&job->done, false);
+    playlist_add_job = job;
+    lv_timer_t *timer = lv_timer_create(playlist_add_poll, 25, NULL);
+    if (!timer || pthread_create(&job->thread, NULL, playlist_add_worker, job) != 0) {
+        if (timer) lv_timer_delete(timer);
+        playlist_add_job = NULL;
+        free(job);
+        show_error_toast(TR("Failed to add to playlist"));
     }
-    bool ok = playlist_files_append(path, target.song_path);
-    show_error_toast(ok ? TR("Added to playlist") : TR("Failed to add to playlist"));
-    nav_pop();
+}
+
+static bool open_saved_playlist_path(const char *path) {
+    if (!path || !path[0] || !open_row_cb) return false;
+    char **songs = NULL;
+    int count = 0;
+    if (!playlist_files_read(path, &songs, &count)) {
+        show_error_toast(TR("Playlist unavailable or unreadable"));
+        return false;
+    }
+    open_row_cb(GUI_PLAYLIST_ROW_SAVED_M3U, basename_of(path), path, songs, count);
+    for (int i = 0; i < count; i++) free(songs[i]);
+    free(songs);
+    return true;
 }
 
 static void playlist_row_click_cb(lv_event_t *event) {
-    if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
-    if (playlist_row_long_press_fired) { playlist_row_long_press_fired = false; return; }
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code != LV_EVENT_CLICKED && code != LV_EVENT_SHORT_CLICKED) return;
     int index = (int)(intptr_t)lv_event_get_user_data(event);
     if (index < 0) return;
-    if (index < 4) {
+    if (index < GUI_PLAYLIST_SYSTEM_COUNT) {
         if (open_row_cb) open_row_cb((gui_playlist_row_kind_t)index, NULL, NULL, NULL, 0);
         return;
     }
-    int i = index - 4;
+    int i = index - GUI_PLAYLIST_SYSTEM_COUNT;
     if (i < 0 || i >= playlists_m3u_count) return;
-    char **songs = NULL;
-    int count = 0;
-    if (!playlist_files_read(playlists_m3u_paths[i], &songs, &count)) {
-        show_error_toast(TR("Playlist unavailable or unreadable"));
-        return;
-    }
-    if (open_row_cb)
-        open_row_cb(GUI_PLAYLIST_ROW_SAVED_M3U, basename_of(playlists_m3u_paths[i]), playlists_m3u_paths[i], songs, count);
-    for (int j = 0; j < count; j++) free(songs[j]);
-    free(songs);
+    (void)open_saved_playlist_path(playlists_m3u_paths[i]);
 }
 
 void gui_playlists_init(gui_playlists_open_row_cb_t open_row,
@@ -429,6 +468,23 @@ void gui_playlists_build_context_menu(void) { build_playlist_context_menu_popup(
 void gui_playlists_open_saved_screen(void) {
     populate_playlists_screen();
     nav_push(playlists_screen);
+}
+
+bool gui_playlists_open_path(const char * path) {
+    if (!path || !path[0] || !open_row_cb) return false;
+    char ** paths = NULL;
+    int count = 0;
+    metadata_db_load_all_playlists(&paths, &count);
+    bool opened = false;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(paths[i], path) == 0) {
+            opened = open_saved_playlist_path(paths[i]);
+            break;
+        }
+    }
+    for (int i = 0; i < count; i++) free(paths[i]);
+    free(paths);
+    return opened;
 }
 
 void gui_playlists_open_for_song(const char *path) {
@@ -493,6 +549,7 @@ void gui_playlists_poll(void) {
 
 void gui_playlists_teardown_popups(void) {
     gui_popup_teardown(&playlist_delete_popup);
+    if (playlist_context_menu_backdrop) gui_popup_backdrop_hide(playlist_context_menu_backdrop);
     if (playlist_context_menu_popup) { lv_obj_delete(playlist_context_menu_popup); playlist_context_menu_popup = NULL; }
     if (playlist_context_menu_backdrop) { lv_obj_delete(playlist_context_menu_backdrop); playlist_context_menu_backdrop = NULL; }
 }

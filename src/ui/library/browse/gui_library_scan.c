@@ -7,6 +7,8 @@
 #include "../../../library/metadata/scan/library_scan.h"
 #include "../library_az_index.h"
 #include "../../network/gui_network.h"
+#include "../../shell/gui_shell.h"
+#include "../../../hardware/usb/usb_mode_control.h"
 #include "../../../hardware/indicators/backlight.h"
 #include "../../text/rendering/gui_text_input.h"
 #include "../collections/gui_books.h"
@@ -35,6 +37,7 @@
 gui_busy_handle_t library_rescan_token = 0;
 
 static pthread_t library_rescan_thread;
+static bool library_rescan_from_music;
 _Atomic bool library_rescan_active = false;
 void (*library_setup_scan_complete)(bool success);
 bool library_rescan_success_pending = false;
@@ -45,7 +48,7 @@ gui_popup_t refresh_all_covers_popup;
 /* Published to the UI by library_rescan_done_flag's release/acquire pair. */
 /* Set when the walk could not read part of the tree, so the toast does not
  * claim a full update. Rows whose file is missing are still removed. */
-static const char library_recovered_message[] = N_("Library recovered. Use Settings > Update Music Database to save");
+static const char library_recovered_message[] = N_("Library recovered. Use Settings > Library > Update music database to save");
 static void rescan_playlists(void);
 
 static void library_scan_copy_result(library_scan_result_t *out) {
@@ -214,7 +217,7 @@ static void library_prompt_update_labels(library_prompt_reason_t reason) {
         case LIBRARY_PROMPT_NO_DATABASE:
             lv_label_set_text(library_update_prompt_title, TR("No music database"));
             lv_label_set_text(library_update_prompt_body,
-                              TR("Build it now? Large libraries can take several minutes."));
+                              TR("Build it now? This may take a while."));
             lv_label_set_text(library_update_prompt_confirm_label, TR("Build"));
             break;
         case LIBRARY_PROMPT_LOAD_FAILED:
@@ -238,7 +241,7 @@ static void library_update_prompt_close(bool show_settings_toast) {
     library_prompt_activate_queued_request();
 
     if (!show_settings_toast) return;
-    show_info_toast(TR("Use Settings > Update Music Database"));
+    show_info_toast(TR("Use Settings > Library > Update music database"));
 }
 
 /* The settle checks only decide when to show the prompt. Once the user taps
@@ -382,9 +385,9 @@ static void report_library_cache_load(void) {
     }
 }
 
-/* Keep the metadata scan worker at its existing background priority. The
- * thumbnail component has its own private copy for its three independent
- * worker lifetimes. */
+/* Keep scans behind interactive UI and playback work. The thumbnail
+ * component has its own private copy for its three independent worker
+ * lifetimes. */
 static void library_worker_lower_priority(int nice_value) {
 #ifdef __linux__
     errno = 0;
@@ -401,12 +404,21 @@ static void * library_rescan_thread_func(void * arg) {
 #ifdef __linux__
     struct sched_param sp = { 0 };
     sched_setscheduler(0, SCHED_BATCH, &sp);
-    library_worker_lower_priority(5);
+    library_worker_lower_priority(19);
 #endif
     (void)arg;
     uint64_t started_ms = db_log_enabled() ? db_log_now_ms() : 0;
     DB_LOG("DB", "rescan_thread_begin rss_kb=%ld", db_log_rss_kb());
-    library_scan_run();
+    /* Storage mode can be bound while the cable is unplugged, so the UI's
+     * session snapshot cannot protect this interval from a newly connecting
+     * host. The lease atomically unbinds idle Storage and blocks mode changes
+     * for the full SD walk/commit. */
+    if (usb_mode_control_storage_write_begin()) {
+        library_scan_run();
+        usb_mode_control_storage_write_end();
+    } else {
+        library_scan_record_start_failure();
+    }
     DB_LOG("DB", "rescan_thread_end songs=%lld elapsed_ms=%llu rss_kb=%ld",
            (long long) metadata_db_get_song_count(), (unsigned long long) (db_log_now_ms() - started_ms),
            db_log_rss_kb());
@@ -428,16 +440,40 @@ void library_rescan_free_target_paths(void) {
     library_scan_release();
 }
 
+static void library_rescan_cancel_cb(void * user) {
+    (void) user;
+    gui_library_cancel_scan();
+}
+
+/* The blocking scan screen, with Cancel, for every database scan. */
+static void show_library_rescan_screen(library_rescan_mode_t mode) {
+    bool metadata = mode == LIBRARY_RESCAN_TARGETED || mode == LIBRARY_RESCAN_FORCE_METADATA;
+    const char * title = mode == LIBRARY_RESCAN_FORCE_METADATA ? TR("Refreshing\nall metadata...")
+        : mode == LIBRARY_RESCAN_TARGETED ? TR("Refreshing\nmetadata...")
+        : TR("Updating\nmusic database...");
+    library_rescan_from_music = library_screen_in_navigation(gui_library_get_music_screen());
+    library_rescan_token = gui_busy_show(title, metadata ? TR("Preparing metadata refresh...")
+                                                         : TR("Preparing music library..."));
+    gui_busy_set_cancel(library_rescan_token, library_rescan_cancel_cb, NULL);
+    gui_busy_set_progress(library_rescan_token, 0);
+}
+
 static bool start_library_rescan_job(bool allow_rebuild, library_rescan_mode_t mode,
                                      char ** target_paths, int target_count,
                                      library_scan_scope_t scope, const char * scope_name,
                                      const char * scope_album_artist) {
     gui_library_invalidate_boot_prompt();
     boot_warmup_pending = false;
-    /* Ignore request if a rescan is already running. */
-    if (library_rescan_active) {
+    /* Ignore request while a rescan runs or its completion screen is up. */
+    if (library_rescan_active || library_rescan_success_pending) {
         for (int i = 0; i < target_count; i++) free(target_paths[i]);
         free(target_paths);
+        return false;
+    }
+    if (gui_network_usb_storage_session_active() || gui_network_usb_storage_switch_pending()) {
+        for (int i = 0; i < target_count; i++) free(target_paths[i]);
+        free(target_paths);
+        show_info_toast(TR("Library is busy"));
         return false;
     }
     DB_LOG("DB", "rescan_requested existing_songs=%lld rss_kb=%ld",
@@ -469,13 +505,7 @@ static bool start_library_rescan_job(bool allow_rebuild, library_rescan_mode_t m
     library_scan_prepare(&scan_request);
     atomic_store_explicit(&library_rescan_done_flag, false, memory_order_relaxed);
     library_rescan_active = true;
-    const char * busy_title = mode == LIBRARY_RESCAN_FORCE_METADATA ? TR("Refreshing\nall metadata...")
-        : mode == LIBRARY_RESCAN_TARGETED ? TR("Refreshing\nmetadata...")
-        : TR("Updating\nmusic database...");
-    const char * busy_detail = mode == LIBRARY_RESCAN_TARGETED || mode == LIBRARY_RESCAN_FORCE_METADATA
-            ? TR("Preparing metadata refresh...") : TR("Preparing music library...");
-    library_rescan_token = gui_busy_show(busy_title, busy_detail);
-    gui_busy_set_progress(library_rescan_token, 0);
+    show_library_rescan_screen(mode);
 
     pthread_attr_t attr;
     pthread_attr_t * attr_ptr = NULL;
@@ -594,7 +624,7 @@ static bool start_library_cover_reload_job(bool all_albums, const song_row_t * t
                                            const char * album, const char * album_artist_key) {
     gui_library_invalidate_boot_prompt();
     boot_warmup_pending = false;
-    if (library_rescan_active) {
+    if (library_rescan_active || library_rescan_success_pending) {
         show_info_toast(TR("Library is busy"));
         return false;
     }
@@ -724,13 +754,6 @@ void reload_library_on_sd_reinsert(bool announce_loaded) {
     }
 }
 
-/* How long the "Library updated" success message stays up once a rescan
- * finishes, before falling back to Home -- purely so the user gets a
- * moment to actually read it, not a wait for anything real. */
-#define LIBRARY_RESCAN_SUCCESS_MS 1500
-
-static uint32_t library_rescan_success_since_tick = 0;
-
 static void finish_library_cover_reload(bool cancelled) {
     library_rescan_mode_t completed_mode = library_rescan_mode;
     bool all_albums = completed_mode == LIBRARY_RESCAN_REFRESH_COVERS_ALL;
@@ -755,21 +778,91 @@ static void finish_library_cover_reload(bool cancelled) {
     }
 }
 
+/* How long the "Library updated" message stays up once a full scan
+ * finishes, before returning Home, so it can be read. */
+#define LIBRARY_RESCAN_SUCCESS_MS 1500
+
+static uint32_t library_rescan_success_since_tick = 0;
+
+/* The blocking scan screen's progress line: total stays 0 until the file
+ * walk finishes, so the walk shows a count of checked items instead. */
+static void show_library_rescan_progress(void) {
+    library_scan_progress_t progress;
+    library_scan_get_progress(&progress);
+    int total = progress.total, done = progress.done;
+    char detail[96];
+    if (progress.phase == LIBRARY_SCAN_PHASE_WALK) {
+        if (library_rescan_mode == LIBRARY_RESCAN_TARGETED)
+            snprintf(detail, sizeof(detail), "%s", TR("Preparing metadata refresh"));
+        else if (progress.walk_items > 0)
+            snprintf(detail, sizeof(detail), TR("Looking for music files\n%d items checked"), progress.walk_items);
+        else snprintf(detail, sizeof(detail), "%s", TR("Looking for music files"));
+    } else if (progress.phase == LIBRARY_SCAN_PHASE_TAGS && total > 0) {
+        if (done > total) done = total;
+        int percent = (int) ((int64_t) done * 100 / total);
+        gui_busy_set_progress(library_rescan_token, percent);
+        snprintf(detail, sizeof(detail), TR("Reading tags\n%d of %d songs (%d%%)"), done, total, percent);
+    } else {
+        gui_busy_set_progress(library_rescan_token, 100);
+        snprintf(detail, sizeof(detail), "%s", library_rescan_mode == LIBRARY_RESCAN_TARGETED
+                     ? TR("Saving music database")
+                     : TR("Saving music database\nThis can take a while on large libraries"));
+    }
+    gui_busy_set_detail(library_rescan_token, detail);
+}
+
+/* Returns true while the success message is still up. */
+static bool library_rescan_success_showing(void) {
+    if (!library_rescan_success_pending) return false;
+    if (lv_tick_elaps(library_rescan_success_since_tick) < LIBRARY_RESCAN_SUCCESS_MS) return true;
+    library_rescan_success_pending = false;
+    if (!library_setup_scan_complete) {
+        nav_reset_to_home();
+        if (library_rescan_from_music) nav_push(gui_library_get_music_screen());
+    }
+    return true;
+}
+
+/* Full scans rebuild the library screens; a targeted refresh keeps its list. */
+static void refresh_after_rescan(library_rescan_mode_t mode) {
+    if (mode == LIBRARY_RESCAN_TARGETED) refresh_library_lists_in_place();
+    else refresh_library_screens_after_reload(mode == LIBRARY_RESCAN_NORMAL);
+}
+
+/* Closes the scan screen after Cancel and returns Home. */
+static void finish_cancelled_rescan(library_rescan_mode_t mode, bool published) {
+    if (published) refresh_after_rescan(mode);
+    gui_busy_hide(library_rescan_token);
+    if (!library_setup_scan_complete) nav_reset_to_home();
+    library_rescan_free_target_paths();
+    library_rescan_mode = LIBRARY_RESCAN_NORMAL;
+    finish_setup_scan(false);
+}
+
+/* The message for a scan that finished without error. */
+static void show_rescan_result(library_rescan_mode_t mode, const library_scan_result_t * result) {
+    if (mode != LIBRARY_RESCAN_NORMAL) {
+        /* Parser failures, non-ENOENT stat errors and skipped folders all
+         * mean some songs were not re-read. */
+        if (result->failed_count > 0 || result->incomplete)
+            show_error_toast(TR("Some songs could not be read"));
+        else show_info_toast(TR("Metadata refreshed"));
+    } else if (result->operation_outcome == METADATA_DB_LOAD_SUCCESS_RECOVERED) {
+        show_info_toast(result->saved
+                            ? (result->incomplete ? TR("Library recovered and saved, some folders could not be read")
+                                                  : TR("Library recovered and saved"))
+                            : TR(library_recovered_message));
+    } else {
+        show_info_toast(result->incomplete ? TR("Library updated, some folders could not be read")
+                                           : TR("Library updated"));
+    }
+}
+
 void poll_library_rescan(void) {
     library_thumbnails_retry_warmup();
-
-    /* Keep the screen awake for the rescan progress display so the auto
-     * screen-timeout does not trigger mid-rescan. */
-    if (library_rescan_active || library_rescan_success_pending)
-        lv_display_trigger_activity(NULL);
-
-    if (library_rescan_success_pending) {
-        if (lv_tick_elaps(library_rescan_success_since_tick) >= LIBRARY_RESCAN_SUCCESS_MS) {
-            library_rescan_success_pending = false;
-            if (!library_setup_scan_complete) nav_reset_to_home(); /* leaves the busy screen and discards any stale deeper screen */
-        }
-        return;
-    }
+    /* Keep the screen awake while the scan screen shows progress. */
+    if (library_rescan_active || library_rescan_success_pending) lv_display_trigger_activity(NULL);
+    if (library_rescan_success_showing()) return;
 
     bool cover_reload = library_rescan_mode == LIBRARY_RESCAN_REFRESH_COVERS_ALL ||
                         library_rescan_mode == LIBRARY_RESCAN_REFRESH_COVERS_ALBUM;
@@ -807,35 +900,7 @@ void poll_library_rescan(void) {
     }
 
     if (!atomic_load_explicit(&library_rescan_done_flag, memory_order_acquire)) {
-        /* Still scanning -- total stays 0 until the initial file walk
-         * finishes (see library_scan_once()), so there's nothing
-         * meaningful to show yet in that window; the label just keeps
-         * reading "Updating music database..." until then. */
-        library_scan_progress_t progress;
-        library_scan_get_progress(&progress);
-        int total = progress.total;
-        int done = progress.done;
-        char detail[96];
-        int phase = progress.phase;
-        if (phase == LIBRARY_SCAN_PHASE_WALK) {
-            int items = progress.walk_items;
-            if (library_rescan_mode == LIBRARY_RESCAN_TARGETED)
-                snprintf(detail, sizeof(detail), "%s", TR("Preparing metadata refresh"));
-            else if (items > 0) snprintf(detail, sizeof(detail), TR("Looking for music files\n%d items checked"), items);
-            else snprintf(detail, sizeof(detail), "%s", TR("Looking for music files"));
-        } else if (phase == LIBRARY_SCAN_PHASE_TAGS && total > 0) {
-            if (done > total) done = total;
-            gui_busy_set_progress(library_rescan_token, (int32_t) ((int64_t) done * 100 / total));
-            snprintf(detail, sizeof(detail), TR("Reading tags\n%d of %d songs (%d%%)"), done, total,
-                     (int) ((int64_t) done * 100 / total));
-        } else {
-            gui_busy_set_progress(library_rescan_token, 100);
-            if (library_rescan_mode == LIBRARY_RESCAN_TARGETED)
-                snprintf(detail, sizeof(detail), "%s", TR("Saving music database"));
-            else
-                snprintf(detail, sizeof(detail), "%s", TR("Saving music database\nThis can take a while on large libraries"));
-        }
-        gui_busy_set_detail(library_rescan_token, detail);
+        show_library_rescan_progress();
         return;
     }
 
@@ -851,26 +916,16 @@ void poll_library_rescan(void) {
     /* Cached track durations of files that are gone or changed are dropped. */
     if (published) duration_prune_request();
     if (published) invalidate_library_views_after_publication(completed_mode, identity_changed);
+    if (completed_mode == LIBRARY_RESCAN_NORMAL) gui_books_refresh_visible();
     if (scan_cancelled) {
-        if (published) {
-            if (completed_mode == LIBRARY_RESCAN_TARGETED) refresh_library_lists_in_place();
-            else refresh_library_screens_after_reload(completed_mode == LIBRARY_RESCAN_NORMAL);
-        }
-        gui_busy_hide(library_rescan_token);
-        if (!library_setup_scan_complete) nav_reset_to_home();
-        library_rescan_free_target_paths();
-        library_rescan_mode = LIBRARY_RESCAN_NORMAL;
-        finish_setup_scan(false);
+        finish_cancelled_rescan(completed_mode, published);
         return;
     }
 
     bool overall_success = scan_result.succeeded &&
                            scan_result.operation_outcome != METADATA_DB_LOAD_FAILED &&
                            scan_result.operation_outcome != METADATA_DB_LOAD_UNMOUNTED;
-    if (published) {
-        if (completed_mode == LIBRARY_RESCAN_TARGETED) refresh_library_lists_in_place();
-        else refresh_library_screens_after_reload(completed_mode == LIBRARY_RESCAN_NORMAL);
-    }
+    if (published) refresh_after_rescan(completed_mode);
 
     /* Thumbnail generation is optional cache warming. It must not become a
      * second user-visible phase after a database scan -- no progress screen,
@@ -885,7 +940,7 @@ void poll_library_rescan(void) {
             if (scan_result.operation_outcome == METADATA_DB_LOAD_SUCCESS_RECOVERED)
                 show_info_toast(TR(library_recovered_message));
             else
-                show_error_toast(TR("Library unavailable. Use Settings > Update Music Database to rebuild"));
+                show_error_toast(TR("Library unavailable. Use Settings > Library > Update music database to rebuild"));
         } else {
             show_error_toast(TR("Library update failed. Check SD card and retry"));
         }
@@ -897,22 +952,7 @@ void poll_library_rescan(void) {
     if (published && completed_mode != LIBRARY_RESCAN_TARGETED) library_thumbnails_start_warmup();
     gui_busy_hide(library_rescan_token);
 
-    if (completed_mode != LIBRARY_RESCAN_NORMAL) {
-        /* Still set from the finished job; reset only when the next starts. */
-        /* Parser failures, non-ENOENT stat errors and skipped folders all
-         * mean some songs were not re-read. */
-        if (scan_result.failed_count > 0 || scan_result.incomplete)
-            show_error_toast(TR("Some songs could not be read"));
-        else show_info_toast(TR("Metadata refreshed"));
-    } else if (scan_result.operation_outcome == METADATA_DB_LOAD_SUCCESS_RECOVERED) {
-        show_info_toast(scan_result.saved
-                            ? (scan_result.incomplete ? TR("Library recovered and saved, some folders could not be read")
-                                                         : TR("Library recovered and saved"))
-                            : TR(library_recovered_message));
-    } else {
-        show_info_toast(scan_result.incomplete ? TR("Library updated, some folders could not be read")
-                                                  : TR("Library updated"));
-    }
+    show_rescan_result(completed_mode, &scan_result);
     library_rescan_free_target_paths();
     library_rescan_mode = LIBRARY_RESCAN_NORMAL;
     /* A targeted refresh returns to the list it was started from, refreshed
@@ -933,15 +973,10 @@ void gui_library_cancel_scan(void) {
         library_thumbnails_cancel_cover_reload();
 }
 
-/* Overall scan progress, polled by update_timer_cb while library_rescan_active
- * is true to drive the "Updating music database..." screen's progress bar
- * (Settings > Update Music Database) -- purely cosmetic, for the user's
- * peace of mind that a rescan is actually moving rather than stuck, since
- * the underlying incremental scan (metadata_db.c's mtime/size cache) is
- * already fast on an unchanged library. _total is set once discovered_count
- * is known (library_scan_once(), before its spool-reading loop starts);
- * _done is advanced by that same loop, one file at a time (see
- * scan_one_song_into_db()'s own caller in library_scan_once()). */
+bool gui_library_scan_active(void) {
+    return library_rescan_active;
+}
+
 
 /* Refreshes the persistent playlist cache (metadata_db.c) from
  * PLAYLISTS_DIR only (the SD card's Playlists folder), not a walk of the

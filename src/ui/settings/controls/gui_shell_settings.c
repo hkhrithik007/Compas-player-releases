@@ -30,9 +30,7 @@ _Static_assert(UI_ORDER_MAX <= GUI_LIST_REORDER_MAX_ROWS,
                "Saved order exceeds shared drag capacity");
 static gui_list_reorder_state_t ui_order_drag_state = { .drag_id = -1 };
 
-static lv_obj_t * quick_drawer_settings_screen;
-static lv_obj_t * quick_drawer_settings_list;
-static void populate_quick_drawer_settings(void);
+static void add_quick_drawer_toggles(lv_obj_t * list);
 extern void gui_shell_apply_customization(void);
 static void topbar_set_clicked_row_switch(lv_event_t * e, bool checked);
 static lv_obj_t * settings_topbar_screen;
@@ -138,7 +136,7 @@ static void add_customization_help(lv_obj_t *list) {
 /* Rows of the offered entries in saved order, then the rest; unoffered rows stay hidden at the end. */
 static void place_ui_order_rows(const ui_item_order_t * order, int item_count) {
     bool listed[UI_ORDER_MAX] = { false };
-    int visual_index = 0;
+    int visual_index = ui_order_kind == UI_ORDER_DRAWER ? 3 : 0;
     for (unsigned pos = 0; pos < order->count; ++pos) {
         int id = order->ids[pos];
         if (id >= item_count || listed[id] || !ui_order_rows[id]) continue;
@@ -195,6 +193,7 @@ static lv_obj_t * build_ui_order_screen(void) {
     memset(ui_order_rows, 0, sizeof(ui_order_rows));
     memset(ui_order_drag_handles, 0, sizeof(ui_order_drag_handles));
     memset(ui_order_visible_buttons, 0, sizeof(ui_order_visible_buttons));
+    if (ui_order_kind == UI_ORDER_DRAWER) add_quick_drawer_toggles(ui_order_list);
     for (int id = 0; id < UI_ORDER_MAX; ++id) {
         /* Labels are set in populate; spare rows stay hidden. */
         lv_obj_t * row = add_pill_row_base(ui_order_list, "");
@@ -239,7 +238,7 @@ static lv_obj_t * build_ui_order_screen(void) {
         lv_obj_t * visible_switch = lv_switch_create(row);
         ui_order_visible_buttons[id] = visible_switch;
         lv_obj_add_style(visible_switch, gui_theme_accent_style(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-        lv_obj_set_size(visible_switch, switch_width, BOARD_SCALE_PX(28));
+        setting_toggle_size(visible_switch, switch_width, BOARD_SCALE_PX(28), 10);
         lv_obj_align(visible_switch, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(6), 0);
         lv_obj_add_event_cb(visible_switch, ui_order_control_cb, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)id);
     }
@@ -250,11 +249,8 @@ static lv_obj_t * build_ui_order_screen(void) {
     enable_gesture_bubble_recursive(ui_order_screen);
     return ui_order_screen;
 }
-static void ui_order_settings_row_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    ui_order_open_kind(UI_ORDER_DRAWER, "Quick Drawer");
-}
 static void ui_order_open_kind(ui_order_kind_t kind, const char * title) {
+    if (ui_order_screen && ui_order_kind != kind) gui_shell_settings_teardown_order();
     ui_order_kind = kind;
     if (!ui_order_screen) build_ui_order_screen();
     if (ui_order_title) lv_label_set_text(ui_order_title, TR(title));
@@ -263,8 +259,7 @@ static void ui_order_open_kind(ui_order_kind_t kind, const char * title) {
 }
 void gui_shell_settings_music_order_row_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    ui_order_kind_t kind = (ui_order_kind_t)(intptr_t)lv_event_get_user_data(e);
-    ui_order_open_kind(kind, "Music menu");
+    ui_order_open_kind(UI_ORDER_MUSIC, "Music menu");
 }
 
 static void quick_drawer_setting_toggle_cb(lv_event_t * e) {
@@ -281,35 +276,20 @@ static void quick_drawer_setting_toggle_cb(lv_event_t * e) {
     if (which == 2) gui_shell_refresh_quick_drawer_volume_visibility();
     else gui_shell_apply_customization();
 }
-static void populate_quick_drawer_settings(void) {
-    if (!quick_drawer_settings_list) return;
-    lv_obj_clean(quick_drawer_settings_list);
+static void add_quick_drawer_toggles(lv_obj_t * list) {
     struct { const char * label; bool value; intptr_t which; } toggles[] = {
         { N_("Enabled"), current_settings.ui_customization.drawer_enabled, 0 },
         { N_("Equalizer"), current_settings.ui_customization.drawer_eq_visible, 1 },
-        { N_("Volume Slider"), current_settings.quick_drawer_volume_visible, 2 },
+        { N_("Volume slider"), current_settings.quick_drawer_volume_visible, 2 },
     };
     for (size_t i = 0; i < sizeof(toggles) / sizeof(toggles[0]); ++i) {
-        lv_obj_t * row = add_pill_toggle_row(quick_drawer_settings_list, TR(toggles[i].label), toggles[i].value, NULL);
+        lv_obj_t * row = add_pill_toggle_row(list, TR(toggles[i].label), toggles[i].value, NULL);
         lv_obj_add_event_cb(row, quick_drawer_setting_toggle_cb, LV_EVENT_CLICKED, (void *)toggles[i].which);
     }
-    lv_obj_t * reorder = add_pill_chevron_row(quick_drawer_settings_list, TR("Reorder Items"), NULL);
-    lv_obj_add_event_cb(reorder, ui_order_settings_row_cb, LV_EVENT_CLICKED, NULL);
-    add_customization_help(quick_drawer_settings_list);
-    if (quick_drawer_settings_screen) enable_gesture_bubble_recursive(quick_drawer_settings_screen);
-}
-static lv_obj_t * build_quick_drawer_settings_screen(void) {
-    lv_obj_t * title_label;
-    quick_drawer_settings_screen = build_subsonic_list_screen(TR("Quick Drawer"), &title_label, &quick_drawer_settings_list);
-    populate_quick_drawer_settings();
-    enable_gesture_bubble_recursive(quick_drawer_settings_screen);
-    return quick_drawer_settings_screen;
 }
 void gui_shell_settings_quick_drawer_row_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    if (!quick_drawer_settings_screen) build_quick_drawer_settings_screen();
-    else populate_quick_drawer_settings();
-    nav_push(quick_drawer_settings_screen);
+    ui_order_open_kind(UI_ORDER_DRAWER, "Quick Drawer");
 }
 
 typedef struct {
@@ -322,20 +302,16 @@ static const topbar_visibility_option_t topbar_visibility_options[] = {
     { N_("Clock"), TOPBAR_HIDE_CLOCK },
     { N_("Wi-Fi"), TOPBAR_HIDE_WIFI },
     { N_("Bluetooth"), TOPBAR_HIDE_BLUETOOTH },
-    { N_("Wired Headphones"), TOPBAR_HIDE_HEADPHONES },
-    { N_("Bluetooth Audio (A2DP)"), TOPBAR_HIDE_A2DP },
-    { N_("USB Audio"), TOPBAR_HIDE_USB_AUDIO },
-    { N_("Playback Status"), TOPBAR_HIDE_PLAYBACK },
-    { N_("Bluetooth Codec"), TOPBAR_HIDE_CODEC },
-    { N_("Battery Icon"), TOPBAR_HIDE_BATTERY },
+    { N_("Wired headphones"), TOPBAR_HIDE_HEADPHONES },
+    { N_("Bluetooth audio (A2DP)"), TOPBAR_HIDE_A2DP },
+    { N_("USB audio"), TOPBAR_HIDE_USB_AUDIO },
+    { N_("Playback status"), TOPBAR_HIDE_PLAYBACK },
+    { N_("Bluetooth codec"), TOPBAR_HIDE_CODEC },
+    { N_("Battery icon"), TOPBAR_HIDE_BATTERY },
 };
 
 static void populate_topbar_settings_screen(void);
 static void populate_topbar_clock_position_screen(void);
-static void topbar_clock_position_rebuild_async_cb(void * user_data) {
-    (void)user_data;
-    populate_topbar_clock_position_screen();
-}
 
 static void topbar_set_clicked_row_switch(lv_event_t * e, bool checked) {
     lv_obj_t * row = lv_event_get_target(e);
@@ -384,26 +360,30 @@ static void topbar_clock_position_option_cb(lv_event_t * e) {
     int index = (int)(intptr_t)lv_event_get_user_data(e);
     if (index < 0 || (size_t)index >= sizeof(topbar_clock_position_options) / sizeof(topbar_clock_position_options[0])) return;
     current_settings.topbar_clock_position = topbar_clock_position_options[index].position;
+    gui_pill_option_list_set_selected(settings_topbar_clock_position_list, lv_event_get_current_target(e));
     settings_save_async(&current_settings);
     gui_shell_apply_topbar_settings();
-    lv_async_call(topbar_clock_position_rebuild_async_cb, NULL);
 }
 
 static void populate_topbar_clock_position_screen(void) {
     if (!settings_topbar_clock_position_list) return;
-    lv_obj_clean(settings_topbar_clock_position_list);
-    for (size_t i = 0; i < sizeof(topbar_clock_position_options) / sizeof(topbar_clock_position_options[0]); ++i) {
-        add_pill_option_row(settings_topbar_clock_position_list,
-                            TR(topbar_clock_position_options[i].label),
-                            current_settings.topbar_clock_position == topbar_clock_position_options[i].position,
-                            topbar_clock_position_option_cb, (void *)(intptr_t)i);
+    size_t count = sizeof(topbar_clock_position_options) / sizeof(topbar_clock_position_options[0]);
+    if (lv_obj_get_child_count(settings_topbar_clock_position_list) == 0) {
+        for (size_t i = 0; i < count; ++i) {
+            add_pill_option_row(settings_topbar_clock_position_list,
+                                TR(topbar_clock_position_options[i].label), false,
+                                topbar_clock_position_option_cb, (void *)(intptr_t)i);
+        }
     }
+    for (size_t i = 0; i < count; ++i)
+        gui_pill_option_row_set_selected(lv_obj_get_child(settings_topbar_clock_position_list, i),
+            current_settings.topbar_clock_position == topbar_clock_position_options[i].position);
 }
 
 static lv_obj_t * build_topbar_clock_position_screen(void) {
     lv_obj_t * title_label;
     settings_topbar_clock_position_screen = build_subsonic_list_screen(
-        TR("Clock Position"), &title_label, &settings_topbar_clock_position_list);
+        TR("Clock position"), &title_label, &settings_topbar_clock_position_list);
     populate_topbar_clock_position_screen();
     finalize_screen_navigation(settings_topbar_clock_position_screen);
     return settings_topbar_clock_position_screen;
@@ -419,24 +399,28 @@ static void topbar_clock_position_row_cb(lv_event_t * e) {
 
 static void populate_topbar_settings_screen(void) {
     if (!settings_topbar_list) return;
-    lv_obj_clean(settings_topbar_list);
-    for (size_t i = 0; i < sizeof(topbar_visibility_options) / sizeof(topbar_visibility_options[0]); ++i) {
-        lv_obj_t * row = add_pill_toggle_row(settings_topbar_list,
-            TR(topbar_visibility_options[i].label),
-            (current_settings.topbar_hidden_elements & topbar_visibility_options[i].hidden_bit) == 0,
-            NULL);
-        lv_obj_add_event_cb(row, topbar_visibility_toggle_cb, LV_EVENT_CLICKED,
-                            (void *)(uintptr_t)topbar_visibility_options[i].hidden_bit);
+    size_t count = sizeof(topbar_visibility_options) / sizeof(topbar_visibility_options[0]);
+    if (lv_obj_get_child_count(settings_topbar_list) == 0) {
+        for (size_t i = 0; i < count; ++i) {
+            lv_obj_t * row = add_pill_toggle_row(settings_topbar_list,
+                TR(topbar_visibility_options[i].label), false, NULL);
+            lv_obj_add_event_cb(row, topbar_visibility_toggle_cb, LV_EVENT_CLICKED,
+                                (void *)(uintptr_t)topbar_visibility_options[i].hidden_bit);
+        }
+        add_pill_toggle_row(settings_topbar_list, TR("Battery percentage"), false,
+                            topbar_battery_percentage_toggle_cb);
+        add_pill_chevron_row(settings_topbar_list, TR("Clock position"), topbar_clock_position_row_cb);
     }
-    add_pill_toggle_row(settings_topbar_list, TR("Battery Percentage"),
-                        current_settings.show_battery_percent,
-                        topbar_battery_percentage_toggle_cb);
-    add_pill_chevron_row(settings_topbar_list, TR("Clock Position"), topbar_clock_position_row_cb);
+    for (size_t i = 0; i < count; ++i)
+        gui_pill_toggle_row_set_checked(lv_obj_get_child(settings_topbar_list, i),
+            (current_settings.topbar_hidden_elements & topbar_visibility_options[i].hidden_bit) == 0);
+    gui_pill_toggle_row_set_checked(lv_obj_get_child(settings_topbar_list, count),
+                                    current_settings.show_battery_percent);
 }
 
 static lv_obj_t * build_topbar_settings_screen(void) {
     lv_obj_t * title_label;
-    settings_topbar_screen = build_subsonic_list_screen(TR("Top Bar"), &title_label,
+    settings_topbar_screen = build_subsonic_list_screen(TR("Top bar"), &title_label,
                                                          &settings_topbar_list);
     populate_topbar_settings_screen();
     finalize_screen_navigation(settings_topbar_screen);
@@ -452,7 +436,7 @@ void gui_shell_settings_topbar_row_cb(lv_event_t * e) {
 
 void gui_shell_settings_teardown_order(void) {
     gui_list_reorder_finish(&ui_order_drag_state, false);
-    for (int id = 0; id < UI_DRAWER_COUNT; ++id)
+    for (int id = 0; id < UI_ORDER_MAX; ++id)
         if (ui_order_drag_handles[id]) unregister_swipe_dead_zone(ui_order_drag_handles[id]);
     if (ui_order_screen) { lv_obj_delete(ui_order_screen); ui_order_screen = NULL; }
     ui_order_list = NULL;
@@ -465,8 +449,6 @@ void gui_shell_settings_teardown_order(void) {
 }
 
 void gui_shell_settings_teardown_after_plugin_order(void) {
-    if (quick_drawer_settings_screen) { lv_obj_delete(quick_drawer_settings_screen); quick_drawer_settings_screen = NULL; }
-    quick_drawer_settings_list = NULL;
     if (settings_topbar_screen) { lv_obj_delete(settings_topbar_screen); settings_topbar_screen = NULL; }
     settings_topbar_list = NULL;
     if (settings_topbar_clock_position_screen) {

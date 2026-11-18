@@ -4,6 +4,7 @@
 
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +30,15 @@ static rs_entry_t * entries;
 static int entry_n;
 static int entry_cap;
 static bool loaded;
+static atomic_uint revision;
+
+void remote_state_note_rating_change(void) {
+    atomic_fetch_add_explicit(&revision, 1, memory_order_relaxed);
+}
+
+unsigned remote_state_revision(void) {
+    return atomic_load_explicit(&revision, memory_order_relaxed);
+}
 
 static int find_index(const char * path) {
     if (!path) return -1;
@@ -93,8 +103,32 @@ static void load_file(void) {
     fclose(f);
 }
 
+static bool save_file(void);
+
+static void migrate_album_keys(void) {
+    bool changed = false;
+    for (int i = 0; i < entry_n; i++) {
+        char *path = entries[i].path;
+        if (strncmp(path, "album://", 8) || !strchr(path + 8, '\t')) continue;
+        size_t end = strlen(path), trimmed = end;
+        while (trimmed && path[trimmed - 1] == ' ') trimmed--;
+        if (trimmed == end) continue;
+        path[trimmed] = 0;
+        int collision = -1;
+        for (int j = 0; j < entry_n; j++)
+            if (j != i && !strcmp(entries[j].path, path)) { collision = j; break; }
+        if (collision >= 0) {
+            free(path);
+            memmove(&entries[i], &entries[i + 1], sizeof(*entries) * (size_t)(entry_n - i - 1));
+            entry_n--; i--;
+        }
+        changed = true;
+    }
+    if (changed) { (void)save_file(); remote_state_note_rating_change(); }
+}
+
 static void ensure_loaded(void) {
-    if (!loaded) load_file();
+    if (!loaded) { load_file(); migrate_album_keys(); }
 }
 
 static bool save_file(void) {
@@ -138,6 +172,7 @@ void remote_state_drop(void) {
     pthread_mutex_lock(&mu);
     free_all();
     loaded = false;
+    remote_state_note_rating_change();
     pthread_mutex_unlock(&mu);
 }
 
@@ -163,6 +198,7 @@ bool remote_state_set_rating(const char * path, int32_t rating) {
     if (e) {
         e->rating = rating;
         saved = save_file();
+        remote_state_note_rating_change();
     }
     pthread_mutex_unlock(&mu);
     return saved;
@@ -180,21 +216,36 @@ void remote_state_add_play(const char * path, int32_t now) {
     pthread_mutex_unlock(&mu);
 }
 
-bool remote_state_take(const char * path, int32_t * rating, int32_t * playcount, int32_t * last_played) {
+void remote_state_remove_matches(const remote_state_rating_t *rows, const int32_t (*tuples)[3],
+                                  const bool *migrated, int count) {
     pthread_mutex_lock(&mu);
     ensure_loaded();
-    int i = find_index(path);
-    if (i < 0) {
-        pthread_mutex_unlock(&mu);
-        return false;
+    bool changed = false;
+    for (int n = 0; n < count; n++) {
+        if (!migrated[n]) continue;
+        int i = find_index(rows[n].path);
+        if (i < 0 || entries[i].rating != tuples[n][0] || entries[i].playcount != tuples[n][1] ||
+            entries[i].last_played != tuples[n][2]) continue;
+        free(entries[i].path);
+        memmove(&entries[i], &entries[i + 1], sizeof(entries[0]) * (size_t)(entry_n - i - 1));
+        entry_n--;
+        changed = true;
     }
-    if (rating) *rating = entries[i].rating;
-    if (playcount) *playcount = entries[i].playcount;
-    if (last_played) *last_played = entries[i].last_played;
-    free(entries[i].path);
-    memmove(&entries[i], &entries[i + 1], sizeof(entries[0]) * (size_t) (entry_n - i - 1));
-    entry_n--;
-    save_file();
+    if (changed) save_file();
     pthread_mutex_unlock(&mu);
-    return true;
+}
+
+remote_state_rating_t *remote_state_list_prefix(const char *prefix, int *count) {
+    *count = 0;
+    if (!prefix) return NULL;
+    pthread_mutex_lock(&mu);
+    ensure_loaded();
+    remote_state_rating_t *rows = entry_n ? calloc((size_t)entry_n, sizeof(*rows)) : NULL;
+    for (int i = 0; rows && i < entry_n; i++) {
+        if (strncmp(entries[i].path, prefix, strlen(prefix))) continue;
+        char *path = strdup(entries[i].path);
+        if (path) rows[(*count)++] = (remote_state_rating_t){path, entries[i].rating};
+    }
+    pthread_mutex_unlock(&mu);
+    return rows;
 }

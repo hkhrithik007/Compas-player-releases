@@ -19,13 +19,13 @@ static setting_slider_t screen_dimming_ui;
  * needing more than whole minutes+seconds. */
 static void format_screen_timeout(char * buf, size_t buf_size, int seconds) {
     if (seconds < 60) {
-        snprintf(buf, buf_size, "%ds", seconds);
+        snprintf(buf, buf_size, TR("%ds"), seconds);
         return;
     }
     int minutes = seconds / 60;
     int remainder = seconds % 60;
-    if (remainder == 0) snprintf(buf, buf_size, "%dm", minutes);
-    else snprintf(buf, buf_size, "%dm %ds", minutes, remainder);
+    if (remainder == 0) snprintf(buf, buf_size, TR("%dm"), minutes);
+    else snprintf(buf, buf_size, TR("%dm %ds"), minutes, remainder);
 }
 
 /* Index of the closest shared timeout preset. */
@@ -59,11 +59,17 @@ static void screen_timeout_slider_event_cb(lv_event_t * e) {
     }
 }
 
+static void screen_timeout_loaded_cb(lv_event_t *e) {
+    (void)e;
+    setting_slider_sync(&screen_timeout_ui, current_settings.screen_timeout_enabled, screen_timeout_seconds_to_step_index(current_settings.screen_timeout_seconds));
+}
+
 static lv_obj_t * build_screen_timeout_screen(void) {
     lv_obj_t * scr = lv_obj_create(NULL);
+    lv_obj_add_event_cb(scr, screen_timeout_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
     lv_obj_add_style(scr, &style_theme_screen_bg, 0);
 
-    build_screen_header(scr, TR("Screen Timeout"), generic_back_cb, NULL, NULL);
+    build_screen_header(scr, TR("Screen timeout"), generic_back_cb, NULL, NULL);
 
     screen_timeout_ui = build_setting_slider(scr, &(setting_slider_cfg_t) {
         .toggle_label = TR("Turn off screen automatically"),
@@ -76,7 +82,7 @@ static lv_obj_t * build_screen_timeout_screen(void) {
         .fmt = format_screen_timeout,
         .slider_cb = screen_timeout_slider_event_cb,
     });
-    lv_obj_align(screen_timeout_ui.card, LV_ALIGN_TOP_MID, 0, STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT + 20);
+    lv_obj_align(screen_timeout_ui.card, LV_ALIGN_TOP_MID, 0, STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT + BOARD_SCALE_PY(20));
 
     finalize_screen_navigation(scr);
     return scr;
@@ -116,6 +122,8 @@ static void screen_dim_delay_slider_event_cb(lv_event_t * e) {
 }
 
 static void screen_dimming_screen_loaded_cb(lv_event_t * e) {
+    (void)e;
+    setting_slider_sync(&screen_dimming_ui, current_settings.screen_dimming_enabled, screen_dim_delay_seconds_to_step_index(current_settings.screen_dim_delay_seconds));
     int effective_max_index = SCREEN_DIM_DELAY_STEP_COUNT - 1;
     if (current_settings.screen_timeout_enabled) {
         effective_max_index = -1;
@@ -146,7 +154,7 @@ static lv_obj_t * build_screen_dimming_screen(void) {
     lv_obj_add_event_cb(scr, screen_dimming_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
     lv_obj_add_style(scr, &style_theme_screen_bg, 0);
 
-    build_screen_header(scr, TR("Screen Dimming"), generic_back_cb, NULL, NULL);
+    build_screen_header(scr, TR("Screen dimming"), generic_back_cb, NULL, NULL);
 
     screen_dimming_ui = build_setting_slider(scr, &(setting_slider_cfg_t) {
         .toggle_label = TR("Dim screen before timeout"),
@@ -159,7 +167,7 @@ static lv_obj_t * build_screen_dimming_screen(void) {
         .fmt = format_screen_timeout,
         .slider_cb = screen_dim_delay_slider_event_cb,
     });
-    lv_obj_align(screen_dimming_ui.card, LV_ALIGN_TOP_MID, 0, STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT + 20);
+    lv_obj_align(screen_dimming_ui.card, LV_ALIGN_TOP_MID, 0, STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT + BOARD_SCALE_PY(20));
 
     finalize_screen_navigation(scr);
     return scr;

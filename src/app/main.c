@@ -7,6 +7,8 @@
 #include "../audio/visualization/waveform.h"
 #include "../hardware/indicators/backlight.h"
 #include "../library/metadata/parsing/metadata.h"
+#include "../library/metadata/scan/library_scan.h"
+#include "../ui/effects/transition_compositor.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdint.h>
@@ -578,6 +580,15 @@ static uint32_t main_loop_tick_gap(uint32_t now, uint32_t last) {
     return now - last;
 }
 
+/* Input is handled before the next loop pass: bring LVGL's tick up to now first
+ * so gestures and tap timeouts see real event time after an idle sleep. */
+static uint32_t advance_tick_to_now(uint32_t * last_real_tick) {
+    uint32_t now = custom_tick_get();
+    lv_tick_inc(main_loop_tick_gap(now, *last_real_tick));
+    *last_real_tick = now;
+    return now;
+}
+
 int main(int argc, char ** argv) {
     /* Ignore SIGPIPE process-wide: a Bluetooth disconnect during playback
      * kills the `aplay -D bluealsa` child audio_output.c writes into, and
@@ -618,6 +629,18 @@ int main(int argc, char ** argv) {
      * helper invocation (wrong arg count, unparsable fd/priority) fails
      * fast here rather than falling through into normal application
      * startup with a leftover "--metadata-artwork-helper" argv entry. */
+    if (argc >= 2 && strcmp(argv[1], "--metadata-scan-worker") == 0) {
+        if (argc != 4) return 1;
+        long fds[2];
+        for (int i = 0; i < 2; i++) {
+            char * end = NULL;
+            errno = 0;
+            fds[i] = strtol(argv[2 + i], &end, 10);
+            if (errno != 0 || !end || end == argv[2 + i] || *end != '\0' || fds[i] < 0 || fds[i] > INT_MAX)
+                return 1;
+        }
+        return metadata_scan_worker_run((int) fds[0], (int) fds[1]);
+    }
     if (argc >= 2 && strcmp(argv[1], "--metadata-artwork-helper") == 0) {
         if (argc != 5) return 1;
         char * end = NULL;
@@ -936,6 +959,14 @@ int main(int argc, char ** argv) {
          * still carries every pause/resume/ready rule (screen off, RAM-stage,
          * lyrics barrier): it is only rendered when it is not paused. */
         uint32_t now_tick = custom_tick_get();
+        /* Ignore perpetual spinners/marquees: only interaction should defer scans. */
+        bool ui_active = lv_display_get_inactive_time(disp) < 50 ||
+                         gui_navigation_transition_in_progress() || transition_compositor_is_active();
+        for (lv_indev_t *input = lv_indev_get_next(NULL); input; input = lv_indev_get_next(input))
+            ui_active |= lv_indev_get_state(input) == LV_INDEV_STATE_PRESSED ||
+                         lv_indev_get_scroll_obj(input) != NULL;
+        if (ui_active)
+            atomic_store_explicit(&library_scan_last_ui_activity_ms, now_tick, memory_order_relaxed);
         lv_timer_t * refr_timer = lv_display_get_refr_timer(disp);
         /* Never more than one render per refresh period, whatever woke the
          * loop (a flood of worker notifies) and whether or not the pan blocks. */
@@ -1022,14 +1053,13 @@ int main(int argc, char ** argv) {
 #endif
                 /* Advance ticks before dispatch: gestures must see real event
                  * time even after an idle wait. The handler accounts the rest. */
-                uint32_t input_tick = custom_tick_get();
-                lv_tick_inc(main_loop_tick_gap(input_tick, last_real_tick));
-                last_real_tick = input_tick;
+                uint32_t input_tick = advance_tick_to_now(&last_real_tick);
                 if ((ready & UI_WAKE_TOUCH_ERROR) && event_touch) {
                     /* Persistent error readiness cannot be consumed as data. */
                     fprintf(stderr, "Touch input: descriptor error, removing device\n");
                     lv_evdev_delete(event_touch);
                 } else if ((ready & UI_WAKE_TOUCH) && event_touch) {
+                    atomic_store_explicit(&library_scan_last_ui_activity_ms, input_tick, memory_order_relaxed);
                     lv_indev_read(event_touch);
                     /* Explicitly preserve stationary long presses. LVGL also
                      * resumes this timer in its pointer press handler. */
@@ -1043,7 +1073,11 @@ int main(int argc, char ** argv) {
         } else
 #endif
         {
-        ui_wake_sleep(time_till_next);
+        /* Button presses notify too: consume them now, like the event loop does. */
+        if (ui_wake_sleep(time_till_next)) {
+            advance_tick_to_now(&last_real_tick);
+            gui_process_input_wake();
+        }
 #ifdef UI_PERF_TRACE
         ui_frame_trace_event(UI_FRAME_TRACE_EVENT_SLEEP_END, time_till_next, 0);
 #endif

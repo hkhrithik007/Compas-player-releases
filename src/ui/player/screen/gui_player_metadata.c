@@ -1,7 +1,10 @@
 #include "gui_player.h"
 #include "gui_player_internal.h"
+#include "../../widgets/controls/star_rating.h"
 #include "gui_lyrics.h"
 #include "gui_track_info.h"
+#include "../../widgets/controls/gui_rating_popup.h"
+#include "../../../network/http/stream/http_stream.h"
 #include "../queue/player_queue_model.h"
 #include "../artwork/player_artwork_cache.h"
 #include "../artwork/player_artwork_jobs.h"
@@ -18,7 +21,7 @@
 #include "../../../library/artwork/prefetch/player_cover_prefetch.h"
 #include "../../../library/metadata/db/metadata_db.h"
 #include "../../../library/metadata/parsing/metadata.h"
-#include "../../../library/playlists/favorite_writer.h"
+#include "../../../library/playlists/rating_writer.h"
 #include "../../../library/playlists/playback_order.h"
 #include "../../../library/remote/remote_track.h"
 #include "../../../library/workers/track_metadata_worker.h"
@@ -35,6 +38,24 @@ static char now_playing_genre[128];
 static int now_playing_track_number;
 extern bool plugin_now_playing_loaded;
 static uint64_t metadata_ui_token, metadata_next_token, metadata_next_queue_revision;
+static uint64_t station_metadata_token;
+static int station_index = -1;
+static char station_title[256], station_artist[128], station_album[128];
+
+/* Keep the track's own text separate from transient ICY song titles. */
+static void remember_track_display_text(int index, const char * title, const char * artist, const char * album) {
+    station_metadata_token = metadata_ui_token;
+    station_index = index;
+    snprintf(station_title, sizeof(station_title), "%s", title);
+    snprintf(station_artist, sizeof(station_artist), "%s", artist);
+    snprintf(station_album, sizeof(station_album), "%s", album);
+}
+
+static void apply_track_display_text(int index, const char * title, const char * artist, const char * album) {
+    remember_track_display_text(index, title, artist, album);
+    player_set_track_display_text(title, artist, album);
+}
+
 static uint64_t artwork_dispatched_metadata_token;
 static uint64_t metadata_scalar_applied_token;
 static char artwork_dispatched_artist[128], artwork_dispatched_album[128], artwork_dispatched_album_artist[128];
@@ -42,11 +63,13 @@ static char artwork_dispatched_artist[128], artwork_dispatched_album[128], artwo
 static uint64_t metadata_request_perf_us;
 #endif
 static uint64_t metadata_ui_audio_generation, metadata_next_audio_generation;
-static uint64_t favorite_ui_revision, metadata_favorite_revision;
-static uint64_t favorite_request_token, favorite_request_revision;
-static char favorite_request_path[PATH_MAX];
-static bool favorite_track_known, favorite_toggle_pending;
-static bool metadata_ui_notify, metadata_notify_ready;
+static uint64_t rating_ui_revision, metadata_rating_revision;
+static uint64_t rating_request_token, rating_request_revision;
+static char rating_request_path[PATH_MAX];
+static bool rating_track_known;
+static int pending_stars = -1;
+static char rating_popup_path[PATH_MAX];
+static bool metadata_ui_notify, metadata_notify_ready, metadata_count_play;
 static track_metadata_t metadata_notify_payload;
 static bool selection_metadata_seed_valid;
 static char selection_metadata_seed_path[PATH_MAX];
@@ -94,58 +117,85 @@ void player_next_cover_prefetch_reset(void) {
     next_cover_prefetch_token = 0;
 }
 
-/* The now-playing heart: player icon, Quick Drawer, and the cached state
- * Remote Control reports in /status. */
-void show_favorite_state(bool is_favorite) {
-    favorite_is_set = is_favorite;
-    if (favorite_icon) {
-        lv_image_set_src(favorite_icon, asset_path(favorite_is_set ? "playing_plane/collect_in.png" : "playing_plane/collect_out.png"));
+/* Refresh the compact rating display. */
+void show_now_playing_rating(int stars) {
+    now_playing_stars = stars;
+    lv_obj_t * control = gui_player_rating_control();
+    if (control) star_rating_set(control, stars);
+}
+
+/* Preserve the requested value while the initial read completes. */
+static void apply_loaded_rating(int stars) {
+    int requested = pending_stars;
+    pending_stars = -1;
+    rating_track_known = true;
+    stars = requested >= 0 ? requested : stars;
+    show_now_playing_rating(stars);
+    gui_track_info_note_current_rating(stars);
+    if (requested >= 0) {
+        ++rating_ui_revision;
+        rating_writer_submit(gui_player_get_current_track_path(), requested);
     }
 }
 
-/* Resolve a tap made while the initial Favorite read was pending against
- * the stored value, rather than treating the placeholder as authoritative. */
-static void apply_loaded_favorite(bool value) {
-    bool toggle = favorite_toggle_pending;
-    favorite_toggle_pending = false;
-    favorite_track_known = true;
-    show_favorite_state(toggle ? !value : value);
-    if (toggle) {
-        ++favorite_ui_revision;
-        favorite_writer_submit(gui_player_get_current_track_path(), favorite_is_set);
-    }
-}
-
-/* Remote Control changed some favorite: reload the now-playing heart from
+/* Remote Control changed a rating: reload the now-playing state from
  * the writer, which also sees this player's own unsaved taps. */
-void gui_player_refresh_favorite(void) {
+void gui_player_refresh_rating(void) {
     if (!gui_player_has_active_track()) return;
     const char * current = gui_player_get_current_track_path();
     if (!current || !current[0]) return;
-    ++favorite_ui_revision;
-    favorite_request_revision = favorite_ui_revision;
-    track_metadata_request_t request = { .token = ++favorite_request_token };
+    ++rating_ui_revision;
+    rating_request_revision = rating_ui_revision;
+    track_metadata_request_t request = { .token = ++rating_request_token };
     snprintf(request.path, sizeof(request.path), "%s", current);
-    snprintf(favorite_request_path, sizeof(favorite_request_path), "%s", current);
-    track_metadata_submit(TRACK_METADATA_FAVORITE, &request);
+    snprintf(rating_request_path, sizeof(rating_request_path), "%s", current);
+    track_metadata_submit(TRACK_METADATA_RATING, &request);
 }
 
-void favorite_icon_event_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    if (!gui_player_has_active_track()) return;
+int gui_player_rating_path(const char * path) {
+    const char * current = gui_player_has_active_track() ? gui_player_get_current_track_path() : NULL;
+    if (current && path && strcmp(current, path) == 0) return now_playing_stars;
+    return rating_writer_stars(path);
+}
 
-    const char * path = gui_player_get_current_track_path();
-    if (!path) return;
-
-    if (!favorite_track_known) {
-        favorite_toggle_pending = !favorite_toggle_pending;
-        show_favorite_state(!favorite_is_set);
+void gui_player_set_rating_path(const char * path, int stars) {
+    if (!path || !path[0]) return;
+    stars = LV_CLAMP(0, stars, 5);
+    const char * current = gui_player_has_active_track() ? gui_player_get_current_track_path() : NULL;
+    bool is_current = current && strcmp(current, path) == 0;
+    if (is_current) gui_track_info_note_current_rating(stars);
+    if (is_current && !rating_track_known) {
+        pending_stars = stars;
+        show_now_playing_rating(stars);
         return;
     }
-    ++favorite_ui_revision;
-    show_favorite_state(!favorite_is_set);
+    rating_writer_submit(path, stars);
+    if (is_current) {
+        ++rating_ui_revision;
+        pending_stars = -1;
+        show_now_playing_rating(stars);
+    }
+}
 
-    favorite_writer_submit(path, favorite_is_set);
+static void player_rating_changed(int stars, void * user_data) {
+    gui_player_set_rating_path(user_data, stars);
+}
+
+void gui_player_open_rating_popup(const char * path) {
+    if (!path || !path[0]) return;
+    snprintf(rating_popup_path, sizeof(rating_popup_path), "%s", path);
+    gui_rating_popup_open(TR("Rate song"), gui_player_rating_path(rating_popup_path),
+                          player_rating_changed, rating_popup_path);
+}
+
+/* Tap: 5 stars, or clear a 5. Hold: the rating popup. */
+void favorite_icon_event_cb(lv_event_t * e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (!gui_player_has_active_track()) return;
+    const char * path = gui_player_get_current_track_path();
+    if (code == LV_EVENT_LONG_PRESSED) gui_player_open_rating_popup(path);
+    else if (code == LV_EVENT_SHORT_CLICKED)
+        gui_player_set_rating_path(path, gui_player_rating_path(path) == 5 ? 0 : 5);
 }
 
 static void meta_set_text(char * dst, size_t size, bool * has, const char * text) {
@@ -284,7 +334,7 @@ static void launch_subsonic_track_cover(int index, const subsonic_stream_song_me
     launch_cover_decode_from_subsonic(index, &server, song->cover_art, gui_shell_wifi_connected());
 }
 
-/* Artwork is independent of favorite/lyrics completion. Dispatch once the
+/* Artwork is independent of rating/lyrics completion. Dispatch once the
  * current track has enough identity and scalar tags to find its art. */
 static void dispatch_track_artwork(int index, const char * path, track_metadata_t * meta,
                                    uint64_t metadata_token) {
@@ -318,7 +368,7 @@ static void dispatch_track_artwork(int index, const char * path, track_metadata_
     }
 }
 
-static void apply_loaded_track_metadata(int index, track_metadata_t * out_meta, bool favorite, bool favorite_ready) {
+static void apply_loaded_track_metadata(int index, track_metadata_t * out_meta, int stars, bool rating_ready) {
     const char * path = playlist_path_at(index);
     char title[128], folder[128];
     get_display_names(path, title, sizeof(title), folder, sizeof(folder));
@@ -382,25 +432,25 @@ static void apply_loaded_track_metadata(int index, track_metadata_t * out_meta, 
     if (src.is_subsonic && src.subsonic->track > 0)
         now_playing_track_number = src.subsonic->track;
 
-    player_set_track_display_text(title_text, folder_text, album_text);
+    apply_track_display_text(index, title_text, folder_text, album_text);
     refresh_format_badge();
     dispatch_track_artwork(index, path, out_meta, metadata_ui_token);
 
-    /* No local sidecar (or embedded tag) makes sense for a Subsonic stream
-     * or remote-provider URL -- same reasoning cover art uses a server-
-     * supplied cover URL instead of a local-file lookup for those. A
-     * streamed track just never gets lyrics in this first release. */
-    if (!src.is_subsonic && !src.is_remote) {
-        gui_lyrics_load_track(index, path);
+    if (src.is_subsonic) {
+        subsonic_server_t server = subsonic_server_from_settings();
+        char key[SUBSONIC_CACHE_KEY_SIZE];
+        subsonic_cache_server_key(&server, key);
+        gui_lyrics_load_subsonic(index, !strcmp(key, src.subsonic->server_key) ? &server : NULL,
+                                 src.subsonic->song_id, src.subsonic->artist, src.subsonic->title);
     } else {
-        gui_lyrics_load_track(index, NULL);
+        gui_lyrics_load_track(index, src.is_remote ? NULL : path);
     }
     /* Results contain only scalar tags; keep this defensive ownership guard
      * if the metadata loader later supplies optional blobs. */
     free(out_meta->lyrics);
     out_meta->lyrics = NULL;
 
-    if (favorite_ready && metadata_favorite_revision == favorite_ui_revision) apply_loaded_favorite(favorite);
+    if (rating_ready && metadata_rating_revision == rating_ui_revision) apply_loaded_rating(stars);
     player_transition_mark_dirty();
 }
 
@@ -431,10 +481,10 @@ void prepare_track_metadata(int index, bool notify, bool probe, bool audio_tags,
     metadata_request_perf_us = ui_perf_now_us();
 #endif
     metadata_ui_notify = notify;
-    metadata_notify_ready = false;
+    metadata_count_play = metadata_notify_ready = false;
     plugin_now_playing_loaded = false;
     metadata_ui_audio_generation = audio_get_playback_generation();
-    metadata_favorite_revision = ++favorite_ui_revision;
+    metadata_rating_revision = ++rating_ui_revision;
     metadata_ui_request = request;
     if (submit_request) track_metadata_submit(TRACK_METADATA_CURRENT, &request);
     /* Cancel a cover result even if a new queue reuses the same slot. */
@@ -455,13 +505,13 @@ void prepare_track_metadata(int index, bool notify, bool probe, bool audio_tags,
     refresh_now_playing_indicators();
     char title[128], folder[128];
     get_display_names(path, title, sizeof(title), folder, sizeof(folder));
-    player_set_track_display_text(request.metadata.has_title ? request.metadata.title : title,
+    apply_track_display_text(index, request.metadata.has_title ? request.metadata.title : title,
                                   request.metadata.has_artist ? request.metadata.artist : folder,
                                   request.metadata.has_album ? request.metadata.album : "");
     player_reset_now_playing_extras();
-    favorite_track_known = false;
-    favorite_toggle_pending = false;
-    show_favorite_state(false);
+    rating_track_known = false;
+    pending_stars = -1;
+    show_now_playing_rating(0);
 
     player_progress_display_reset();
 
@@ -470,7 +520,7 @@ void prepare_track_metadata(int index, bool notify, bool probe, bool audio_tags,
         lv_obj_remove_flag(song_count_label, LV_OBJ_FLAG_HIDDEN);
     }
     /* Cached catalog tags can identify artwork immediately even while the
-     * fresh audio tags/favorite are pending. Later changed album identity
+     * fresh audio tags/rating are pending. Later changed album identity
      * cancels/replaces this request through the normal generation guard. */
     if ((!request.read_file && !request.read_audio) || request.metadata.has_title ||
         request.metadata.has_artist || request.metadata.has_album)
@@ -503,6 +553,7 @@ void request_track_audio_metadata(int index) {
         metadata_ui_request.read_audio = true;
         metadata_ui_request.audio_generation = audio_get_playback_generation();
     }
+    metadata_count_play = true;
     metadata_ui_audio_generation = audio_get_playback_generation();
     track_metadata_submit(TRACK_METADATA_CURRENT, &metadata_ui_request);
 }
@@ -546,8 +597,9 @@ void arm_next_track_for_audio(int index) {
 }
 
 static void poll_track_started_notification(void) {
-    if (!metadata_ui_notify || !metadata_notify_ready) return;
+    if (!metadata_ui_notify) return;
     if (audio_get_playback_generation() != metadata_ui_audio_generation) {
+        metadata_count_play = false;
         metadata_ui_notify = false;
         metadata_notify_ready = false;
         return;
@@ -555,7 +607,14 @@ static void poll_track_started_notification(void) {
     audio_playback_progress_t progress;
     if (!audio_get_playback_progress(metadata_ui_path, &progress) ||
         progress.generation != metadata_ui_audio_generation ||
-        progress.state != AUDIO_PLAYBACK_PROGRESS_ACTIVE ||
+        (progress.state != AUDIO_PLAYBACK_PROGRESS_ACTIVE &&
+         progress.state != AUDIO_PLAYBACK_PROGRESS_NATURAL_EOF &&
+         progress.state != AUDIO_PLAYBACK_PROGRESS_MANUAL_STOP)) return;
+    if (metadata_count_play) {
+        metadata_count_play = false;
+        track_metadata_count_play(metadata_ui_path);
+    }
+    if (!metadata_notify_ready || progress.state != AUDIO_PLAYBACK_PROGRESS_ACTIVE ||
         (!progress.is_playing && !progress.is_paused)) return;
 #ifndef HOST_BUILD
     hiby_sys_server_report_metadata(metadata_notify_payload.title, metadata_notify_payload.artist,
@@ -605,12 +664,12 @@ void gui_player_poll_track_metadata(void) {
     poll_track_started_notification();
     retry_subsonic_cover_on_wifi();
     track_metadata_result_t result;
-    if (track_metadata_take(TRACK_METADATA_FAVORITE, &result) &&
-        result.request.token == favorite_request_token && favorite_request_revision == favorite_ui_revision &&
+    if (track_metadata_take(TRACK_METADATA_RATING, &result) &&
+        result.request.token == rating_request_token && rating_request_revision == rating_ui_revision &&
         gui_player_has_active_track() &&
         strcmp(result.request.path, gui_player_get_current_track_path()) == 0 &&
-        strcmp(result.request.path, favorite_request_path) == 0)
-        apply_loaded_favorite(result.favorite);
+        strcmp(result.request.path, rating_request_path) == 0)
+        apply_loaded_rating(result.stars);
     if (track_metadata_take(TRACK_METADATA_NEXT, &result) &&
         result.request.token == metadata_next_token && player_queue_model_revision() == metadata_next_queue_revision &&
         audio_get_playback_generation() == metadata_next_audio_generation &&
@@ -660,12 +719,12 @@ void gui_player_poll_track_metadata(void) {
         strcmp(result.request.path, metadata_ui_path) != 0) return;
     if (result.display_hint) {
         /* A catalog snapshot can reach us before audio startup on a RAM
-         * cache miss. Show it without finalizing lyrics, favorites, format
+         * cache miss. Show it without finalizing lyrics, ratings, format
          * or plugin notifications; fresh file tags still own those. */
         char title[128], folder[128];
         get_display_names(result.request.path, title, sizeof(title), folder, sizeof(folder));
         track_metadata_t * hint = &result.request.metadata;
-        player_set_track_display_text(hint->has_title ? hint->title : title,
+        apply_track_display_text(player_queue_model_current(), hint->has_title ? hint->title : title,
                                       hint->has_artist ? hint->artist : folder,
                                       hint->has_album ? hint->album : "");
         dispatch_track_artwork(player_queue_model_current(), result.request.path, hint, result.request.token);
@@ -678,11 +737,11 @@ void gui_player_poll_track_metadata(void) {
            (unsigned long long) result.request.token);
 #endif
     if (metadata_scalar_applied_token != result.request.token) {
-        apply_loaded_track_metadata(player_queue_model_current(), &result.request.metadata, result.favorite,
+        apply_loaded_track_metadata(player_queue_model_current(), &result.request.metadata, result.stars,
                                      !result.enrichment_pending);
         metadata_scalar_applied_token = result.request.token;
-    } else if (!result.enrichment_pending && metadata_favorite_revision == favorite_ui_revision) {
-        apply_loaded_favorite(result.favorite);
+    } else if (!result.enrichment_pending && metadata_rating_revision == rating_ui_revision) {
+        apply_loaded_rating(result.stars);
     }
     if (metadata_ui_notify) {
         metadata_notify_payload = result.request.metadata;
@@ -744,21 +803,58 @@ void player_metadata_request_current_for_init(void) {
     request.read_file = seed_track_metadata(player_queue_model_current(), &request.metadata);
     snprintf(metadata_ui_path, sizeof(metadata_ui_path), "%s", request.path);
     metadata_ui_audio_generation = audio_get_playback_generation();
-    metadata_favorite_revision = favorite_ui_revision;
+    metadata_rating_revision = rating_ui_revision;
     track_metadata_submit(TRACK_METADATA_CURRENT, &request);
 }
 
-/* The queue was cleared: drop every in-flight metadata and favorite result. */
+/* The queue was cleared: drop every in-flight metadata and rating result. */
 void player_metadata_invalidate_queue(void) {
     ++metadata_ui_token;
     ++metadata_next_token;
     next_metadata_cached = false;
     next_metadata_cached_path[0] = '\0';
-    ++favorite_ui_revision;
+    ++rating_ui_revision;
 }
 
-/* The UI is being torn down: drop in-flight current and favorite results. */
+/* The UI is being torn down: drop in-flight current and rating results. */
 void player_metadata_invalidate_ui(void) {
     ++metadata_ui_token;
-    ++favorite_ui_revision;
+    ++rating_ui_revision;
+}
+
+void gui_player_poll_stream_metadata(void) {
+    static uint64_t artwork_stream_id;
+    static char artwork_url[1536];
+    if (!gui_player_has_active_track()) return;
+    const char * path = gui_player_get_current_track_path();
+    track_source_t source;
+    track_source_resolve(player_queue_model_current(), path, &source);
+    if (source.is_subsonic || source.is_remote || !is_http_url(path)) return;
+    if (station_metadata_token != metadata_ui_token || station_index != player_queue_model_current() ||
+        strcmp(metadata_ui_path, path)) return;
+    icy_metadata_t metadata;
+    if (!http_stream_metadata_for_url(path, &metadata)) return;
+    const char * title = metadata.title[0] ? metadata.title : station_title;
+    const char * artist = metadata.title[0] ? metadata.artist : station_artist;
+    if (strcmp(gui_player_get_now_playing_title(), title) ||
+        strcmp(gui_player_get_now_playing_folder(), artist) ||
+        strcmp(gui_player_get_now_playing_album(), metadata.title[0] ? "" : station_album)) {
+        player_set_track_display_text(title, artist, metadata.title[0] ? "" : station_album);
+        player_transition_mark_dirty();
+    }
+    if (!metadata.artwork_url[0]) {
+        if (artwork_stream_id == metadata.stream_id && artwork_url[0]) {
+            cover_decode_request_t no_art = { .for_index = player_queue_model_current() };
+            cover_decode_request_snapshot_frost(&no_art);
+            launch_cover_decode_req(no_art);
+            artwork_url[0] = '\0';
+        }
+        return;
+    }
+    if ((artwork_stream_id == metadata.stream_id && !strcmp(artwork_url, metadata.artwork_url))) return;
+    launch_cover_decode_from_url(player_queue_model_current(), metadata.artwork_url, true);
+    if (player_artwork_jobs_active() || player_artwork_jobs_pending()) {
+        artwork_stream_id = metadata.stream_id;
+        snprintf(artwork_url, sizeof(artwork_url), "%s", metadata.artwork_url);
+    }
 }

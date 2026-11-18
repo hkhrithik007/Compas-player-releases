@@ -1,12 +1,13 @@
 #include "track_metadata_worker.h"
 #include "../metadata/db/metadata_db.h"
-#include "../playlists/favorite_writer.h"
+#include "../playlists/rating_writer.h"
 #include "../../core/ui/display/ui_wake.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <sys/prctl.h>
 
 #define PLAY_EVENT_CAPACITY 64
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -20,7 +21,7 @@ static bool completed_valid[TRACK_METADATA_LANES];
 static uint64_t latest[TRACK_METADATA_LANES];
 static char * play_events[PLAY_EVENT_CAPACITY];
 static unsigned play_head, play_count;
-static bool serviced_metadata;
+static bool serviced_metadata, play_inflight;
 
 static bool make_display_hint(track_metadata_result_t * result) {
     track_metadata_request_t * request = &result->request;
@@ -61,24 +62,42 @@ static bool make_display_hint(track_metadata_result_t * result) {
     return true;
 }
 
+/* Enters with mutex held and returns unlocked, including during the DB write. */
+static void process_play_event(void) {
+    serviced_metadata = false;
+    char *path = play_events[play_head];
+    play_head = (play_head + 1) % PLAY_EVENT_CAPACITY;
+    --play_count;
+    play_inflight = true;
+    pthread_mutex_unlock(&mutex);
+    metadata_db_song_play_count_increment(path);
+    free(path);
+    pthread_mutex_lock(&mutex);
+    play_inflight = false;
+    pthread_mutex_unlock(&mutex);
+}
+
+bool track_metadata_history_ready(void) {
+    pthread_mutex_lock(&mutex);
+    bool drained = !play_count && !play_inflight;
+    pthread_mutex_unlock(&mutex);
+    return drained;
+}
+
 static void * worker(void * unused) {
+    (void) prctl(PR_SET_NAME, "track_meta");
     (void) unused;
     for (;;) {
         pthread_mutex_lock(&mutex);
-        while (!pending_valid[0] && !pending_valid[1] && !pending_valid[2] && !play_count)
+        while (!pending_valid[0] && !pending_valid[1] && !pending_valid[2] && !pending_valid[3] && !play_count)
             pthread_cond_wait(&cond, &mutex);
         /* Manual CURRENT display work goes first; NEXT remains independently queued. */
         int lane = pending_valid[TRACK_METADATA_CURRENT] ? TRACK_METADATA_CURRENT :
                    pending_valid[TRACK_METADATA_NEXT] ? TRACK_METADATA_NEXT :
-                   pending_valid[TRACK_METADATA_FAVORITE] ? TRACK_METADATA_FAVORITE : -1;
+                   pending_valid[TRACK_METADATA_RATING] ? TRACK_METADATA_RATING :
+                   pending_valid[TRACK_METADATA_POPUP] ? TRACK_METADATA_POPUP : -1;
         if (play_count && (lane < 0 || (serviced_metadata && lane != TRACK_METADATA_NEXT))) {
-            serviced_metadata = false;
-            char * path = play_events[play_head];
-            play_head = (play_head + 1) % PLAY_EVENT_CAPACITY;
-            --play_count;
-            pthread_mutex_unlock(&mutex);
-            metadata_db_song_play_count_increment(path);
-            free(path);
+            process_play_event();
             continue;
         }
         serviced_metadata = true;
@@ -130,7 +149,7 @@ static void * worker(void * unused) {
             if (provisional_published) ui_wake_notify();
         }
         if (!obsolete && lane != TRACK_METADATA_NEXT) {
-            result.favorite = favorite_writer_is_set(result.request.path);
+            result.stars = rating_writer_stars(result.request.path);
             if (result.request.probe)
                 result.has_probe = audio_probe_file_format(result.request.path, &result.probe);
         }

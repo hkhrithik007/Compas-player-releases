@@ -1,5 +1,4 @@
 #include "subsonic_client.h"
-#include "../../ui/text/i18n/i18n.h"
 #include "../http/client/http_client.h"
 
 #include "mbedtls/md5.h"
@@ -12,6 +11,10 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <math.h>
+#include <pthread.h>
+#include "../../library/remote/subsonic/subsonic_cache.h"
+#include "../../library/text/lyrics/lyrics.h"
 
 #define SUBSONIC_API_VERSION "1.16.1"
 #define SUBSONIC_CLIENT_NAME "Compas"
@@ -28,13 +31,17 @@
  * that support it answer with just the lastModified timestamp. */
 #define SUBSONIC_FAR_FUTURE_MS "4102444800000"
 
-static _Thread_local char api_error[128];
+static _Thread_local subsonic_error_t api_error;
 static _Thread_local int api_error_code; /* the server's error code, 0 when none */
 
 int subsonic_last_error_code(void) { return api_error_code; }
 
-const char * subsonic_last_error(void) {
-    return api_error[0] ? api_error : TR("Unexpected library response");
+subsonic_error_t subsonic_last_error(void) { return api_error; }
+
+static void api_error_set(subsonic_error_kind_t kind, int number, const char * detail) {
+    api_error.kind = kind;
+    api_error.number = number;
+    snprintf(api_error.detail, sizeof(api_error.detail), "%s", detail ? detail : "");
 }
 
 /* False when out is too small for the whole encoding (out is then cut). */
@@ -119,7 +126,7 @@ void subsonic_normalize_base_url(const char * input, char * out, size_t out_size
 }
 
 static void api_error_clear(void) {
-    api_error[0] = '\0';
+    memset(&api_error, 0, sizeof(api_error));
     api_error_code = 0;
 }
 
@@ -133,7 +140,7 @@ static bool api_build_request(const subsonic_server_t * server, const char * end
     int url_len = extra_params ? snprintf(request->url, sizeof(request->url), "%s/rest/%s?%s&%s", base_url, endpoint, auth, extra_params)
                                : snprintf(request->url, sizeof(request->url), "%s/rest/%s?%s", base_url, endpoint, auth);
     if (url_len < 0 || (size_t) url_len >= sizeof(request->url)) { /* never send a clipped URL */
-        snprintf(api_error, sizeof(api_error), "Request is too long");
+        api_error_set(SUBSONIC_ERROR_REQUEST_TOO_LONG, 0, NULL);
         return false;
     }
     request->method = HTTP_METHOD_GET;
@@ -152,12 +159,11 @@ static cJSON * api_fetch_json(const http_request_t * request, http_cancel_token_
     bool ok = http_request_ex(request, cancel, &http_response);
     if (!ok || http_response.status != 200 || !http_response.body) {
         if (!ok)
-            snprintf(api_error, sizeof(api_error), "Server request failed: %s",
-                     http_response.error ? http_response.error : "network error");
+            api_error_set(SUBSONIC_ERROR_REQUEST_FAILED, 0, http_response.error);
         else if (http_response.status != 200)
-            snprintf(api_error, sizeof(api_error), "Server returned HTTP %d", http_response.status);
+            api_error_set(SUBSONIC_ERROR_HTTP_STATUS, http_response.status, NULL);
         else
-            snprintf(api_error, sizeof(api_error), "Server returned an empty response");
+            api_error_set(SUBSONIC_ERROR_EMPTY_RESPONSE, 0, NULL);
         http_response_free(&http_response);
         return NULL;
     }
@@ -165,7 +171,7 @@ static cJSON * api_fetch_json(const http_request_t * request, http_cancel_token_
     cJSON * root = cJSON_ParseWithLength((const char *) http_response.body, http_response.body_len);
     http_response_free(&http_response);
     if (!root) {
-        snprintf(api_error, sizeof(api_error), "Server returned invalid JSON");
+        api_error_set(SUBSONIC_ERROR_INVALID_JSON, 0, NULL);
         return NULL;
     }
 
@@ -176,7 +182,7 @@ static cJSON * api_fetch_json(const http_request_t * request, http_cancel_token_
 static cJSON * api_response_ok(cJSON * root) {
     cJSON * resp = cJSON_GetObjectItemCaseSensitive(root, "subsonic-response");
     if (!resp) {
-        snprintf(api_error, sizeof(api_error), "Server response is not Subsonic JSON");
+        api_error_set(SUBSONIC_ERROR_NOT_SUBSONIC_JSON, 0, NULL);
         cJSON_Delete(root);
         return NULL;
     }
@@ -187,9 +193,9 @@ static cJSON * api_response_ok(cJSON * root) {
         cJSON * code = cJSON_GetObjectItemCaseSensitive(error, "code");
         if (cJSON_IsNumber(code)) {
             api_error_code = code->valueint;
-            snprintf(api_error, sizeof(api_error), "Subsonic error %d", code->valueint);
+            api_error_set(SUBSONIC_ERROR_SERVER, code->valueint, NULL);
         } else
-            snprintf(api_error, sizeof(api_error), "Invalid Subsonic response status");
+            api_error_set(SUBSONIC_ERROR_INVALID_STATUS, 0, NULL);
         cJSON_Delete(root);
         return NULL;
     }
@@ -198,16 +204,22 @@ static cJSON * api_response_ok(cJSON * root) {
 }
 
 /* Caller owns *out_root upon success. */
-static cJSON * api_request(const subsonic_server_t * server, const char * endpoint, const char * extra_params,
-                           cJSON ** out_root, http_cancel_token_t * cancel) {
+static cJSON * api_request_limited(const subsonic_server_t * server, const char * endpoint, const char * extra_params,
+                           cJSON ** out_root, http_cancel_token_t * cancel, size_t limit) {
     api_error_clear();
     http_request_t request = {0};
     if (!api_build_request(server, endpoint, extra_params, &request)) return NULL;
+    request.max_response_bytes = limit;
     cJSON * root = api_fetch_json(&request, cancel);
     if (!root) return NULL;
     cJSON * resp = api_response_ok(root);
     if (resp) *out_root = root;
     return resp;
+}
+
+static cJSON * api_request(const subsonic_server_t * server, const char * endpoint, const char * extra_params,
+                           cJSON ** out_root, http_cancel_token_t * cancel) {
+    return api_request_limited(server, endpoint, extra_params, out_root, cancel, SUBSONIC_MAX_API_RESPONSE);
 }
 
 /* Preserve the original 256-byte encoded-id limit, but never send a cut id. */
@@ -219,7 +231,7 @@ static bool id_params(const char * id, char * out, size_t size) {
         if (n >= 0 && (size_t) n < size) return true;
     }
     if (size) out[0] = '\0';
-    snprintf(api_error, sizeof(api_error), "Request is too long");
+    api_error_set(SUBSONIC_ERROR_REQUEST_TOO_LONG, 0, NULL);
     return false;
 }
 
@@ -411,6 +423,10 @@ static bool pack_albums(cJSON * array, subsonic_album_t ** out, int * out_count)
 
 static void parse_song(cJSON * item, const char * container_album_artist, subsonic_song_t * song) {
     snprintf(song->id, sizeof(song->id), "%s", json_str(item, "id", ""));
+    const char * artist_id = json_str(item, "artistId", "");
+    const char * album_id = json_str(item, "albumId", "");
+    snprintf(song->artist_id, sizeof(song->artist_id), "%s", strlen(artist_id) < sizeof(song->artist_id) ? artist_id : "");
+    snprintf(song->album_id, sizeof(song->album_id), "%s", strlen(album_id) < sizeof(song->album_id) ? album_id : "");
     utf8_truncate_safe(song->title, json_str(item, "title", "(unknown)"), sizeof(song->title));
     utf8_sanitize(song->title);
     utf8_truncate_safe(song->artist, json_str(item, "artist", ""), sizeof(song->artist));
@@ -433,6 +449,19 @@ static void parse_song(cJSON * item, const char * container_album_artist, subson
     song->bit_depth = json_positive_uint(item, "bitDepth");
     song->channels = json_positive_uint(item, "channelCount");
     song->bitrate_kbps = json_positive_uint(item, "bitRate");
+}
+
+bool subsonic_get_song(const subsonic_server_t * server, const char * song_id,
+                       subsonic_song_t * song, http_cancel_token_t * cancel) {
+    char params[272];
+    if (!song || !id_params(song_id, params, sizeof(params))) return false;
+    cJSON * root = NULL;
+    cJSON * resp = api_request(server, "getSong.view", params, &root, cancel);
+    cJSON * item = cJSON_GetObjectItemCaseSensitive(resp, "song");
+    bool ok = cJSON_IsObject(item);
+    if (ok) { memset(song, 0, sizeof(*song)); parse_song(item, NULL, song); }
+    cJSON_Delete(root);
+    return ok;
 }
 
 /* A member that may be missing but, when present, must be an array. */
@@ -784,6 +813,39 @@ bool subsonic_get_random_songs(const subsonic_server_t * server, int size, subso
     return ok;
 }
 
+bool subsonic_search3(const subsonic_server_t * server, const char * query, int limit,
+                      subsonic_artist_t ** out_artists, int * out_artist_count,
+                      subsonic_album_t ** out_albums, int * out_album_count,
+                      subsonic_song_t ** out_songs, int * out_song_count, http_cancel_token_t * cancel) {
+    *out_artists = NULL; *out_artist_count = 0;
+    *out_albums = NULL; *out_album_count = 0;
+    *out_songs = NULL; *out_song_count = 0;
+    if (!query || !query[0] || limit <= 0 || limit > 100) return false;
+    char encoded[URL_ID_ENC_MAX], params[URL_ID_ENC_MAX + 128];
+    if (strlen(query) > URL_ID_MAX || !url_encode(query, encoded, sizeof(encoded))) return false;
+    snprintf(params, sizeof(params), "query=%s&artistCount=%d&artistOffset=0&albumCount=%d&albumOffset=0&songCount=%d&songOffset=0",
+             encoded, limit, limit, limit);
+    cJSON * root = NULL;
+    cJSON * resp = api_request(server, "search3.view", params, &root, cancel);
+    if (!resp) return false;
+    cJSON * result = cJSON_GetObjectItemCaseSensitive(resp, "searchResult3");
+    cJSON * artists, * albums, * songs;
+    bool ok = cJSON_IsObject(result) && optional_array(result, "artist", &artists) &&
+              optional_array(result, "album", &albums) && optional_array(result, "song", &songs);
+    if (ok) ok = pack_list(artists, sizeof(subsonic_artist_t), SUBSONIC_ARTIST_TEXT_FIELDS,
+                           pack_artist, (void **) out_artists, out_artist_count) &&
+                 pack_albums(albums, out_albums, out_album_count) &&
+                 songs_from_array(songs, NULL, out_songs, out_song_count);
+    cJSON_Delete(root);
+    if (!ok) {
+        free(*out_artists); free(*out_albums); free(*out_songs);
+        *out_artists = NULL; *out_artist_count = 0;
+        *out_albums = NULL; *out_album_count = 0;
+        *out_songs = NULL; *out_song_count = 0;
+    }
+    return ok;
+}
+
 bool subsonic_get_starred(const subsonic_server_t * server, subsonic_starred_t * out, http_cancel_token_t * cancel) {
     memset(out, 0, sizeof(*out));
     cJSON * root = NULL;
@@ -850,4 +912,178 @@ void subsonic_build_cover_art_url(const subsonic_server_t * server, const char *
     clear_if_cut(len, out_url, out_url_size);
     if (size_px > 0 && out_url[0])
         clear_if_cut(len + snprintf(out_url + len, out_url_size - (size_t) len, "&size=%d", size_px), out_url, out_url_size);
+}
+
+static uint32_t lyrics_time_ms(double start, double offset) {
+    double shifted = start - offset;
+    if (shifted <= 0) return 0;
+    if (shifted >= LYRICS_MAX_TIME_MS) return LYRICS_MAX_TIME_MS;
+    return (uint32_t)shifted;
+}
+
+static char * structured_lyrics_text(cJSON * doc, bool synced) {
+    cJSON * lines = cJSON_GetObjectItemCaseSensitive(doc, "line");
+    if (!cJSON_IsArray(lines) || cJSON_GetArraySize(lines) > LYRICS_MAX_LINES) return NULL;
+    char * text = malloc(LYRICS_MAX_FILE_BYTES + 1);
+    if (!text) return NULL;
+    size_t used = 0;
+    double offset = 0;
+    cJSON * bias = cJSON_GetObjectItemCaseSensitive(doc, "offset");
+    if (cJSON_IsNumber(bias) && isfinite(bias->valuedouble)) offset = bias->valuedouble;
+    cJSON * line;
+    cJSON_ArrayForEach(line, lines) {
+        const char * value = json_str(line, "value", "");
+        size_t len = strlen(value);
+        if (len > LYRICS_MAX_LINE_BYTES || used + len + 40 > LYRICS_MAX_FILE_BYTES) { free(text); return NULL; }
+        if (synced) {
+            cJSON * start = cJSON_GetObjectItemCaseSensitive(line, "start");
+            if (!cJSON_IsNumber(start) || !isfinite(start->valuedouble) || start->valuedouble < 0) continue;
+            uint32_t ms = lyrics_time_ms(start->valuedouble, offset);
+            /* A space prevents bracketed lyric text becoming another LRC tag. */
+            used += (size_t)snprintf(text + used, 40, "[%02u:%02u.%03u] ", ms / 60000, ms / 1000 % 60, ms % 1000);
+        }
+        for (size_t i = 0; i < len; ++i)
+            text[used++] = synced && (value[i] == '\n' || value[i] == '\r') ? ' ' : value[i];
+        text[used++] = '\n';
+    }
+    if (!used) { free(text); return NULL; }
+    text[used] = '\0';
+    char * small = realloc(text, used + 1);
+    return small ? small : text;
+}
+
+/* One server capability is cached for the current session. */
+static char lyrics_capability_key[SUBSONIC_CACHE_KEY_SIZE];
+static bool lyrics_capability_supported;
+static pthread_mutex_t lyrics_capability_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static bool server_song_lyrics(const subsonic_server_t * server, http_cancel_token_t * cancel) {
+    char key[SUBSONIC_CACHE_KEY_SIZE];
+    subsonic_cache_server_key(server, key);
+    pthread_mutex_lock(&lyrics_capability_mutex);
+    if (lyrics_capability_key[0] && !strcmp(lyrics_capability_key, key)) {
+        bool supported = lyrics_capability_supported;
+        pthread_mutex_unlock(&lyrics_capability_mutex);
+        return supported;
+    }
+    pthread_mutex_unlock(&lyrics_capability_mutex);
+    cJSON * root = NULL;
+    cJSON * resp = api_request_limited(server, "getOpenSubsonicExtensions.view", NULL, &root, cancel, 64 * 1024);
+    bool song_lyrics = false;
+    cJSON * extensions = cJSON_GetObjectItemCaseSensitive(resp, "openSubsonicExtensions");
+    if (cJSON_IsArray(extensions)) {
+        cJSON * extension;
+        cJSON_ArrayForEach(extension, extensions) {
+            if (!strcmp(json_str(extension, "name", ""), "songLyrics")) song_lyrics = true;
+        }
+    }
+    bool known = resp != NULL || api_error_code == SUBSONIC_ERROR_NOT_FOUND ||
+                 (api_error.kind == SUBSONIC_ERROR_HTTP_STATUS && api_error.number == 404);
+    cJSON_Delete(root);
+    if (known && !http_cancel_token_is_cancelled(cancel)) {
+        pthread_mutex_lock(&lyrics_capability_mutex);
+        snprintf(lyrics_capability_key, sizeof(lyrics_capability_key), "%s", key);
+        lyrics_capability_supported = song_lyrics;
+        pthread_mutex_unlock(&lyrics_capability_mutex);
+    }
+    return song_lyrics;
+}
+
+static char * find_structured_lyrics(cJSON * docs, bool synced) {
+    if (!cJSON_IsArray(docs)) return NULL;
+    cJSON * doc;
+    cJSON_ArrayForEach(doc, docs) {
+        bool doc_synced = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(doc, "synced"));
+        if (doc_synced != synced) continue;
+        char * text = structured_lyrics_text(doc, synced);
+        if (text) return text;
+    }
+    return NULL;
+}
+
+static bool request_structured_lyrics(const subsonic_server_t * server, const char * song_id,
+                                      cJSON ** root, char ** text, bool * synced,
+                                      http_cancel_token_t * cancel) {
+    char params[1600];
+    if (!id_params(song_id, params, sizeof(params))) return false;
+    cJSON * resp = api_request_limited(server, "getLyricsBySongId.view", params, root, cancel,
+                                       LYRICS_MAX_FILE_BYTES * 2);
+    cJSON * list = cJSON_GetObjectItemCaseSensitive(resp, "lyricsList");
+    cJSON * docs = cJSON_GetObjectItemCaseSensitive(list, "structuredLyrics");
+    *text = find_structured_lyrics(docs, true);
+    if (*text) {
+        *synced = true;
+    } else {
+        *text = find_structured_lyrics(docs, false);
+    }
+    return resp != NULL;
+}
+
+static bool request_classic_lyrics(const subsonic_server_t * server, const char * artist,
+                                   const char * title, cJSON ** root, char ** text,
+                                   http_cancel_token_t * cancel) {
+    char artist_enc[512], title_enc[512], params[1600];
+    if (!url_encode(artist ? artist : "", artist_enc, sizeof(artist_enc)) ||
+        !url_encode(title ? title : "", title_enc, sizeof(title_enc))) return false;
+    snprintf(params, sizeof(params), "artist=%s&title=%s", artist_enc, title_enc);
+    cJSON * resp = api_request_limited(server, "getLyrics.view", params, root, cancel,
+                                       LYRICS_MAX_FILE_BYTES * 2);
+    cJSON * lyrics = cJSON_GetObjectItemCaseSensitive(resp, "lyrics");
+    const char * value = json_str(lyrics, "value", "");
+    size_t len = strlen(value);
+    if (len && len <= LYRICS_MAX_FILE_BYTES) *text = strdup(value);
+    return resp != NULL;
+}
+
+bool subsonic_get_lyrics(const subsonic_server_t * server, const char * song_id,
+                         const char * artist, const char * title, char ** text,
+                         bool * synced, http_cancel_token_t * cancel) {
+    *text = NULL;
+    *synced = false;
+    bool song_lyrics = server_song_lyrics(server, cancel);
+    if (http_cancel_token_is_cancelled(cancel)) return false;
+    cJSON * root = NULL;
+    bool ok = song_lyrics ? request_structured_lyrics(server, song_id, &root, text, synced, cancel)
+                          : request_classic_lyrics(server, artist, title, &root, text, cancel);
+    cJSON_Delete(root);
+    if (cancel && http_cancel_token_is_cancelled(cancel)) { free(*text); *text = NULL; return false; }
+    return ok;
+}
+
+/* Snapshot the selected endpoint policy independently of UI metadata. */
+static pthread_mutex_t stream_policy_mutex = PTHREAD_MUTEX_INITIALIZER;
+typedef struct stream_policy {
+    char prefix[sizeof(((subsonic_server_t *)0)->base_url) + 32];
+    struct stream_policy *next;
+} stream_policy_t;
+static stream_policy_t *stream_tls_exceptions;
+
+void subsonic_stream_policy_set(const char *base_url, bool verify_tls) {
+    char base[sizeof(((subsonic_server_t *)0)->base_url)] = "";
+    if (base_url && strlen(base_url) < sizeof(base))
+        subsonic_normalize_base_url(base_url, base, sizeof(base));
+    if (strncmp(base, "https://", 8)) return;
+    char prefix[sizeof(base) + 32];
+    snprintf(prefix, sizeof(prefix), "%s/rest/stream.view?", base);
+    pthread_mutex_lock(&stream_policy_mutex);
+    stream_policy_t **link = &stream_tls_exceptions;
+    while (*link && strcmp((*link)->prefix, prefix)) link = &(*link)->next;
+    if (verify_tls && *link) {
+        stream_policy_t *old = *link;
+        *link = old->next;
+        free(old);
+    } else if (!verify_tls && !*link) {
+        *link = calloc(1, sizeof(**link));
+        if (*link) snprintf((*link)->prefix, sizeof((*link)->prefix), "%s", prefix);
+    }
+    pthread_mutex_unlock(&stream_policy_mutex);
+}
+
+bool subsonic_stream_verify_tls(const char *url) {
+    pthread_mutex_lock(&stream_policy_mutex);
+    bool verify = true;
+    for (stream_policy_t *p = stream_tls_exceptions; url && p; p = p->next)
+        if (!strncmp(url, p->prefix, strlen(p->prefix))) { verify = false; break; }
+    pthread_mutex_unlock(&stream_policy_mutex);
+    return verify;
 }

@@ -1,5 +1,6 @@
 #include "screen_builders.h"
 #include "screen_builders_internal.h"
+#include "../lists/scroll_blit.h"
 #include "../../plugins/gui_plugins.h"
 #include "../../shell/gui_navigation.h"
 #include "../../assets/assets.h"
@@ -316,12 +317,15 @@ static lv_obj_t * screen_list_body(lv_obj_t * scr, int32_t header_h, int32_t bot
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
     screen_builders_configure_content_scrollbar(list);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    ui_marquee_list_enable(list);
     /* track_cross_place (3rd arg) set to CENTER centers the column track within
      * the container, ensuring narrower rows are properly centered rather than left-aligned. */
     lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_gap(list, row_gap, 0);
     lv_obj_set_style_pad_top(list, GUI_ROW_GAP, 0);
     lv_obj_set_style_pad_bottom(list, BOARD_SCALE_PX(8), 0);
+    /* Reuse scrolled pixels when the renderer proves the list is safe to copy. */
+    ui_scroll_blit_enable(list);
     return list;
 }
 
@@ -329,13 +333,16 @@ static lv_obj_t * screen_list_body(lv_obj_t * scr, int32_t header_h, int32_t bot
  * explicit plugin dimensions, which are clamped to the shared plugin range. */
 static void pill_row_size(const pill_list_item_t * item, int32_t * out_width, int32_t * out_height) {
     int32_t height = ui_list_row_height();
-    int32_t font_min = lv_font_get_line_height(pill_row_resolve_text_size(item->text_size)) + 32;
+    int32_t font_min = lv_font_get_line_height(pill_row_resolve_text_size(item->text_size)) + BOARD_SCALE_PX(32);
     if (height < font_min) height = font_min;
     int32_t width = pill_row_default_width();
     if (item->row_height > 0) {
         height = item->row_height;
         if (height < PILL_ROW_HEIGHT_MIN) height = PILL_ROW_HEIGHT_MIN;
         if (height > PILL_ROW_HEIGHT_MAX) height = PILL_ROW_HEIGHT_MAX;
+        /* Plugin dimensions may enlarge a standard pill, never shrink its
+         * touch target or the space required by the current font. */
+        height = LV_MAX(height, LV_MAX(ui_list_row_height(), font_min));
     }
     if (item->row_width > 0) {
         width = item->row_width;
@@ -399,6 +406,8 @@ static void pill_row_add_accessory(lv_obj_t * row, const pill_list_item_t * item
         lv_obj_t * toggle_sw = lv_switch_create(row);
         lv_obj_remove_flag(toggle_sw, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_align(toggle_sw, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(20), 0);
+        lv_obj_t * label = lv_obj_get_child(row, 0);
+        configure_pill_toggle_row_wrap(row, label, toggle_sw);
         if (item->toggle_initial_state) lv_obj_add_state(toggle_sw, LV_STATE_CHECKED);
         if (toggle_accent_style) lv_obj_add_style(toggle_sw, toggle_accent_style, LV_PART_INDICATOR | LV_STATE_CHECKED);
 
@@ -432,9 +441,11 @@ static int32_t pill_list_add_row(lv_obj_t * list, const pill_list_item_t * item,
     lv_obj_t * row = lv_obj_create(list);
     if (item->out_row) *item->out_row = row;
     lv_obj_set_size(row, width, height);
-    if (item->row_height <= 0) lv_obj_add_style(row, &native_row_min_style, 0);
+    lv_obj_add_style(row, &native_row_min_style, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
     lv_obj_add_style(row, &pill_row_bg_style, 0);
+    lv_obj_set_style_opa(row, LV_OPA_40, LV_STATE_DISABLED);
+    lv_obj_set_style_border_opa(row, LV_OPA_30, LV_STATE_DISABLED);
     if (item->has_radius) lv_obj_set_style_radius(row, item->radius, 0);
     if (item->has_bg_color) lv_obj_set_style_bg_color(row, lv_color_hex(item->bg_color), 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
@@ -442,7 +453,13 @@ static int32_t pill_list_add_row(lv_obj_t * list, const pill_list_item_t * item,
 
     pill_row_add_label(row, item, width, icon_px);
     pill_row_add_accessory(row, item, toggle_accent_style);
-    return height;
+    lv_obj_update_layout(row);
+    return lv_obj_get_height(row);
+}
+
+void add_pill_list_rows(lv_obj_t * list, const pill_list_item_t * items, int count) {
+    for (int i = 0; i < count; ++i)
+        pill_list_add_row(list, &items[i], BOARD_SCALE_PX(PILL_ROW_ICON_PX_DEFAULT), gui_theme_accent_style());
 }
 
 lv_obj_t * build_pill_list_screen(const char * title, lv_event_cb_t back_btn_cb,
@@ -769,8 +786,8 @@ lv_obj_t * build_subsonic_list_screen(const char * default_title, lv_obj_t ** ou
     lv_obj_t * list = screen_list_body(scr, STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT,
                                        HOME_INDICATOR_CONTENT_INSET, GUI_ROW_GAP);
 
-    *out_title_label = title_label;
-    *out_list = list;
+    if (out_title_label) *out_title_label = title_label;
+    if (out_list) *out_list = list;
     finalize_screen_navigation(scr);
     return scr;
 }

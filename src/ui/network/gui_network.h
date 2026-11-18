@@ -2,18 +2,25 @@
 #include <lvgl/lvgl.h>
 #include "../../hardware/usb/usb_mode_control.h"
 
+/* Shared DAC guard for external apps and emulators. */
+bool gui_network_dac_mode_active(void);
+
 /* Screen accessors */
 lv_obj_t * gui_network_get_wifi_screen(void);
 lv_obj_t * gui_network_get_bt_screen(void);
 lv_obj_t * gui_network_get_wireless_screen(void);
 lv_obj_t * gui_network_get_bt_dac_screen(void);
-lv_obj_t * gui_network_get_usb_dac_overlay(void);
 
-/* True while USB DAC mode owns the UI -- i.e. the device is presenting
- * itself to a PC as a sound card and its overlay has taken the screen.
- * Deliberately NOT current_settings.usb_mode, which is only a persisted UI
- * hint and can still read DAC after a restart with no cable attached. */
-bool gui_network_usb_dac_mode_active(void);
+bool gui_network_usb_dac_active(void);
+bool gui_network_toggle_usb_dac(void);
+void enable_usb_dac_mode(void);
+void disable_usb_dac_mode(void);
+void gui_network_open_usb_dac(void);
+/* Pause preserves intent; resume requires an enumerated USB host. */
+void gui_network_usb_dac_pause(void);
+void gui_network_usb_dac_resume(void);
+bool gui_network_usb_dac_shutdown(void);
+void gui_network_usb_dac_boot_reconcile(void);
 bool gui_network_usb_prompt_invalidated(void);
 /* Firmware updates may proceed over a verified live ADB session after a
  * Storage host was seen earlier on the same cable session. */
@@ -49,9 +56,12 @@ void gui_network_set_usb_dac_charging_disabled(bool disabled);
 void poll_usb_storage_hotplug(void);
 /* UI-thread snapshot: a real Storage host was observed on this cable session. */
 bool gui_network_usb_storage_session_active(void);
+bool gui_network_usb_storage_switch_pending(void);
 
 void open_wifi_screen(void);
 void open_bluetooth_screen(void);
+void gui_network_bt_open_output_menu(void);
+void gui_network_bt_output_snapshot_ready(void);
 
 /* The Sample Rate screen shows one accessory's rates and edits that
  * accessory's stored entry, so it must redraw when the connected device
@@ -105,7 +115,12 @@ void gui_network_handle_wifi_disabled(void);
  * the caller should draw. Safe to call before the corresponding settings
  * screen has ever been built. */
 bool gui_network_toggle_airplay(void);
+bool gui_network_airplay_active(void);
+/* Defer local playback until release, with a two-second handoff limit. */
+bool gui_network_airplay_disconnect_for_playback(void);
+bool gui_network_airplay_playback_ready(void);
 bool gui_network_toggle_bt_dac(void);
+bool gui_network_bt_dac_active(void);
 void gui_network_open_bt_dac(void);
 bool gui_network_toggle_dlna(void);
 bool gui_network_toggle_remote_control(void);
@@ -113,4 +128,5 @@ bool gui_network_toggle_remote_control(void);
 bool gui_network_airplay_enable_pending(void);
 bool gui_network_usb_dac_pending(void);
 
+void enable_bt_dac_mode(void);
 void disable_bt_dac_mode(void);

@@ -1,14 +1,17 @@
 #include "power_suspend.h"
 #include "battery.h"
+#include "charge_limiter.h"
 #include "../../network/bluetooth/control/bluetooth_control.h"
 #include "../../core/system/logging/db_log.h"
 #include "../../core/process/subprocess.h"
 #include "../../core/persistence/settings.h"
 #include "../../network/wifi/wifi_control.h"
+#include "../../network/wifi/wifi_dhcp.h"
 #include "../../network/radio/aic_radio.h"
 
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,12 +102,50 @@ static void log_suspend_diagnostics(uint32_t slept_ms, bool suspend_write_ok, in
                 wakeup_irq[0] ? wakeup_irq : "(unavailable)");
 }
 
+/* Wi-Fi comes back through the shell's toggle worker (gui_shell_poll picks
+ * this up), so a tap during the restore cannot start a second wifi_on.sh. */
+static atomic_bool wifi_restore_pending;
+/* Set when a Bluetooth restore is queued, cleared once it has finished. The shell cannot see
+ * this detached work, so its own Bluetooth restore waits on it. */
+static atomic_bool bt_restore_pending;
+static bool woke_on_external_power;
+
+#ifndef AXP_WAKE_ARMED_FILE
+#define AXP_WAKE_ARMED_FILE "/sys/module/axp2101_wake/parameters/armed"
+#endif
+
+/* True only while VBUS-insert wake is armed. The module sets the parameter
+ * after arming and clears it when it stops the wake (storm, I2C give-up,
+ * exit). A missing file means the module is not loaded. Directory presence
+ * is not enough: a resident module can be disarmed. One open, no wait. */
+static bool axp2101_wake_is_armed(void) {
+    FILE *f = fopen(AXP_WAKE_ARMED_FILE, "r");
+    if (!f) return false;
+    int value = 0;
+    int got = fscanf(f, "%d", &value);
+    fclose(f);
+    return got == 1 && value == 1;
+}
+
+bool power_suspend_take_wifi_restore(void) {
+    return atomic_exchange(&wifi_restore_pending, false);
+}
+
+bool power_suspend_bt_restore_pending(void) {
+    return atomic_load(&bt_restore_pending);
+}
+
+bool power_suspend_woke_on_external_power(void) {
+    return woke_on_external_power;
+}
+
 static void radio_restore_perform(bool wifi_was_on, bool bt_was_on) {
     if (bt_was_on) {
         bt_control_init_chip();
         bt_control_enable();
+        atomic_store(&bt_restore_pending, false);
     }
-    if (wifi_was_on) wifi_control_enable();
+    if (wifi_was_on) atomic_store(&wifi_restore_pending, true);
 }
 
 /* Restores Bluetooth and Wi-Fi in a detached thread after resume so that
@@ -128,6 +169,7 @@ static int experimental_radio_action(const char * action, int timeout_ms) {
 
 static void queue_radio_restore(bool wifi_was_on, bool bt_was_on) {
     if (!bt_was_on && !wifi_was_on) return;
+    if (bt_was_on) atomic_store(&bt_restore_pending, true);
     uintptr_t flags = (wifi_was_on ? 1u : 0u) | (bt_was_on ? 2u : 0u);
     pthread_t restore_thread;
     if (pthread_create(&restore_thread, NULL, radio_restore_thread_func, (void *)(uintptr_t) flags) == 0) {
@@ -153,19 +195,24 @@ static void * radio_recovery_thread_func(void * arg) {
         }
     }
     SUSPEND_LOG("radio recovery failed: suspend gate remains closed");
+    atomic_store(&bt_restore_pending, false); /* nothing will restore it: do not hold the shell */
     return NULL;
 }
 
 static void queue_radio_recovery(bool wifi_was_on, bool bt_was_on, bool end_only) {
+    if (bt_was_on) atomic_store(&bt_restore_pending, true);
     uintptr_t flags = (wifi_was_on ? 1u : 0u) | (bt_was_on ? 2u : 0u) | (end_only ? 4u : 0u);
     pthread_t thread;
     if (pthread_create(&thread, NULL, radio_recovery_thread_func, (void *) flags) == 0)
         pthread_detach(thread);
-    else
+    else {
         SUSPEND_LOG("radio recovery unavailable: suspend gate remains closed");
+        atomic_store(&bt_restore_pending, false);
+    }
 }
 
 void power_suspend_now(void) {
+    woke_on_external_power = false;
     /* Recheck at the suspend boundary, independently of the UI idle gate.
      * An uncertain sample must never authorize sleeping on external power. */
     if (battery_get_external_power_state() != BATTERY_EXTERNAL_POWER_DISCONNECTED) {
@@ -183,6 +230,7 @@ void power_suspend_now(void) {
         /* The backend blocks new bringups before stopping both physical radios.
          * A completed child is insufficient: require its actual exit status. */
         if (bt_was_on) bt_control_disable(); /* Graceful D-Bus link shutdown. */
+        if (wifi_was_on) wifi_dhcp_stop(); /* the backend kills udhcpc; reap ours first */
         int prepare_status = experimental_radio_action("suspend-prepare", RADIO_UI_ACTION_TIMEOUT_MS);
         if (prepare_status != 0) {
             SUSPEND_LOG("cancelled: experimental radio shutdown failed");
@@ -231,9 +279,23 @@ void power_suspend_now(void) {
         uint32_t sleep_start_ms = diagnostics_enabled ? suspend_duration_ms_now() : 0;
         int suspend_write_errno = 0;
         bool suspend_write_ok = write_sysfs_checked("/sys/power/state", "mem", &suspend_write_errno);
+        bool vbus_present = false;
+        /* Charger wake only if the module is armed. Otherwise a button
+         * press with the cable in would leave the screen off. Armed: one
+         * REG00h read. The 1 Hz sysfs online flag is the fallback when
+         * that read fails, and only CONNECTED counts. No wait. */
+        if (!axp2101_wake_is_armed()) {
+            woke_on_external_power = false;
+        } else if (charge_limiter_vbus_present(&vbus_present)) {
+            woke_on_external_power = vbus_present;
+        } else {
+            battery_external_power_state_t wake_power = battery_get_external_power_state();
+            woke_on_external_power = (wake_power == BATTERY_EXTERNAL_POWER_CONNECTED);
+        }
         if (diagnostics_enabled) {
             log_suspend_diagnostics(suspend_duration_ms_now() - sleep_start_ms, suspend_write_ok, suspend_write_errno);
         }
+        SUSPEND_LOG("woke_on_external_power=%d", woke_on_external_power);
     } else {
         SUSPEND_LOG("cancelled: external power connected or unknown after preparation");
     }

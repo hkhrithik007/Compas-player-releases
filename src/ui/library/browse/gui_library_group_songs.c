@@ -10,15 +10,16 @@
 #include "../../../core/ui/display/ui_wake.h"
 #include "../../../library/playlists/playlist_files.h"
 #include <limits.h>
-#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include "gui_group_songs_internal.h"
+#include "../../../library/remote/remote_state.h"
+#include <pthread.h>
+#include <stdatomic.h>
 
 static void refresh_group_songs_search_now_playing(void);
+static int group_probe_page_start;
 
 bool group_songs_source_is_album = false;
 bool group_songs_loading;
@@ -31,10 +32,8 @@ metadata_db_group_kind_t group_songs_refresh_artist_kind;
 char group_songs_refresh_m3u_path[PATH_MAX];
 char group_songs_refresh_genre[METADATA_DB_TEXT_MAX] = {0};
 /* Shared drill-down target for both Artists and Albums: one persistent
- * screen whose row list is rebuilt each time (same "one object, rebuilt on
- * demand" approach file_browser.c uses for its own directory listing)
- * rather than pre-building a screen per artist/album -- a real library can
- * have hundreds of those, most never opened in a given session. */
+ * screen whose compact browse list is refreshed on demand; M3U edit mode
+ * temporarily swaps in the real-row list required by selection and reorder. */
 lv_obj_t * group_songs_edit_btn;
 group_song_entry_t * group_songs_entries; /* owned -- see set_group_songs_entries() */
 int group_songs_count;
@@ -56,15 +55,10 @@ track_probe_job_t * group_probe_job;
 uint64_t group_probe_generation = 1;
 uint64_t group_probe_job_generation;
 static uint64_t group_probe_requested_generation;
-static int group_probe_page_start;
 bool group_probe_storage_available = true;
 static bool group_probe_retry_pending;
 static uint32_t group_probe_retry_tick;
-/* Now-playing indicator bar -- recreated fresh every populate_group_songs_
- * rows() call (that function's own lv_obj_clean(group_songs_list) destroys
- * whatever was here before, same as every row), so this pointer is only
- * ever valid between one populate call and the next, never stale across
- * one -- see refresh_group_songs_now_playing_indicator()'s own comment. */
+/* Legacy edit-list now-playing bar; compact browsing uses compact_list's pooled marker. */
 lv_obj_t * group_songs_now_playing_bar;
 lv_obj_t * group_songs_visible_rows[GROUP_SONGS_PAGE_SIZE];
 lv_obj_t * group_songs_thumbnail_images[GROUP_SONGS_PAGE_SIZE];
@@ -85,6 +79,7 @@ bool group_songs_edit_mode = false;
  * strcmp every entry again. The two setters below are the only writers of the entry array and
  * paths (the probe path only rewrites titles), and each bumps the generation. */
 static uint64_t group_songs_entries_generation;
+uint64_t group_songs_entries_generation_get(void) { return group_songs_entries_generation; }
 static struct {
     bool valid;
     uint64_t generation;
@@ -126,6 +121,121 @@ static void set_group_songs_entries(const group_song_entry_t * entries, int coun
     group_songs_count = copy_group_song_entries(&group_songs_entries, entries, count) ? count : 0;
 }
 
+static int *favorite_stars;
+static unsigned favorite_generation, favorite_revision;
+static lv_timer_t *favorite_timer;
+typedef struct {
+    pthread_t thread;
+    atomic_bool done;
+    unsigned generation, revision;
+    uint64_t entries_generation;
+    bool most;
+    group_song_entry_t *entries;
+    int *stars, count;
+} group_favorites_job_t;
+static group_favorites_job_t *favorite_job, *most_job;
+static bool most_refresh_pending;
+static void group_collection_schedule(bool most);
+static void group_favorites_schedule(void);
+
+static void group_favorites_clear(void) {
+    ++favorite_generation;
+    if (favorite_timer) lv_timer_delete(favorite_timer);
+    favorite_timer = NULL;
+    free(favorite_stars);
+    favorite_stars = NULL;
+}
+
+static void *group_favorites_load(void *data) {
+    group_favorites_job_t *job = data;
+    char **paths = NULL;
+    if (job->most) metadata_db_load_top_played_songs(MOST_PLAYED_LIMIT, &paths, &job->count);
+    else metadata_db_load_favorite_songs(&paths, &job->count, &job->stars);
+    job->entries = group_song_entries_take_paths(paths, job->count);
+    if (!job->entries) job->count = 0;
+    atomic_store_explicit(&job->done, true, memory_order_release);
+    return NULL;
+}
+
+/* A new list or teardown invalidates the result without blocking the UI. */
+static void group_favorites_job_poll(lv_timer_t *timer) {
+    group_favorites_job_t *job = lv_timer_get_user_data(timer);
+    if (!atomic_load_explicit(&job->done, memory_order_acquire)) return;
+    pthread_join(job->thread, NULL);
+    if (job->most && !most_refresh_pending && group_songs_screen && group_songs_refresh_source == GROUP_SONGS_REFRESH_MOST_PLAYED &&
+        job->entries_generation == group_songs_entries_generation_get()) {
+        group_songs_replace_refreshed_entries(job->entries, job->count);
+        job->entries = NULL;
+    } else if (!job->most && group_songs_screen && job->generation == favorite_generation &&
+        group_songs_refresh_source == GROUP_SONGS_REFRESH_FAVORITES) {
+        free(favorite_stars);
+        favorite_stars = job->stars;
+        favorite_revision = job->revision;
+        cancel_group_song_probes();
+        group_songs_page_start = 0;
+        group_songs_anchor_pending = false;
+        set_group_songs_entries_owned(job->entries, job->count);
+        job->entries = NULL;
+        job->stars = NULL;
+        populate_group_songs_rows();
+    }
+    free_group_song_entries(job->entries, job->count);
+    free(job->stars);
+    if (job->most) most_job = NULL;
+    else favorite_job = NULL;
+    free(job);
+    lv_timer_delete(timer);
+    if (most_refresh_pending && !most_job) {
+        most_refresh_pending = false;
+        if (group_songs_screen && group_songs_refresh_source == GROUP_SONGS_REFRESH_MOST_PLAYED)
+            group_collection_schedule(true);
+    }
+}
+
+static void group_collection_schedule(bool most) {
+    group_favorites_job_t **slot = most ? &most_job : &favorite_job;
+    if (*slot) { if (most) most_refresh_pending = true; return; }
+    group_favorites_job_t *job = calloc(1, sizeof(*job));
+    if (!job) return;
+    atomic_init(&job->done, false);
+    job->most = most;
+    job->entries_generation = group_songs_entries_generation_get();
+    job->generation = favorite_generation;
+    job->revision = remote_state_revision();
+    lv_timer_t *timer = lv_timer_create(group_favorites_job_poll, 25, job);
+    if (!timer) { free(job); return; }
+    if (pthread_create(&job->thread, NULL, group_favorites_load, job)) {
+        lv_timer_delete(timer);
+        free(job);
+        return;
+    }
+    *slot = job;
+}
+
+static void group_favorites_schedule(void) { group_collection_schedule(false); }
+void gui_library_refresh_most_played(void) { group_collection_schedule(true); }
+
+static void group_favorites_poll(lv_timer_t *timer) {
+    (void)timer;
+    if (lv_screen_active() == group_songs_screen &&
+        favorite_revision != remote_state_revision()) group_favorites_schedule();
+}
+
+void group_songs_show_favorites(void) {
+    group_favorites_clear();
+    favorite_revision = remote_state_revision() - 1;
+    show_group_songs(TR("Top rated"), NULL, 0);
+    favorite_timer = lv_timer_create(group_favorites_poll, 250, NULL);
+    group_favorites_schedule();
+}
+
+int group_songs_rating_section(int index) {
+    if (group_songs_refresh_source != GROUP_SONGS_REFRESH_FAVORITES ||
+        !favorite_stars || index < 0 || index >= group_songs_count) return 0;
+    return index == group_songs_page_start || favorite_stars[index] != favorite_stars[index - 1]
+        ? favorite_stars[index] : 0;
+}
+
 /* Sibling to set_group_songs_entries() that takes ownership of an already
  * allocated entries[] array rather than copying it, avoiding duplicate
  * allocations for large song lists. The caller transfers ownership and
@@ -164,10 +274,6 @@ int group_songs_visible_count(void) {
     return visible_count > GROUP_SONGS_PAGE_SIZE ? GROUP_SONGS_PAGE_SIZE : visible_count;
 }
 
-/* Suppresses the follow-up LV_EVENT_CLICKED event when a long press has
- * already triggered the context menu on a group song row. */
-bool group_song_row_long_press_fired = false;
-
 static void group_play_at(int pos) {
     if (library_rescan_active) return;
     if (pos < 0 || pos >= group_songs_count) return;
@@ -197,9 +303,19 @@ static void group_play_at(int pos) {
     on_file_selected(playlist_copy, group_songs_count, pos);
 }
 
+void group_songs_compact_play(int index) { group_play_at(index); }
+void group_songs_compact_context(int index) {
+    if (!library_rescan_active && index >= 0 && index < group_songs_count)
+        open_song_context_menu(group_songs_entries[index].path);
+}
+
+void group_songs_compact_probe_update(int page_index, const char * detail, unsigned seconds) {
+    if (!compact_list_is_live(group_songs_list) || page_index < 0 || page_index >= group_songs_visible_count()) return;
+    group_songs_compact_update_label(group_probe_page_start + page_index, detail, seconds);
+}
+
 void group_song_row_click_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    if (group_song_row_long_press_fired) { group_song_row_long_press_fired = false; return; }
+    if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
     group_play_at((int) (intptr_t) lv_event_get_user_data(e));
 }
 
@@ -222,17 +338,15 @@ void playlist_start_selected(bool shuffle) {
     int count = playlist_start_source == PLAY_ALL_SOURCE_GROUP ? group_songs_count
                                                                : (int) metadata_db_get_song_count();
     if (count <= 0) { show_info_toast(TR("Playlist is empty")); return; }
-    int index = 0;
-    if (shuffle) {
-        unsigned int value = (unsigned int) time(NULL) ^ lv_tick_get();
-        int fd = open("/dev/urandom", O_RDONLY);
-        if (fd >= 0) { ssize_t n = read(fd, &value, sizeof(value)); (void) n; close(fd); }
-        index = (int) (value % (unsigned int) count);
-    }
+    int index = gui_library_collection_start_index(count, shuffle);
     gui_player_set_play_mode(collection_play_mode(shuffle ? PLAY_MODE_SHUFFLE : PLAY_MODE_SEQUENTIAL));
     if (playlist_start_source == PLAY_ALL_SOURCE_RECENTLY_ADDED) {
         set_player_source_recently_added(index);
         on_file_selected_lazy_recently_added(index);
+    } else if (playlist_start_source == PLAY_ALL_SOURCE_ALL_SONGS && all_songs_rating_active()) {
+        all_songs_rating_play(index);
+    } else if (playlist_start_source == PLAY_ALL_SOURCE_ALL_SONGS && all_songs_title_reversed()) {
+        on_file_selected_lazy_all_songs_reverse(index);
     } else if (playlist_start_source == PLAY_ALL_SOURCE_ALL_SONGS) {
         set_player_source_all_songs(index);
         on_file_selected_lazy_all_songs(index);
@@ -261,7 +375,6 @@ bool group_songs_album_layout(void) {
 void group_song_row_long_press_cb(lv_event_t * e) {
     if (library_rescan_active) return;
     if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED) return;
-    group_song_row_long_press_fired = true;
     int pos = (int) (intptr_t) lv_event_get_user_data(e);
     open_song_context_menu(group_songs_entries[pos].path);
 }
@@ -286,7 +399,9 @@ static void apply_group_probe_row(int index, unsigned int seconds, audio_codec_t
     free(group_songs_entries[pos].title);
     group_songs_entries[pos].title = title;
     lv_obj_t * row = group_songs_visible_rows[index];
-    if (row && group_songs_album_layout()) {
+    if (compact_list_is_live(group_songs_list)) {
+        group_songs_compact_probe_update(index, detail, seconds);
+    } else if (row && group_songs_album_layout()) {
         gui_album_header_row_set_duration(row, seconds);
     } else if (row) {
         group_song_row_show_detail(row, detail);
@@ -319,8 +434,10 @@ void gui_library_poll_track_probes(void) {
     /* The album header's whole-album probe waits for the page's own probe. */
     if (gui_album_header_poll(visible && group_songs_album_layout(),
                               visible && group_songs_album_layout() && !group_probe_job &&
-                              group_probe_requested_generation == group_probe_generation))
+                              group_probe_requested_generation == group_probe_generation)) {
+        group_songs_compact_header_refresh();
         refresh_group_songs_now_playing_indicator(); /* wrapped chips moved the rows */
+    }
 
     if (group_probe_job) {
         bool current = visible && group_probe_job_generation == group_probe_generation;
@@ -404,25 +521,28 @@ void gui_library_poll_track_probes(void) {
     group_probe_job_generation = group_probe_generation;
 }
 
-/* Positions/shows or hides group_songs_now_playing_bar against the CURRENT
- * group_songs_entries/count -- callable standalone (no row rebuild, no
- * scroll reset) whenever now_playing_path changes while this screen
- * is open, and also called once at the end of populate_group_songs_rows()
- * itself so a freshly opened group (or an edit-mode toggle, which also goes
- * through a full repopulate) starts with the right state. The visible-row
- * table lets the marker follow LVGL's final flex layout, including runtime
- * font/touch sizing and any action or paging rows before the song. */
+/* Updates the compact pooled marker during browsing and the legacy overlay
+ * bar in edit mode, without rebuilding or scrolling the current page. */
 void refresh_group_songs_now_playing_indicator(void) {
     group_songs_place_now_playing_bar(false);
 }
 
-/* `laid_out`: the list's layout is already current (a build chunk just ended with it). */
+/* `laid_out`: the list's layout is already current. */
 void group_songs_place_now_playing_bar(bool laid_out) {
     /* Search results can include songs outside the underlying list's page. */
     refresh_group_songs_search_now_playing();
-    if (!group_songs_now_playing_bar) return;
-
     int match = group_songs_now_playing_index();
+
+    if (compact_list_is_live(group_songs_list)) {
+        int logical = -1;
+        if (match >= group_songs_page_start && match < group_songs_page_end()) {
+            for (int row = 0; row < group_songs_compact_row_count(); ++row)
+                if (group_songs_compact_row_source(row) == match) { logical = row; break; }
+        }
+        compact_list_set_now_playing(group_songs_list, logical);
+        return;
+    }
+    if (!group_songs_now_playing_bar) return;
 
     int page_end = group_songs_page_end();
     if (match < group_songs_page_start || match >= page_end) {
@@ -446,9 +566,11 @@ void group_songs_place_now_playing_bar(bool laid_out) {
 static void group_songs_screen_event_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_DELETE) {
+        group_favorites_clear();
         gui_album_header_forget();
         gui_album_header_release_cover();
         library_thumbnails_forget_list(group_songs_list);
+        group_songs_compact_clear();
         group_songs_reorder_detach();
         group_songs_clear_selection();
         group_songs_edit_mode = false;
@@ -458,14 +580,12 @@ static void group_songs_screen_event_cb(lv_event_t * e) {
         free(group_songs_source_title);
         group_songs_source_title = NULL;
         group_songs_list = NULL;
-        group_songs_build_reset();
         group_songs_now_playing_bar = NULL;
         group_songs_populated_page_start = -1;
         group_songs_anchor_pending = false;
         group_songs_rebuild_on_load = false;
         group_songs_forget_row_objects();
     } else if (code == LV_EVENT_SCREEN_UNLOADED) {
-        group_songs_build_pause(); /* resumed by SCREEN_LOADED */
         group_songs_reorder_detach();
         if (group_songs_edit_mode) {
             group_songs_capture_scroll_anchor(NULL, 0);
@@ -479,7 +599,6 @@ static void group_songs_screen_event_cb(lv_event_t * e) {
             group_songs_rebuild_on_load = false;
             populate_group_songs_rows();
         }
-        group_songs_build_resume(); /* paused while another screen was shown */
         if (!group_songs_album_layout()) ui_wake_notify(); /* the page's duration lookup starts now (see populate_group_songs_rows) */
     }
 }
@@ -496,6 +615,7 @@ static void show_group_songs_editable_impl(const char * name, const group_song_e
         show_error_toast(TR("Out of memory"));
         return;
     }
+    if (group_songs_refresh_source != GROUP_SONGS_REFRESH_FAVORITES) group_favorites_clear();
     album_load_bump_generation();
     group_songs_source_is_album = group_songs_refresh_source == GROUP_SONGS_REFRESH_ALBUM;
     group_songs_music_submenu = music_submenu;
@@ -526,8 +646,8 @@ void show_group_songs_editable(const char * name, const group_song_entry_t * ent
 
 void show_group_songs(const char * name, const group_song_entry_t * entries, int count) {
     /* The title arrives already translated (show_favorites()/show_most_played()). */
-    group_songs_refresh_source = name && strcmp(name, TR("Favorites")) == 0 ? GROUP_SONGS_REFRESH_FAVORITES
-                                : name && strcmp(name, TR("Most Played")) == 0 ? GROUP_SONGS_REFRESH_MOST_PLAYED
+    group_songs_refresh_source = name && strcmp(name, TR("Top rated")) == 0 ? GROUP_SONGS_REFRESH_FAVORITES
+                                : name && strcmp(name, TR("Most played")) == 0 ? GROUP_SONGS_REFRESH_MOST_PLAYED
                                 : GROUP_SONGS_REFRESH_NONE;
     show_group_songs_editable(name, entries, count, NULL, false);
 }
@@ -556,6 +676,7 @@ void show_group_songs_take_ownership(const char * name, group_song_entry_t * ent
         show_error_toast(TR("Out of memory"));
         return;
     }
+    if (group_songs_refresh_source != GROUP_SONGS_REFRESH_FAVORITES) group_favorites_clear();
     album_load_bump_generation();
     group_songs_source_is_album = false;
     group_songs_music_submenu = true;
@@ -610,14 +731,7 @@ lv_obj_t * build_group_songs_screen(void) {
     }
     lv_obj_add_flag(group_songs_delete_btn, LV_OBJ_FLAG_HIDDEN);
 
-    group_songs_list = build_song_list_body(scr);
-    lv_obj_set_scrollbar_mode(group_songs_list, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_width(group_songs_list, BOARD_SCALE_PX(3), LV_PART_SCROLLBAR);
-    lv_obj_set_style_radius(group_songs_list, BOARD_SCALE_PX(2), LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_opa(group_songs_list, LV_OPA_50, LV_PART_SCROLLBAR);
-    lv_obj_add_style(group_songs_list, gui_theme_accent_style(), LV_PART_SCROLLBAR);
-    lv_obj_add_event_cb(group_songs_list, group_songs_scroll_cb, LV_EVENT_SCROLL, NULL);
-    lv_obj_add_event_cb(group_songs_list, group_songs_wake_cb, LV_EVENT_PRESSED, NULL);
+    group_songs_list = group_songs_create_list(scr, true);
 
     library_thumbnails_bind_list(scr, group_songs_list, LIBRARY_THUMB_LIST_GROUP_SONGS_CUSTOM);
 
@@ -656,6 +770,7 @@ void library_thumbnail_show_busy(library_thumbnail_cover_scope_t scope) {
 /* Called after list deletion: unregistering is pointer identity only, so it never
  * touches a freed LVGL object. */
 void forget_deleted_library_lists(void) {
+    all_songs_rating_teardown();
     lv_obj_t *dead[] = { all_songs_list, artists_list, albums_list, album_artist_list,
                          recently_added_list, genres_list };
     for (size_t i = 0; i < sizeof(dead) / sizeof(dead[0]); ++i)
@@ -766,22 +881,16 @@ void refresh_group_songs_from_database(void) {
         return;
     group_songs_page_start = 0;
     switch (group_songs_refresh_source) {
-        case GROUP_SONGS_REFRESH_FAVORITES: {
-            char ** paths = NULL;
-            int count = 0;
-            metadata_db_load_favorite_songs(&paths, &count);
-            group_songs_set_from_paths(paths, count);
-            populate_group_songs_rows();
+        case GROUP_SONGS_REFRESH_FAVORITES:
+            /* A load already running may predate this refresh: drop its result and
+             * leave the revision stale so the poll schedules a fresh one. */
+            ++favorite_generation;
+            favorite_revision = remote_state_revision() - 1;
+            group_favorites_schedule();
             break;
-        }
-        case GROUP_SONGS_REFRESH_MOST_PLAYED: {
-            char ** paths = NULL;
-            int count = 0;
-            metadata_db_load_top_played_songs(MOST_PLAYED_LIMIT, &paths, &count);
-            group_songs_set_from_paths(paths, count);
-            populate_group_songs_rows();
+        case GROUP_SONGS_REFRESH_MOST_PLAYED:
+            gui_library_refresh_most_played();
             break;
-        }
         case GROUP_SONGS_REFRESH_M3U: {
             char ** paths = NULL;
             int count = 0;

@@ -5,16 +5,18 @@
  * output (see bluetooth_control.h -- confirmed exact field names/format
  * against a real device). */
 static void query_device_state(const char * mac, bool * out_paired, bool * out_connected,
-                               bool * out_has_class) {
+                               bool * out_has_class, bool * out_audio_sink) {
     *out_paired = false;
     *out_connected = false;
     if (out_has_class) *out_has_class = true; /* a failed query must not hide the device */
+    if (out_audio_sink) *out_audio_sink = false;
     char out[2048];
     char * argv[] = { (char *) "bluetoothctl", (char *) "info", (char *) mac, NULL };
     if (!subprocess_run_low_priority(argv, out, sizeof(out))) return;
     *out_paired = strstr(out, "Paired: yes") != NULL;
     *out_connected = strstr(out, "Connected: yes") != NULL;
     if (out_has_class) *out_has_class = strstr(out, "\n\tClass:") != NULL;
+    if (out_audio_sink) *out_audio_sink = strstr(out, BT_A2DP_SINK_UUID) != NULL;
 }
 
 /* BlueZ 5.87 removed the legacy `paired-devices` command and added the
@@ -138,7 +140,8 @@ static int bt_collect_device_lines(char * devices_buf, bt_device_t * out, int ma
         if (bt_device_line_parse(line, out[count].mac, &name)) {
             snprintf(out[count].name, sizeof(out[count].name), "%s", name);
             bool has_class;
-            query_device_state(out[count].mac, &out[count].paired, &out[count].connected, &has_class);
+            query_device_state(out[count].mac, &out[count].paired, &out[count].connected, &has_class,
+                               &out[count].audio_sink);
             /* LE-only identities of dual-mode headsets cannot carry A2DP and fail to pair. */
             if (skip_unusable && !out[count].paired && !has_class) {
                 line = strtok_r(NULL, "\n", &line_save);
@@ -164,7 +167,7 @@ static bool bt_control_is_connected(void) {
         const char * name;
         if (bt_device_line_parse(line, mac, &name)) {
             bool paired, connected;
-            query_device_state(mac, &paired, &connected, NULL);
+            query_device_state(mac, &paired, &connected, NULL, NULL);
             if (connected) return true;
         }
         line = strtok_r(NULL, "\n", &line_save);
@@ -271,7 +274,7 @@ int bt_control_scan(int seconds, bt_device_t * out, int max_count) {
 
     char devices_buf[8192];
     char * devices_argv[] = { (char *) "bluetoothctl", (char *) "devices", NULL };
-    if (!subprocess_run(devices_argv, devices_buf, sizeof(devices_buf))) return 0;
+    if (!subprocess_run(devices_argv, devices_buf, sizeof(devices_buf))) return -1;
 
     return bt_collect_device_lines(devices_buf, out, max_count, true);
 }

@@ -109,7 +109,7 @@ static bool subsonic_connect_poll_waiting(void) {
         http_cancel_token_cancel(&subsonic_connect_cancel);
         gui_busy_hide(subsonic_connect_token);
         subsonic_connect_token = 0;
-        show_error_toast(TR("Connection timed out after 30 seconds"));
+        show_error_toast(TR("The server did not answer"));
         return true; /* Do not join a request still blocked in the network. */
     }
     return !atomic_load_explicit(&subsonic_connect_done_flag, memory_order_acquire);
@@ -130,6 +130,7 @@ static void subsonic_adopt_connected_server(void) {
                                     subsonic_connect_pending_server.username, subsonic_connect_pending_server.password,
                                     subsonic_connect_pending_server.verify_tls);
     settings_save(&current_settings);
+    gui_subsonic_session_set_active(true);
     /* A new connection starts with empty browse caches. */
     subsonic_clear_browse_caches();
     nav_push(gui_subsonic_menu_screen());
@@ -161,6 +162,8 @@ static void start_subsonic_connect(const subsonic_server_t * server) {
         return;
     }
     req->server = *server;
+
+    gui_subsonic_session_set_active(false);
 
     atomic_store_explicit(&subsonic_connect_done_flag, false, memory_order_relaxed);
     subsonic_connect_success_flag = false;
@@ -194,6 +197,7 @@ static bool subsonic_is_active_server(const subsonic_server_t * server) {
 static void subsonic_open_cached_server(const subsonic_server_t * server) {
     bool same = subsonic_is_active_server(server);
     subsonic_set_active_server(server);
+    gui_subsonic_session_set_active(true);
     if (!same) {
         subsonic_clear_browse_caches();
         settings_save_async(&current_settings);
@@ -240,7 +244,7 @@ static void populate_subsonic_saved_servers_screen(void) {
         lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 
         lv_obj_t * hint = lv_label_create(subsonic_saved_servers_list);
-        lv_label_set_text(hint, TR("Go back and choose New Connection to add one."));
+        lv_label_set_text(hint, TR("Go back and choose New connection to add one."));
         lv_obj_add_style(hint, &style_theme_text_muted, 0);
         lv_obj_set_style_text_font(hint, gui_theme_font(GUI_FONT_ROLE_SUBTEXT), 0);
         lv_obj_set_width(hint, lv_pct(88));
@@ -254,7 +258,7 @@ static void populate_subsonic_saved_servers_screen(void) {
 
 static lv_obj_t * build_subsonic_saved_servers_screen(void) {
     lv_obj_t * title_label; /* unused after build -- title never changes */
-    return build_subsonic_list_screen(TR("Saved Servers"), &title_label, &subsonic_saved_servers_list);
+    return build_subsonic_list_screen(TR("Saved servers"), &title_label, &subsonic_saved_servers_list);
 }
 
 static void subsonic_saved_servers_row_cb(lv_event_t * e) {
@@ -340,7 +344,7 @@ static void populate_subsonic_new_connection_screen(void) {
 
 static lv_obj_t * build_subsonic_new_connection_screen(void) {
     lv_obj_t * title_label; /* unused after build -- title never changes */
-    return build_subsonic_list_screen(TR("New Connection"), &title_label, &subsonic_new_connection_list);
+    return build_subsonic_list_screen(TR("New connection"), &title_label, &subsonic_new_connection_list);
 }
 
 static void subsonic_new_connection_row_cb(lv_event_t * e) {
@@ -359,8 +363,8 @@ static void subsonic_new_connection_row_cb(lv_event_t * e) {
 
 static lv_obj_t * build_subsonic_entry_screen(void) {
     static pill_list_item_t items[2];
-    items[0] = (pill_list_item_t){ TR("Saved Servers"), PILL_ACCESSORY_CHEVRON, false, subsonic_saved_servers_row_cb, NULL, NULL };
-    items[1] = (pill_list_item_t){ TR("New Connection"), PILL_ACCESSORY_CHEVRON, false, subsonic_new_connection_row_cb, NULL, NULL };
+    items[0] = (pill_list_item_t){ TR("Saved servers"), PILL_ACCESSORY_CHEVRON, false, subsonic_saved_servers_row_cb, NULL, NULL };
+    items[1] = (pill_list_item_t){ TR("New connection"), PILL_ACCESSORY_CHEVRON, false, subsonic_new_connection_row_cb, NULL, NULL };
     lv_obj_t * scr = build_pill_list_screen(TR("Subsonic"), generic_back_cb, items, 2, gui_theme_accent_style(), GUI_ROW_GAP, 100);
     finalize_screen_navigation(scr);
     return scr;

@@ -1,13 +1,21 @@
 #pragma once
 #include <lvgl/lvgl.h>
 #include <stdbool.h>
+#include "../library/browse/gui_library.h"
 
 /* Screen accessors */
 lv_obj_t * gui_settings_get_screen(void);
 lv_obj_t * gui_settings_get_system_screen(void);
 lv_obj_t * gui_settings_get_about_screen(void);
+lv_obj_t * gui_settings_get_advanced_sound_screen(void);
+lv_obj_t * gui_settings_get_buttons_screen(void);
+lv_obj_t * gui_settings_get_display_screen(void);
+lv_obj_t * gui_settings_get_personalize_screen(void);
+lv_obj_t * gui_settings_get_lyrics_screen(void);
+lv_obj_t * gui_settings_get_sound_screen(void);
+lv_obj_t * gui_settings_get_playback_screen(void);
 /* Refreshes the Accent Color screen after any accent change (gui_theme.c). */
-void gui_settings_accent_changed(void);
+void gui_settings_accent_changed(bool color_changed);
 /* The keyboard layouts offered in Settings -> Keyboard, in display order.
  * _at() returns the KEYBOARD_LAYOUT_* value and its untranslated label (pass
  * it through TR()), or -1 past the end. */
@@ -33,9 +41,15 @@ lv_obj_t * build_dac_home_screen(void);
 
 void gui_settings_sync_crossfade_toggle(void);
 void gui_settings_sync_gapless_toggle(void);
+void gui_settings_sync_brightness(int percent);
 void gui_settings_sync_sleep_timer_toggle(void);
 void gui_settings_sync_car_mode(void);
 void gui_settings_open_car_mode(void);
 void gui_settings_sync_adb_toggle(void);
 void gui_settings_sync_usb_dac_charging_toggle(void);
 void gui_display_apply_rotation(bool upside_down);
+
+void gui_settings_sleep_timer_row_cb(lv_event_t * e);
+
+/* Shared order popup for the library header buttons. */
+void gui_settings_open_sorting(gui_library_sort_scope_t scope);

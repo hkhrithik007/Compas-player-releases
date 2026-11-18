@@ -1,9 +1,10 @@
+#include "../controls/star_rating.h"
 #include "../builders/screen_builders.h"
 #include "../builders/screen_builders_internal.h"
 #include "../builders/gui_play_bar.h"
 #include "../../assets/assets.h"
 #include "../../../core/process/worker_thread.h"
-#include "../../../core/system/logging/debug_log.h"
+#include "../../../core/system/logging/db_log.h"
 #include "../../shell/gui_navigation.h"
 #include "lvgl/src/display/lv_display_private.h"
 #include "scroll_blit.h"
@@ -51,12 +52,11 @@ typedef struct {
     int item_count;
     compact_list_click_cb_t on_click;
     compact_list_click_cb_t on_long_press; /* NULL for a list with no long-press action (e.g. Artists/Albums name rows) */
-    /* Tracks whether a long press fired so the subsequent release click can be suppressed. */
-    bool long_press_fired;
     int32_t row_height;
     int32_t requested_row_height;
     int32_t row_stride;
     int32_t top_offset; /* height of the header above the first row (compact_list_set_header()); 0 without one */
+    lv_obj_t * header; /* current non-paged header, if any */
     lv_obj_t * paged_header; /* compact_list_set_paged_header(): shown only while a provider feeds the list */
     int32_t paged_header_height;
     uint32_t magic; /* COMPACT_LIST_MAGIC while alive; cleared on delete (stale-list guard) */
@@ -69,6 +69,8 @@ typedef struct {
     lv_obj_t * trailing_images[COMPACT_LIST_POOL_SIZE];
     lv_obj_t * subtitle_labels[COMPACT_LIST_POOL_SIZE];
     lv_obj_t * action_circles[COMPACT_LIST_POOL_SIZE];
+    bool row_is_section_header[COMPACT_LIST_POOL_SIZE];
+    lv_obj_t *section_ratings[COMPACT_LIST_POOL_SIZE];
     void * row_ctx[COMPACT_LIST_POOL_SIZE]; /* opaque to this struct, freed alongside it -- see compact_list_row_ctx_t below */
     int row_logical_index[COMPACT_LIST_POOL_SIZE]; /* item currently represented by each recycled slot; -1 when unused */
     uint64_t row_artwork_key[COMPACT_LIST_POOL_SIZE]; /* artwork key of the item in each slot; 0 when none */
@@ -76,6 +78,7 @@ typedef struct {
     bool landing_rebind; /* set while a landed fetch repaints: bound rows whose content is unchanged are left alone */
     lv_obj_t * spacer; /* repositioned by compact_list_set_items() when item_count changes */
     lv_obj_t * message;
+    const char * empty_heading;
     lv_obj_t * now_playing_bar; /* NULL if this list wasn't built with enable_now_playing -- see compact_list_set_now_playing() */
     int now_playing_index; /* -1 = nothing playing/matching in this list */
 
@@ -89,7 +92,7 @@ typedef struct {
     int cache_start; /* requested logical offset; -1 = cache empty/invalid, forces a fetch on next window update */
     int cache_count; /* how many returned rows are valid in cache_rows[] */
     int cache_requested_count; /* requested range covered by the completed fetch, even if the provider returned fewer rows */
-    compact_list_page_row_t cache_rows[COMPACT_LIST_PAGE_CACHE_SIZE];
+    compact_list_page_row_t * cache_rows; /* Allocated for paged lists, retained until deletion. */
     compact_list_row_decorator_cb_t row_decorator;
     void * row_decorator_ctx;
     compact_list_click_cb_t on_trailing_click;
@@ -190,13 +193,10 @@ static bool compact_list_press_settle(compact_list_virtual_data_t * data, int in
 }
 
 static void compact_list_row_click_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     compact_list_row_ctx_t * ctx = (compact_list_row_ctx_t *) lv_event_get_user_data(e);
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code != (ctx->data->on_long_press ? LV_EVENT_SHORT_CLICKED : LV_EVENT_CLICKED)) return;
     bool press_valid = compact_list_press_settle(ctx->data, ctx->logical_index);
-    if (ctx->data->long_press_fired) { /* see compact_list_row_long_press_cb()'s own comment */
-        ctx->data->long_press_fired = false;
-        return;
-    }
     if (!press_valid) return; /* rebound between press and release: do not open the replacement */
     int index = ctx->logical_index;
     if (index < 0 || index >= ctx->data->item_count) return; /* this pool slot is currently a hidden, contentless row (list shorter than the pool) -- shouldn't be reachable, guarded anyway */
@@ -251,7 +251,6 @@ static void compact_list_row_press_cb(lv_event_t * e) {
     compact_list_row_ctx_t * ctx = (compact_list_row_ctx_t *) lv_event_get_user_data(e);
     compact_list_virtual_data_t * data = ctx->data;
     if (code == LV_EVENT_PRESSED) {
-        data->long_press_fired = false; /* a long press that scrolled never got its CLICKED */
         compact_list_press_record(data, ctx->logical_index);
         if (data->press_index < 0 || !data->on_press) return;
         if (data->scrolled && lv_tick_elaps(data->last_scroll_tick) < COMPACT_LIST_PRESS_AFTER_SCROLL_MS)
@@ -299,7 +298,6 @@ static void compact_list_scroll_begin_cb(lv_event_t * e) {
 static void compact_list_row_long_press_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED) return;
     compact_list_row_ctx_t * ctx = (compact_list_row_ctx_t *) lv_event_get_user_data(e);
-    ctx->data->long_press_fired = true;
     int index = ctx->logical_index;
     if (index < 0 || index >= ctx->data->item_count) return;
     if (!compact_list_press_matches(ctx->data, index)) { /* rebound under the finger: not this item */
@@ -307,6 +305,15 @@ static void compact_list_row_long_press_cb(lv_event_t * e) {
         return;
     }
     ctx->data->on_long_press(index);
+}
+
+/* CLICKED follows both SHORT_CLICKED and LONG_PRESSED on rows with a menu.
+ * The short handler has already settled its press; a long press still has
+ * to withdraw its recorded press without activating the row a second time. */
+static void compact_list_row_menu_release_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    compact_list_row_ctx_t * ctx = (compact_list_row_ctx_t *) lv_event_get_user_data(e);
+    compact_list_press_cancel(ctx->data);
 }
 
 static void compact_list_trailing_click_cb(lv_event_t * e) {
@@ -461,6 +468,11 @@ static void compact_list_ensure_cache(lv_obj_t * list, compact_list_virtual_data
         return;
     }
 
+    if (!data->cache_rows) {
+        data->cache_rows = malloc(COMPACT_LIST_PAGE_CACHE_SIZE * sizeof(*data->cache_rows));
+        if (!data->cache_rows) return; /* next scroll tick retries */
+    }
+
     compact_list_fetch_job_t * job = malloc(sizeof(*job));
     if (!job) return; /* next scroll tick retries */
     job->fetch_page = data->fetch_page;
@@ -505,7 +517,7 @@ static void compact_list_fit_image_box(lv_obj_t * image) {
 static bool compact_list_run_row_decorator(lv_obj_t * list, compact_list_virtual_data_t * data,
                                             int slot, int index, int64_t identity,
                                             uint64_t artwork_key, const char * artwork_name,
-                                            bool is_action) {
+                                            bool is_action, bool is_section_header) {
     lv_obj_t * row = data->rows[slot];
     lv_obj_t * image = data->leading_images[slot];
     const void * picture = lv_image_get_src(image);
@@ -517,6 +529,9 @@ static bool compact_list_run_row_decorator(lv_obj_t * list, compact_list_virtual
     }
     if (is_action) {
         lv_idem_set_pad_left(row, BOARD_SCALE_PX(100));
+        lv_obj_add_flag(image, LV_OBJ_FLAG_HIDDEN);
+    } else if (is_section_header) {
+        lv_idem_set_pad_left(row, LIST_ROW_LABEL_INSET);
         lv_obj_add_flag(image, LV_OBJ_FLAG_HIDDEN);
     }
     bool hidden = lv_obj_has_flag(image, LV_OBJ_FLAG_HIDDEN);
@@ -542,14 +557,14 @@ static void compact_list_align_row_decoration(compact_list_virtual_data_t * data
         } else lv_obj_add_flag(data->action_circles[slot], LV_OBJ_FLAG_HIDDEN);
     }
     /* The only row decorator is the library thumbnail one, whose pad_left is
-     * BOARD_LIBRARY_THUMB_TEXT_X; other rows keep the fixed 14 px offset. */
+     * BOARD_LIBRARY_THUMB_TEXT_X; other rows use the scaled inset. */
     /* A decorator whose image extends past its box (the pre-rendered
      * placeholder) leaves that overhang in the image's user data, in px. */
     int32_t overhang = (int32_t) (intptr_t) lv_obj_get_user_data(data->leading_images[slot]);
     lv_idem_align(data->leading_images[slot], LV_ALIGN_LEFT_MID,
-                  (data->row_decorator ? BOARD_LIBRARY_THUMB_INSET : 14) - pad_left - overhang, (pad_top - pad_bottom) / -2);
+                  (data->row_decorator ? BOARD_LIBRARY_THUMB_INSET : BOARD_SCALE_PX(14)) - pad_left - overhang, (pad_top - pad_bottom) / -2);
     lv_idem_align(data->trailing_images[slot], LV_ALIGN_RIGHT_MID,
-                  pad_right - 14, (pad_top - pad_bottom) / -2);
+                  pad_right - BOARD_SCALE_PX(14), (pad_top - pad_bottom) / -2);
 }
 
 /* Repositions/relabels the row pool so it covers the range of items
@@ -577,7 +592,8 @@ static const char * compact_trailing_src(const char * trailing_asset) {
     if (cached_src && lv_color_eq(color, cached_text) && !strcmp(cached_asset, trailing_asset))
         return cached_src;
     const char * stock = asset_path(trailing_asset);
-    const char * breeze = titlebar_breeze_icon(stock);
+    const char * breeze = strcmp(trailing_asset, "breeze_rows/library_sorting.png") == 0
+                              ? NULL : titlebar_breeze_icon(stock);
     snprintf(cached_asset, sizeof(cached_asset), "%s", trailing_asset);
     cached_text = color;
     cached_src = breeze ? breeze : stock;
@@ -589,8 +605,27 @@ static uint32_t compact_list_hash_str(uint32_t h, const char * str) {
     return (h ^ 0xffu) * 16777619u;
 }
 
+static void compact_list_section_rating(compact_list_virtual_data_t *data, int slot, int stars) {
+    lv_obj_t *control = data->section_ratings[slot];
+    if (!stars) {
+        if (control) lv_obj_add_flag(control, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    if (!control) {
+        control = star_rating_create(data->rows[slot], BOARD_SCALE_PX(28), false);
+        if (!control) return;
+        data->section_ratings[slot] = control;
+        lv_obj_set_name(control, "rating_section");
+        star_rating_set_filled_only(control);
+    }
+    star_rating_set_lit_color(control, lv_color_hex(gui_theme_accent_rgb()));
+    star_rating_set(control, stars);
+    lv_obj_remove_flag(control, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(control, LV_ALIGN_LEFT_MID, 0, 0);
+}
+
 static uint32_t compact_list_row_hash(const char * label, int64_t identity, const char * trailing,
-                                      const char * subtitle, bool is_action,
+                                      const char * subtitle, bool is_action, bool is_section_header,
                                       uint64_t artwork_key, const char * artwork_name,
                                       const void * decorator, const void * decorator_ctx) {
     uint32_t h = 2166136261u;
@@ -603,7 +638,7 @@ static uint32_t compact_list_row_hash(const char * label, int64_t identity, cons
     /* What the row decorator is wired to also decides how the row is painted. */
     h = (h ^ (uint32_t) (uintptr_t) decorator) * 16777619u;
     h = (h ^ (uint32_t) (uintptr_t) decorator_ctx) * 16777619u;
-    return (h ^ (is_action ? 1u : 0u)) * 16777619u;
+    return (h ^ (is_action ? 1u : 0u) ^ (is_section_header ? 2u : 0u)) * 16777619u;
 }
 
 static void compact_list_update_window(lv_obj_t * list, compact_list_virtual_data_t * data) {
@@ -657,6 +692,8 @@ static void compact_list_update_window(lv_obj_t * list, compact_list_virtual_dat
         const char * trailing_asset = NULL;
         const char * subtitle = NULL;
         bool is_action = false;
+        bool is_section_header = false;
+        int section_stars = 0;
         uint64_t artwork_key = 0;
         const char * artwork_name = NULL;
         if (data->fetch_page) {
@@ -677,6 +714,8 @@ static void compact_list_update_window(lv_obj_t * list, compact_list_virtual_dat
             trailing_asset = info->trailing_asset[0] ? info->trailing_asset : NULL;
             subtitle = info->subtitle[0] ? info->subtitle : NULL;
             is_action = info->is_action;
+            is_section_header = info->is_section_header;
+            section_stars = info->section_stars;
             artwork_key = info->artwork_key;
             artwork_name = info->artwork_name[0] ? info->artwork_name : NULL;
         } else {
@@ -685,13 +724,15 @@ static void compact_list_update_window(lv_obj_t * list, compact_list_virtual_dat
             trailing_asset = data->items[index].trailing_asset;
             subtitle = data->items[index].subtitle;
             is_action = data->items[index].is_action;
+            is_section_header = data->items[index].is_section_header;
+            section_stars = data->items[index].section_stars;
             artwork_key = data->items[index].artwork_key;
             artwork_name = data->items[index].artwork_name;
         }
         uint32_t content_hash = compact_list_row_hash(label, identity, trailing_asset, subtitle,
-                                                      is_action, artwork_key, artwork_name,
+                                                      is_action, is_section_header, artwork_key, artwork_name,
                                                       (const void *) data->row_decorator,
-                                                      data->row_decorator_ctx);
+                                                      data->row_decorator_ctx) ^ (uint32_t)section_stars;
         /* A landed fetch repaints the whole window, but a row that already
          * shows this exact item would only be relabelled to the same text. */
         if (data->landing_rebind && !lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN) &&
@@ -702,8 +743,18 @@ static void compact_list_update_window(lv_obj_t * list, compact_list_virtual_dat
         lv_obj_t * trailing = data->trailing_images[slot];
         if (trailing_asset && trailing_asset[0]) {
             lv_idem_image_set_src(trailing, compact_trailing_src(trailing_asset));
+            /* Known width, no layout pass: this runs for every row while scrolling. */
+            int32_t trailing_w = lv_image_get_src_width(trailing);
+#if defined(BOARD_TEMPOTEC_V1)
+            /* Match the header's menu size; the native 44px box steals title space on V1. */
+            bool menu = strcmp(trailing_asset, "navigation/more.png") == 0;
+            int32_t size = menu ? BOARD_SCALE_PX(44) : LV_SIZE_CONTENT;
+            lv_idem_set_size(trailing, size, size);
+            lv_image_set_inner_align(trailing, menu ? LV_IMAGE_ALIGN_CONTAIN : LV_IMAGE_ALIGN_DEFAULT);
+            if (menu) trailing_w = size;
+#endif
             lv_obj_remove_flag(trailing, LV_OBJ_FLAG_HIDDEN);
-            lv_idem_set_pad_right(row, 70);
+            lv_idem_set_pad_right(row, trailing_w + 2 * BOARD_SCALE_PX(14));
         } else {
             lv_obj_add_flag(trailing, LV_OBJ_FLAG_HIDDEN);
             lv_idem_set_pad_right(row, LIST_ROW_LABEL_INSET);
@@ -717,9 +768,23 @@ static void compact_list_update_window(lv_obj_t * list, compact_list_virtual_dat
          * default first would only change the layout twice. */
         if (!data->row_decorator) lv_idem_set_pad_left(row, LIST_ROW_LABEL_INSET);
         compact_list_run_row_decorator(list, data, slot, index, identity,
-                                       artwork_key, artwork_name, is_action);
+                                       artwork_key, artwork_name, is_action, is_section_header);
         lv_obj_remove_style(row, &style_theme_card_bg, 0);
         if (is_action) lv_obj_add_style(row, &style_theme_card_bg, 0);
+        if (data->row_is_section_header[slot] != is_section_header) {
+            data->row_is_section_header[slot] = is_section_header;
+            if (is_section_header) {
+                lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+                lv_obj_set_style_border_width(row, 0, 0);
+                lv_obj_add_style(row, &style_theme_text_muted, 0);
+                lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
+            } else {
+                lv_obj_remove_style(row, &style_theme_text_muted, 0);
+                lv_obj_remove_local_style_prop(row, LV_STYLE_BG_OPA, 0);
+                lv_obj_remove_local_style_prop(row, LV_STYLE_BORDER_WIDTH, 0);
+                lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+            }
+        }
         /* Identity details use two lines on music rows. Reset on every
          * recycled slot so the selector/single-line rows retain centering.
          * Uses data->row_height and LIST_ROW_FONT directly rather than querying
@@ -735,19 +800,22 @@ static void compact_list_update_window(lv_obj_t * list, compact_list_virtual_dat
          * correction likewise cancels list_row_style's asymmetric text
          * padding so both images remain vertically centred in the card. */
         compact_list_align_row_decoration(data, slot, is_action);
+        compact_list_section_rating(data, slot, is_section_header ? section_stars : 0);
     }
+    ui_marquee_list_changed(list);
     bool any_visible = false;
     for (int slot = 0; slot < COMPACT_LIST_POOL_SIZE; ++slot)
         if (!lv_obj_has_flag(data->rows[slot], LV_OBJ_FLAG_HIDDEN)) any_visible = true;
-    if (any_visible) lv_obj_add_flag(data->message, LV_OBJ_FLAG_HIDDEN);
+    bool empty_hidden = data->item_count == 0 && data->empty_heading && !data->empty_heading[0];
+    if (any_visible || empty_hidden) lv_obj_add_flag(data->message, LV_OBJ_FLAG_HIDDEN);
     else {
-        const char * heading = data->item_count == 0 ? TR("No items") :
+        const char * heading = data->item_count == 0 ? (data->empty_heading ? data->empty_heading : TR("No items")) :
                                data->pending_job ? TR("Loading...") : TR("Unable to load items");
-        const char * detail = data->item_count == 0 ? TR("There are no entries in this view.") :
+        const char * detail = data->item_count == 0 ? (data->empty_heading ? "" : TR("There are no entries in this view.")) :
                               data->pending_job ? TR("Your library is being loaded.") : TR("Leave this view and try again.");
         lv_label_set_text(lv_obj_get_child(data->message, 0), heading);
         lv_label_set_text(lv_obj_get_child(data->message, 1), detail);
-        lv_obj_set_y(data->message, lv_obj_get_scroll_y(list) + COMPACT_LIST_TOP_PAD);
+        lv_obj_set_y(data->message, lv_obj_get_scroll_y(list) + COMPACT_LIST_TOP_PAD + data->top_offset);
         lv_obj_remove_flag(data->message, LV_OBJ_FLAG_HIDDEN);
     }
 #ifdef UI_PERF_TRACE
@@ -792,8 +860,8 @@ static void compact_list_poll_fetch_cb(lv_timer_t * timer) {
     if (job->result_count >= 0) {
         pthread_join(job->thread, NULL); /* already returned by the time result_count landed -- instant, not a real wait */
         data->pending_job = NULL;
-        memcpy(data->cache_rows, job->rows, sizeof(data->cache_rows));
         data->cache_count = LV_MIN(job->result_count, LV_MIN(job->count, COMPACT_LIST_PAGE_CACHE_SIZE));
+        memcpy(data->cache_rows, job->rows, (size_t) data->cache_count * sizeof(*data->cache_rows));
         data->cache_start = job->offset;
         data->cache_requested_count = job->count;
         compact_list_job_release(job); /* the UI-side reference -- see compact_list_fetch_job_s's own doc comment */
@@ -862,13 +930,7 @@ static void unregister_active_compact_list(compact_list_virtual_data_t * data) {
  * address instead of crashing, so the stale call site can be found with
  * addr2line. Same log the crash handler uses. */
 static void compact_list_report_stale(const char * api, void * caller) {
-    int fd = open("/data/mnt/sd_0/.logs/reload_diag.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) return;
-    char line[160];
-    int n = snprintf(line, sizeof(line), "[pid=%ld] *** STALE compact_list api=%s caller=%p ***\n",
-                     (long) getpid(), api, caller);
-    if (n > 0) { ssize_t w = write(fd, line, (size_t) n); (void) w; }
-    close(fd);
+    reload_diag_log("*** STALE compact_list api=%s caller=%p ***", api, caller);
 }
 
 /* Liveness comes from the intrusive registry: only data blocks that are
@@ -889,6 +951,18 @@ static compact_list_virtual_data_t * compact_list_live_data(lv_obj_t * list, con
     compact_list_virtual_data_t * data = compact_list_live_data(list, api, __builtin_return_address(0)); \
     if (!data) return __VA_ARGS__
 
+lv_obj_t * compact_list_row_trailing_image(lv_obj_t * row) {
+    for (compact_list_virtual_data_t * data = s_live_compact_lists; row && data;
+         data = (compact_list_virtual_data_t *) data->next_live) {
+        if (data->magic != COMPACT_LIST_MAGIC) continue;
+        for (int slot = 0; slot < COMPACT_LIST_POOL_SIZE; ++slot) {
+            if (data->rows[slot] == row && !lv_obj_has_flag(data->trailing_images[slot], LV_OBJ_FLAG_HIDDEN))
+                return data->trailing_images[slot];
+        }
+    }
+    return NULL;
+}
+
 bool compact_list_any_fetch_pending(void) {
     for (compact_list_virtual_data_t * d = s_live_compact_lists; d;
          d = (compact_list_virtual_data_t *) d->next_live)
@@ -902,6 +976,15 @@ void compact_list_dispatch_ready(void) {
         if (d->pending_job && d->poll_timer && !lv_timer_get_paused(d->poll_timer) &&
             d->pending_job->result_count >= 0)
             lv_timer_ready(d->poll_timer);
+}
+
+/* Accent changes only recolour existing section stars; rows keep their binding. */
+void compact_list_recolor_section_ratings(void) {
+    lv_color_t accent = lv_color_hex(gui_theme_accent_rgb());
+    for (compact_list_virtual_data_t * d = s_live_compact_lists; d;
+         d = (compact_list_virtual_data_t *) d->next_live)
+        for (int slot = 0; slot < COMPACT_LIST_POOL_SIZE; slot++)
+            if (d->section_ratings[slot]) star_rating_set_lit_color(d->section_ratings[slot], accent);
 }
 
 void compact_list_refresh_all(void) {
@@ -936,6 +1019,7 @@ static void compact_list_delete_event_cb(lv_event_t * e) {
     for (int slot = 0; slot < COMPACT_LIST_POOL_SIZE; slot++) free(data->row_ctx[slot]);
     free(data->items);
     data->magic = 0;
+    free(data->cache_rows);
     lv_obj_set_user_data(list, NULL);
     free(data);
 }
@@ -976,16 +1060,28 @@ static void compact_list_apply_paged_header(compact_list_virtual_data_t * data) 
     else lv_obj_add_flag(data->paged_header, LV_OBJ_FLAG_HIDDEN);
 }
 
+void compact_list_set_empty_heading(lv_obj_t * list, const char * heading) {
+    COMPACT_LIST_DATA_OR_RETURN("set_empty_heading");
+    data->empty_heading = heading;
+    compact_list_update_window(list, data);
+}
+
 /* Swaps a build_compact_list_screen() list's contents in place -- e.g. a
  * live search filter -- without the lv_obj_delete()+rebuild this project
  * otherwise always used for that (see poll_library_rescan()'s own
  * rebuild-from-scratch precedent in gui.c). Copies `items` the same way
- * build_compact_list_screen() itself does (caller doesn't need to keep the
- * array or its strings alive afterward, though the strings themselves
- * still need to outlive this call the same way the original construction-
- * time ones do -- see build_compact_list_screen()'s own doc comment). */
+ * build_compact_list_screen() itself does. The caller may free the input
+ * array after this call; borrowed strings must remain alive until the items
+ * are replaced or the list is destroyed. */
 void compact_list_set_items(lv_obj_t * list, const compact_list_item_t * items, int item_count) {
     COMPACT_LIST_DATA_OR_RETURN("set_items");
+
+    compact_list_item_t * copy = NULL;
+    if (item_count > 0) {
+        copy = malloc(sizeof(*copy) * (size_t) item_count);
+        if (!copy) return;
+        memcpy(copy, items, sizeof(*copy) * (size_t) item_count);
+    }
 
     compact_list_cancel_pending_job(data);
     data->bind_gen++;
@@ -998,11 +1094,7 @@ void compact_list_set_items(lv_obj_t * list, const compact_list_item_t * items, 
     data->cache_requested_count = 0;
 
     free(data->items);
-    data->items = NULL;
-    if (item_count > 0) {
-        data->items = malloc(sizeof(compact_list_item_t) * (size_t) item_count);
-        memcpy(data->items, items, sizeof(compact_list_item_t) * (size_t) item_count);
-    }
+    data->items = copy;
     data->item_count = item_count;
     compact_list_apply_paged_header(data);
     data->window_start = -1; /* force compact_list_update_window() below to actually repaint */
@@ -1036,6 +1128,8 @@ void compact_list_set_paged_provider(lv_obj_t * list, compact_list_fetch_page_cb
     if (data->press_timer) { lv_timer_delete(data->press_timer); data->press_timer = NULL; }
     data->fetch_page = fetch_page;
     data->provider_ctx = ctx;
+    if (fetch_page && !data->cache_rows)
+        data->cache_rows = malloc(COMPACT_LIST_PAGE_CACHE_SIZE * sizeof(*data->cache_rows));
     data->cache_start = -1; /* forces compact_list_ensure_cache() to actually fetch on next window update */
     data->cache_count = 0;
     data->cache_requested_count = 0;
@@ -1077,6 +1171,7 @@ lv_obj_t * build_compact_list_widget(lv_obj_t * parent, const compact_list_item_
     screen_builders_configure_content_scrollbar(list);
     lv_obj_set_style_pad_bottom(list, BOARD_SCALE_PX(8), 0);
     ui_scroll_blit_enable(list); /* rows keep their pixels while the list scrolls */
+    ui_marquee_list_enable(list);
 
     /* Zeroed so fields added later (the landing-rebind skip state) start defined for every list kind */
     compact_list_virtual_data_t * data = calloc(1, sizeof(*data));
@@ -1086,7 +1181,6 @@ lv_obj_t * build_compact_list_widget(lv_obj_t * parent, const compact_list_item_
     data->item_count = item_count;
     data->on_click = on_click;
     data->on_long_press = on_long_press;
-    data->long_press_fired = false;
     data->row_height = ui_list_row_height();
     data->requested_row_height = GUI_ROW_HEIGHT;
     data->row_stride = data->row_height + GUI_ROW_GAP;
@@ -1123,6 +1217,7 @@ lv_obj_t * build_compact_list_widget(lv_obj_t * parent, const compact_list_item_
 
     for (int slot = 0; slot < COMPACT_LIST_POOL_SIZE; slot++) {
         data->action_circles[slot] = NULL;
+        data->row_is_section_header[slot] = false;
         lv_obj_t * row = lv_label_create(list);
         lv_obj_add_style(row, &list_row_style, 0);
         lv_obj_add_style(row, &list_row_pressed_style, LV_STATE_PRESSED);
@@ -1142,13 +1237,13 @@ lv_obj_t * build_compact_list_widget(lv_obj_t * parent, const compact_list_item_
         data->row_logical_index[slot] = -1;
 
         lv_obj_t * leading = lv_image_create(row);
-        lv_obj_align(leading, LV_ALIGN_LEFT_MID, 14, 0);
+        lv_obj_align(leading, LV_ALIGN_LEFT_MID, BOARD_SCALE_PX(14), 0);
         lv_obj_remove_flag(leading, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_flag(leading, LV_OBJ_FLAG_HIDDEN);
         data->leading_images[slot] = leading;
 
         lv_obj_t * trailing = lv_image_create(row);
-        lv_obj_align(trailing, LV_ALIGN_RIGHT_MID, -14, 0);
+        lv_obj_align(trailing, LV_ALIGN_RIGHT_MID, -BOARD_SCALE_PX(14), 0);
         lv_obj_add_flag(trailing, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_flag(trailing, LV_OBJ_FLAG_EVENT_BUBBLE);
         lv_obj_set_ext_click_area(trailing, 18);
@@ -1161,14 +1256,18 @@ lv_obj_t * build_compact_list_widget(lv_obj_t * parent, const compact_list_item_
         ctx->pool_slot = slot;
         ctx->logical_index = -1;
         data->row_ctx[slot] = ctx;
-        lv_obj_add_event_cb(row, compact_list_row_click_cb, LV_EVENT_CLICKED, ctx);
+        lv_obj_add_event_cb(row, compact_list_row_click_cb,
+                            on_long_press ? LV_EVENT_SHORT_CLICKED : LV_EVENT_CLICKED, ctx);
         lv_obj_add_event_cb(row, compact_list_row_press_cb, LV_EVENT_PRESSED, ctx);
         lv_obj_add_event_cb(row, compact_list_row_press_cb, LV_EVENT_PRESS_LOST, ctx);
         lv_obj_add_event_cb(row, compact_list_row_press_cb, LV_EVENT_LONG_PRESSED, ctx);
         lv_obj_add_event_cb(trailing, compact_list_trailing_press_cb, LV_EVENT_PRESSED, ctx);
         lv_obj_add_event_cb(trailing, compact_list_trailing_press_cb, LV_EVENT_PRESS_LOST, ctx);
         lv_obj_add_event_cb(trailing, compact_list_trailing_click_cb, LV_EVENT_CLICKED, ctx);
-        if (on_long_press) lv_obj_add_event_cb(row, compact_list_row_long_press_cb, LV_EVENT_LONG_PRESSED, ctx);
+        if (on_long_press) {
+            lv_obj_add_event_cb(row, compact_list_row_long_press_cb, LV_EVENT_LONG_PRESSED, ctx);
+            lv_obj_add_event_cb(row, compact_list_row_menu_release_cb, LV_EVENT_CLICKED, ctx);
+        }
     }
 
     /* 1x1 invisible spacer at the bottom of the FULL virtual list -- not
@@ -1350,6 +1449,7 @@ void compact_list_refresh_decorations_for(lv_obj_t * list, compact_list_key_matc
         uint64_t artwork_key = 0;
         const char * artwork_name = NULL;
         bool is_action = false;
+        bool is_section_header = false;
         bool row_data_available = true;
         if (data->fetch_page) {
             int cache_idx = index - data->cache_start;
@@ -1361,12 +1461,14 @@ void compact_list_refresh_decorations_for(lv_obj_t * list, compact_list_key_matc
                 artwork_key = info->artwork_key;
                 artwork_name = info->artwork_name[0] ? info->artwork_name : NULL;
                 is_action = info->is_action;
+                is_section_header = info->is_section_header;
             }
         } else {
             identity = data->items[index].identity;
             artwork_key = data->items[index].artwork_key;
             artwork_name = data->items[index].artwork_name;
             is_action = data->items[index].is_action;
+            is_section_header = data->items[index].is_section_header;
         }
 
         if (!row_data_available) {
@@ -1383,7 +1485,7 @@ void compact_list_refresh_decorations_for(lv_obj_t * list, compact_list_key_matc
         }
         data->row_artwork_key[slot] = artwork_key;
         if (compact_list_run_row_decorator(list, data, slot, index, identity,
-                                           artwork_key, artwork_name, is_action))
+                                           artwork_key, artwork_name, is_action, is_section_header))
             data->image_repaint[slot] = true;
         compact_list_align_row_decoration(data, slot, is_action);
     }
@@ -1444,18 +1546,34 @@ void compact_list_set_row_height(lv_obj_t * list, int32_t row_height) {
     compact_list_update_window(list, data);
 }
 
+static void compact_list_restyle_play_controls(lv_obj_t * obj) {
+    if (gui_play_bar_is(obj)) {
+        gui_play_bar_restyle(obj);
+        return;
+    }
+    int32_t children = lv_obj_get_child_count(obj);
+    for (int32_t i = 0; i < children; i++)
+        compact_list_restyle_play_controls(lv_obj_get_child(obj, i));
+}
+
 void compact_list_refresh_font_layout(lv_obj_t * list) {
     compact_list_virtual_data_t * data = lv_obj_get_user_data(list);
     if (!data) return;
     int32_t old_stride = data->row_stride;
     int32_t old_y = lv_obj_get_scroll_y(list);
+    int32_t old_header_height = data->header ? lv_obj_get_height(data->header) : 0;
     compact_list_set_row_height(list, data->requested_row_height);
     if (old_stride != data->row_stride)
         lv_obj_scroll_to_y(list, (int32_t)((int64_t)old_y * data->row_stride / old_stride), LV_ANIM_OFF);
-    if (data->paged_header && gui_play_bar_is(data->paged_header)) {
-        gui_play_bar_restyle(data->paged_header);
+    /* Artist headers are regular list children, while the library Play / Shuffle
+     * bars are stored as paged_header. Refresh any marked play controls in either
+     * shape after a font-tier change. */
+    compact_list_restyle_play_controls(list);
+    if (data->paged_header)
         compact_list_set_paged_header(list, data->paged_header, lv_obj_get_height(data->paged_header));
-    }
+    else if (data->header)
+        compact_list_set_header(list, data->header,
+            data->top_offset + lv_obj_get_height(data->header) - old_header_height);
     compact_list_refresh_visible(list);
 }
 
@@ -1484,6 +1602,7 @@ void compact_list_set_header(lv_obj_t * list, lv_obj_t * header, int32_t height)
     COMPACT_LIST_DATA_OR_RETURN("set_header");
     if (height < 0 || !header) height = 0;
     int32_t old_top = data->top_offset;
+    data->header = height > 0 ? header : NULL;
     data->top_offset = height;
     if (header) {
         int32_t x = (lv_display_get_horizontal_resolution(lv_display_get_default()) - lv_obj_get_width(header)) / 2;
@@ -1534,6 +1653,14 @@ void compact_list_refetch(lv_obj_t * list) {
     compact_list_cancel_pending_job(data);
     data->cache_requested_count = 0;
     compact_list_update_window(list, data);
+}
+
+bool compact_list_copy_cached_row(lv_obj_t *list, int index, compact_list_page_row_t *out) {
+    COMPACT_LIST_DATA_OR_RETURN("copy_cached_row", false);
+    int at = index - data->cache_start;
+    if (!out || !data->fetch_page || at < 0 || at >= data->cache_count) return false;
+    *out = data->cache_rows[at];
+    return true;
 }
 
 bool compact_list_rederive_cached(lv_obj_t * list, bool (*fn)(int index, compact_list_page_row_t * row, void * ctx),

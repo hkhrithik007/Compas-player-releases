@@ -79,7 +79,6 @@ enum tag_type {
 #define FLAG_WAV_ID3_TAGS 0x0002 /* persisted: WAV tags read with ID3 precedence */
 #define FLAG_ORIGINAL_YEAR_TAGS 0x0004 /* persisted: tags read with original-year precedence (one re-read of every file) */
 #define FLAG_SEEN 0x01000000 /* RAM-only, stripped before persist */
-#define FLAG_TAGS_INCOMPLETE 0x02000000 /* RAM-only: unique-tag seek missed on load */
 #define FLAG_RAM_ONLY (FLAG_SEEN | FLAG_TAGS_INCOMPLETE)
 #ifndef TAGCACHE_MAX_ENTRIES
 #define TAGCACHE_MAX_ENTRIES 524288
@@ -129,7 +128,8 @@ typedef struct {
     bool query_cache_valid;
     uint64_t query_cache_block;
     uint32_t query_cache_values[TC_QUERY_BLOCK_VALUES];
-    struct { bool valid; int32_t slot; unsigned loaded; tagcache_song_t song; } sort_cache[READER_SORT_CACHE_ROWS];
+    bool sort_cache_valid[READER_SORT_CACHE_ROWS];
+    struct { int32_t slot; unsigned loaded; tagcache_song_t song; } sort_cache[READER_SORT_CACHE_ROWS];
 } reader_context_t;
 #define READER (selected_reader ? selected_reader : &committed_reader)
 #define ent_count (READER->entries)
@@ -150,6 +150,7 @@ typedef struct {
 #define reader_sort_failed (READER->sort_failed)
 #define reader_sort_kind (READER->sort_kind)
 #define reader_sort_cache (READER->sort_cache)
+#define reader_sort_cache_valid (READER->sort_cache_valid)
 #define reader_query_fd (READER->query_fd)
 #define reader_artist_names_fd (READER->artist_names_fd)
 #define reader_title_fd (READER->title_fd)
@@ -246,6 +247,8 @@ bool tagcache_sort_prefix(const char *value, unsigned char *prefix, size_t width
 int tagcache_sort_prefix_compare(const unsigned char *a, const unsigned char *b, size_t width, bool *full_compare);
 const char * ascii_casestr(const char * hay, const char * needle);
 int db_logical_directory_status(void);
+/* Advances tagcache_stats_revision(): a value the committed reader shows changed. */
+void tagcache_stats_changed(void);
 bool db_identity_current(void);
 bool db_pin_directory(const char * dir);
 bool tc_read_full(int fd, void *buf, size_t size, off_t offset);
@@ -270,7 +273,7 @@ bool collect_load_generations(int32_t ** out, size_t * count, int32_t pointed, b
 bool tagcache_flush_numeric(void);
 void numeric_worker_start(void);
 void numeric_worker_stop(void);
-void queue_numeric_update(int32_t slot, const struct index_entry *idx, int *waiter);
+bool queue_numeric_update(int32_t slot, const struct index_entry *idx, int *waiter);
 void numeric_overlay(int32_t slot, struct index_entry *idx);
 
 /* tagcache_scan.c */

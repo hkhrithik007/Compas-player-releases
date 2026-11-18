@@ -1,5 +1,6 @@
 #include "../setup/gui_setup.h"
 #include "gui_volume_settings.h"
+#include "../gui_native_audio.h"
 #include "../gui_settings.h"
 #include "../../../audio/engine/audio.h"
 #include "../../player/screen/gui_player.h"
@@ -7,21 +8,19 @@
 #include "../../shell/gui_navigation.h"
 #include "../../appearance/gui_theme.h"
 #include "../../widgets/builders/screen_builders.h"
-#include "../../../plugins/manager/plugin_manager.h"
+#include "../../../core/persistence/native_audio_settings.h"
 #include "../../../core/persistence/settings.h"
 #include "../../text/i18n/i18n.h"
 
 #include <stdio.h>
 
 static lv_obj_t * startup_volume_screen;
-static lv_obj_t * max_volume_screen;
 static setting_slider_t startup_volume_ui;
 static setting_slider_t max_volume_ui;
 static setting_slider_t car_mode_volume_ui;
 static lv_obj_t * car_mode_screen;
 static lv_obj_t * car_mode_autoresume_switch;
-static lv_obj_t * car_mode_gain_row;
-static lv_obj_t * car_mode_gain_dropdown;
+static lv_obj_t * car_mode_gain_switch;
 
 static void format_percent(char * buf, size_t buf_size, int percent) {
     snprintf(buf, buf_size, "%d%%", percent);
@@ -49,34 +48,6 @@ static void startup_volume_slider_event_cb(lv_event_t * e) {
     } else if (code == LV_EVENT_RELEASED) {
         settings_save_async(&current_settings);
     }
-}
-
-/* Toggle plus a percent slider in one card, greyed out while the toggle is off. */
-static lv_obj_t * build_startup_volume_screen(void) {
-    lv_obj_t * scr = lv_obj_create(NULL);
-    lv_obj_add_style(scr, &style_theme_screen_bg, 0);
-
-    build_screen_header(scr, TR("Startup Volume"), generic_back_cb, NULL, NULL);
-
-    startup_volume_ui = build_setting_slider(scr, &(setting_slider_cfg_t) {
-        .toggle_label = TR("Launch at a fixed volume"),
-        .checked = current_settings.startup_volume_fixed_enabled,
-        .switch_cb = startup_volume_switch_event_cb,
-        .caption = TR("Volume"),
-        .max_index = 100,
-        .index = current_settings.startup_volume_fixed_percent,
-        .fmt = format_percent,
-        .slider_cb = startup_volume_slider_event_cb,
-    });
-    lv_obj_align(startup_volume_ui.card, LV_ALIGN_TOP_MID, 0, STATUS_BAR_CLEARANCE + TITLE_ROW_HEIGHT + 20);
-
-    finalize_screen_navigation(scr);
-    return scr;
-}
-
-void gui_volume_settings_startup_volume_row_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    nav_push(startup_volume_screen);
 }
 
 /* Unlike startup_volume_slider_event_cb, this DOES apply live: the whole
@@ -107,35 +78,41 @@ static void max_volume_slider_event_cb(lv_event_t * e) {
     }
 }
 
-/* Simpler than build_startup_volume_screen(): no enable toggle, since 100%
- * (the default) already means "uncapped" with no separate off state to
- * track. */
-static lv_obj_t * build_max_volume_screen(void) {
+/* Startup volume and the live maximum share one page; 100% means uncapped. */
+static void volume_screen_loaded_cb(lv_event_t *e) {
+    (void)e;
+    setting_slider_sync(&startup_volume_ui, current_settings.startup_volume_fixed_enabled, current_settings.startup_volume_fixed_percent);
+    setting_slider_set_index(&max_volume_ui, current_settings.max_volume_percent);
+}
+
+static lv_obj_t * build_volume_screen(void) {
     lv_obj_t * scr = lv_obj_create(NULL);
+    lv_obj_add_event_cb(scr, volume_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
     lv_obj_add_style(scr, &style_theme_screen_bg, 0);
-
-    build_screen_header(scr, TR("Max Volume"), generic_back_cb, NULL, NULL);
-
+    build_screen_header(scr, TR("Volume limits"), generic_back_cb, NULL, NULL);
     lv_obj_t * content = build_settings_body(scr);
-
-    build_setting_hint(content, TR("Limits the player volume, including buttons, remote controls and plugins."));
-
-    max_volume_ui = build_setting_slider(content, &(setting_slider_cfg_t) {
-        .caption = TR("Volume"),
-        .min_index = 1,
-        .max_index = 100,
-        .index = current_settings.max_volume_percent,
-        .fmt = format_percent,
-        .slider_cb = max_volume_slider_event_cb,
+    add_section_header(content, TR("Startup volume"));
+    startup_volume_ui = build_setting_slider(content, &(setting_slider_cfg_t) {
+        .toggle_label = TR("Launch at a fixed volume"),
+        .checked = current_settings.startup_volume_fixed_enabled,
+        .switch_cb = startup_volume_switch_event_cb,
+        .caption = TR("Volume"), .max_index = 100,
+        .index = current_settings.startup_volume_fixed_percent,
+        .fmt = format_percent, .slider_cb = startup_volume_slider_event_cb,
     });
-
+    add_section_header(content, TR("Max volume"));
+    build_setting_hint(content, TR("Limits the player volume, including buttons, remote controls and plugins."));
+    max_volume_ui = build_setting_slider(content, &(setting_slider_cfg_t) {
+        .caption = TR("Volume"), .min_index = 1, .max_index = 100,
+        .index = current_settings.max_volume_percent,
+        .fmt = format_percent, .slider_cb = max_volume_slider_event_cb,
+    });
     finalize_screen_navigation(scr);
     return scr;
 }
 
-void gui_volume_settings_max_volume_row_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    nav_push(max_volume_screen);
+void gui_volume_settings_volume_row_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) nav_push(startup_volume_screen);
 }
 
 static void car_mode_volume_slider_event_cb(lv_event_t * e) {
@@ -168,14 +145,6 @@ static void car_mode_autoresume_switch_event_cb(lv_event_t * e) {
     settings_save_async(&current_settings);
 }
 
-static void car_mode_gain_dropdown_event_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
-    int index = plugin_manager_find_quick_toggle_by_id("gain");
-    if (index < 0) return;
-    plugin_manager_quick_toggle_set(index, lv_dropdown_get_selected(lv_event_get_target(e)) == 1);
-    gui_shell_refresh_quick_drawer_expansion_toggles();
-}
-
 static void car_mode_screen_loaded_cb(lv_event_t * e) {
     (void) e;
     gui_settings_sync_car_mode();
@@ -188,16 +157,9 @@ static void build_car_mode_autoresume(lv_obj_t * body) {
         &car_mode_autoresume_switch);
 }
 
-/* Gain remains owned by the Gain plugin; this selector uses its registered
- * quick toggle so the plugin keeps its existing persistence and behavior. */
+/* Share the native Low/High gain control with Sound. */
 static void build_car_mode_gain_row(lv_obj_t * body) {
-    lv_obj_t * row;
-    car_mode_gain_row = build_setting_label_card(body, TR("Gain"), &row);
-    car_mode_gain_dropdown = lv_dropdown_create(row);
-    lv_dropdown_set_options(car_mode_gain_dropdown, TR("Low\nHigh"));
-    gui_style_settings_dropdown(car_mode_gain_dropdown);
-    lv_obj_set_width(car_mode_gain_dropdown, BOARD_SCALE_PX(170));
-    lv_obj_add_event_cb(car_mode_gain_dropdown, car_mode_gain_dropdown_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    car_mode_gain_switch = gui_native_audio_add_gain_row(body);
 }
 
 static lv_obj_t * build_car_mode_screen(void) {
@@ -205,12 +167,12 @@ static lv_obj_t * build_car_mode_screen(void) {
     lv_obj_add_style(scr, &style_theme_screen_bg, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    build_screen_header(scr, TR("Car Mode"), generic_back_cb, NULL, NULL);
+    build_screen_header(scr, TR("Car mode"), generic_back_cb, NULL, NULL);
 
     lv_obj_t * body = build_settings_body(scr);
 
     car_mode_volume_ui = build_setting_slider(body, &(setting_slider_cfg_t) {
-        .toggle_label = TR("Car Mode"),
+        .toggle_label = TR("Car mode"),
         .checked = current_settings.car_mode_enabled,
         .switch_cb = car_mode_enable_switch_event_cb,
         .caption = TR("Volume"),
@@ -253,21 +215,11 @@ void gui_settings_sync_car_mode(void) {
         if (current_settings.car_mode_autoresume_enabled) lv_obj_add_state(car_mode_autoresume_switch, LV_STATE_CHECKED);
         else lv_obj_clear_state(car_mode_autoresume_switch, LV_STATE_CHECKED);
     }
-    if (car_mode_gain_row && car_mode_gain_dropdown) {
-        int index = plugin_manager_find_quick_toggle_by_id("gain");
-        if (index < 0) {
-            lv_obj_add_flag(car_mode_gain_row, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(car_mode_gain_row, LV_OBJ_FLAG_HIDDEN);
-            lv_dropdown_set_selected(car_mode_gain_dropdown,
-                plugin_manager_get_quick_toggle_value(index) ? 1U : 0U);
-        }
-    }
+    if (car_mode_gain_switch) gui_native_audio_refresh_gain();
 }
 
 void gui_volume_settings_build_startup_max_screens(void) {
-    startup_volume_screen = build_startup_volume_screen();
-    max_volume_screen = build_max_volume_screen();
+    startup_volume_screen = build_volume_screen();
 }
 
 void gui_volume_settings_build_car_mode_screen(void) {
@@ -276,13 +228,13 @@ void gui_volume_settings_build_car_mode_screen(void) {
 
 void gui_volume_settings_teardown_startup_max_screens(void) {
     if (startup_volume_screen) { lv_obj_delete(startup_volume_screen); startup_volume_screen = NULL; }
-    if (max_volume_screen) { lv_obj_delete(max_volume_screen); max_volume_screen = NULL; }
+    startup_volume_ui = (setting_slider_t) { 0 };
+    max_volume_ui = (setting_slider_t) { 0 };
 }
 
 void gui_volume_settings_teardown_car_mode_screen(void) {
     if (car_mode_screen) { lv_obj_delete(car_mode_screen); car_mode_screen = NULL; }
     car_mode_autoresume_switch = NULL;
-    car_mode_gain_row = NULL;
-    car_mode_gain_dropdown = NULL;
+    car_mode_gain_switch = NULL;
     car_mode_volume_ui = (setting_slider_t) { 0 };
 }
