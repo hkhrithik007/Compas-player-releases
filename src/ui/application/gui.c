@@ -150,8 +150,8 @@ static uint32_t boot_splash_start_tick = 0;
  * Uses asset_path("boot_animation/en/0.jpg"), matching the JPEG drawn by the
  * bootloader to provide a seamless visual handoff without decode discrepancies.
  *
- * An override placed at /usr/data/theme_overrides/boot_animation/en/0.jpg is
- * picked up automatically via asset_path(). If the file does not exist,
+ * Plugin overrides are not claimed yet at this point, so the stock image
+ * shows. If the file does not exist,
  * SCREEN_BG_COLOR provides a clean black background.
  *
  * lv_layer_top() is hidden while the splash is displayed so status bar icons
@@ -355,6 +355,7 @@ static void apply_boot_audio_and_power(void) {
     GUI_BOOT_CHECKPOINT("LED charging timezone setup begin");
     led_control_apply(current_settings.led_indicator_enabled);
     charge_limiter_poll(current_settings.charge_limiter_enabled, true);
+    (void) charge_limiter_extend_poweron_delay();
     safe_charging_poll(current_settings.safe_charging_enabled, true);
     if (current_settings.timezone[0] != '\0') timezone_apply(current_settings.timezone);
     GUI_BOOT_CHECKPOINT("LED charging timezone setup done");
